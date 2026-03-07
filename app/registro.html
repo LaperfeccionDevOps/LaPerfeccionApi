@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>La Perfección · Registro de usuario</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --brand:#16a34a;
+      --brand2:#2563eb;
+      --text:#0f172a;
+      --muted:#64748b;
+      --border:#e2e8f0;
+    }
+    *{box-sizing:border-box;font-family:system-ui,Segoe UI,Roboto,Arial}
+    body{
+      margin:0;
+      min-height:100vh;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:radial-gradient(circle at top left,#16a34a 0,#16a34a 15%,#2563eb 60%,#0b172a 100%);
+      padding:16px;
+    }
+    .card{
+      background:#fff;
+      padding:24px 26px 26px;
+      border-radius:26px;
+      max-width:460px;
+      width:100%;
+      box-shadow:0 22px 40px rgba(15,23,42,.35);
+    }
+    .title{
+      font-size:20px;
+      font-weight:700;
+      color:var(--text);
+      margin-bottom:4px;
+    }
+    .subtitle{
+      font-size:13px;
+      color:var(--muted);
+      margin-bottom:18px;
+    }
+    .field{margin-bottom:12px;}
+    label{
+      display:block;
+      font-size:13px;
+      font-weight:600;
+      margin-bottom:4px;
+      color:var(--text);
+    }
+    input{
+      width:100%;
+      padding:8px 10px;
+      border-radius:10px;
+      border:1px solid var(--border);
+      font-size:14px;
+    }
+    input:focus{
+      outline:none;
+      border-color:var(--brand2);
+      box-shadow:0 0 0 1px rgba(37,99,235,.3);
+    }
+    .small-row{
+      display:flex;
+      gap:10px;
+    }
+    .small-row .field{flex:1;}
+
+    .checks{
+      margin-top:4px;
+      font-size:12px;
+      color:var(--muted);
+    }
+    .checks label{
+      font-weight:500;
+      display:flex;
+      align-items:flex-start;
+      gap:6px;
+      margin-bottom:6px;
+    }
+    .checks input{
+      width:auto;
+      margin-top:2px;
+    }
+
+    button{
+      width:100%;
+      border:none;
+      margin-top:10px;
+      padding:9px 12px;
+      border-radius:999px;
+      font-size:14px;
+      font-weight:600;
+      background:linear-gradient(135deg,#16a34a,#2563eb);
+      color:#fff;
+      cursor:pointer;
+      transition:transform .06s ease, box-shadow .06s ease, opacity .1s;
+      box-shadow:0 12px 20px rgba(37,99,235,.35);
+    }
+    button:disabled{
+      opacity:.6;
+      cursor:not-allowed;
+      box-shadow:none;
+    }
+
+    .message{
+      margin-top:10px;
+      font-size:13px;
+      padding:8px 10px;
+      border-radius:10px;
+      display:none;
+    }
+    .message.ok{
+      background:#dcfce7;
+      color:#166534;
+      border:1px solid #bbf7d0;
+      display:block;
+    }
+    .message.error{
+      background:#fee2e2;
+      color:#b91c1c;
+      border:1px solid #fecaca;
+      display:block;
+    }
+
+    .bottom{
+      margin-top:12px;
+      font-size:12px;
+      color:var(--muted);
+      text-align:center;
+    }
+    .bottom a{
+      color:var(--brand2);
+      text-decoration:none;
+    }
+    .bottom a:hover{text-decoration:underline;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">Crear cuenta</div>
+    <div class="subtitle">
+      Registra tus datos para solicitar acceso al portal interno de Aseos La Perfección.
+    </div>
+
+    <form id="register-form">
+      <div class="field">
+        <label for="full_name">Nombre completo</label>
+        <input type="text" id="full_name" required />
+      </div>
+
+      <div class="field">
+        <label for="email">Correo corporativo</label>
+        <input type="email" id="email" required />
+      </div>
+
+      <div class="small-row">
+        <div class="field">
+          <label for="username">Usuario</label>
+          <input type="text" id="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Contraseña</label>
+          <input type="password" id="password" required />
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="confirm">Confirmar contraseña</label>
+        <input type="password" id="confirm" required />
+      </div>
+
+      <div class="checks">
+        <label>
+          <input type="checkbox" id="chk-datos" />
+          <span>Acepto el tratamiento de datos personales conforme a las políticas de Aseos La Perfección.</span>
+        </label>
+        <label>
+          <input type="checkbox" id="chk-conflicto" />
+          <span>Declaro que no tengo conflicto de interés con la empresa o lo he informado oportunamente.</span>
+        </label>
+      </div>
+
+      <button type="submit" id="btn-register" disabled>Registrar solicitud</button>
+      <div id="msg" class="message"></div>
+    </form>
+
+    <div class="bottom">
+      ¿Ya tienes usuario?
+      <a href="login.html">Volver al inicio de sesión</a>
+    </div>
+  </div>
+
+  <script>
+    const chkDatos = document.getElementById('chk-datos');
+    const chkConflicto = document.getElementById('chk-conflicto');
+    const btn = document.getElementById('btn-register');
+    const msg = document.getElementById('msg');
+    const form = document.getElementById('register-form');
+
+    function updateButton(){
+      btn.disabled = !(chkDatos.checked && chkConflicto.checked);
+    }
+    chkDatos.addEventListener('change', updateButton);
+    chkConflicto.addEventListener('change', updateButton);
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.className = 'message';
+      msg.style.display = 'none';
+
+      const full_name = document.getElementById('full_name').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value.trim();
+      const confirm = document.getElementById('confirm').value.trim();
+
+      if (!full_name || !email || !username || !password || !confirm) {
+        msg.textContent = 'Por favor completa todos los campos.';
+        msg.classList.add('error');
+        msg.style.display = 'block';
+        return;
+      }
+
+      if (password.length < 4) {
+        msg.textContent = 'La contraseña debe tener al menos 4 caracteres.';
+        msg.classList.add('error');
+        msg.style.display = 'block';
+        return;
+      }
+
+      if (password !== confirm) {
+        msg.textContent = 'Las contraseñas no coinciden.';
+        msg.classList.add('error');
+        msg.style.display = 'block';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Enviando…';
+
+      try {
+        const response = await fetch('http://127.0.0.1:8000/api/auth/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            full_name,
+            email,
+            username,
+            password
+          })
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (response.ok) {
+          msg.textContent = data.message || 'Usuario registrado correctamente.';
+          msg.classList.add('ok');
+          msg.style.display = 'block';
+
+          setTimeout(() => {
+            window.location.href = 'login.html';
+          }, 1500);
+        } else {
+          msg.textContent = data.detail || 'No se pudo registrar el usuario.';
+          msg.classList.add('error');
+          msg.style.display = 'block';
+        }
+
+      } catch (error) {
+        console.error(error);
+        msg.textContent = 'Error al conectar con la API de registro.';
+        msg.classList.add('error');
+        msg.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Registrar solicitud';
+      }
+    });
+  </script>
+</body>
+</html>

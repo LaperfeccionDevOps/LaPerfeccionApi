@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Entrevista Personal</title>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap');
+
+        body {
+            font-family: 'Montserrat', Arial, sans-serif;
+            font-size: 18px;
+            margin: 30px;
+            color: #000;
+        }
+
+        h1 {
+            font-size: 28px;
+        }
+
+        .page {
+            width: 210mm;
+            min-height: 297mm;
+            margin: auto;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        /* ================= ENCABEZADO ================= */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+
+        .img-logo {
+            max-height: 120px;
+            max-width: 220px;
+            width: auto;
+            height: auto;
+        }
+
+        .title {
+            text-align: center;
+            font-weight: bold;
+            margin-top: 25px;
+            margin-bottom: 40px;
+            text-transform: uppercase;
+            font-size: 1.2em;
+            letter-spacing: 1px;
+        }
+
+        /* ================= TABLAS ================= */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+        }
+
+        td, th {
+            border: 1px solid #000;
+            padding: 6px;
+            vertical-align: middle;
+        }
+
+        .label {
+            font-weight: bold;
+            width: 18%;
+        }
+
+        .section-title {
+            background-color: #f0f0f0;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .textarea {
+            height: 140px;
+        }
+
+        .aspectos-generales {
+            font-size: 15px;
+        }
+
+        .aspectos-generales .bold {
+            font-weight: bold;
+        }
+
+        .aspectos-generales p {
+            font-size: 15px;
+            margin: 5px 0 5px 20px;
+        }
+
+        .footer {
+            margin-top: 20px;
+        }
+
+        .concepto {
+            font-weight: bold;
+        }
+
+        /* ================= IMPRESIÓN ================= */
+        @media print {
+            body {
+                margin: 0;
+            }
+            .page {
+                border: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="page">
+
+    <!-- ENCABEZADO -->
+    <div class="header">
+        <img class="img-logo" style="margin-right:300px" src="@LOGO" alt="LOGO IZQUIERDA">
+        <!--<img class="img-logo" src="@LOGO2" alt="LOGO DERECHA">-->
+    </div>
+
+    <div class="title">
+        ENTREVISTA PERSONAL – F-CTH02 V.00
+    </div>
+
+    <!-- DATOS PERSONALES -->
+    <table>
+        <tr>
+            <td class="label">NOMBRES:</td>
+            <td>@NOMBRES</td>
+            <td class="label">DOCUMENTO:</td>
+            <td>@DOCUMENTO</td>
+        </tr>
+        <tr>
+            <td class="label">BARRIO:</td>
+            <td>@BARRIO</td>
+            <td class="label">LOCALIDAD:</td>
+            <td>@LOCALIDAD</td>
+        </tr>
+        <tr>
+            <td class="label">CARGO:</td>
+            <td>@CARGO</td>
+            <td class="label">EDAD:</td>
+            <td>@EDAD</td>
+        </tr>
+        <tr>
+            <td class="label">EST. CIVIL:</td>
+            <td>@ESTADO_CIVIL</td>
+            <td class="label">ESTUDIA:</td>
+            <td>@ESTUDIA</td>
+        </tr>
+        <tr>
+            <td class="label">HIJOS:</td>
+            <td>@HIJOS</td>
+            <td class="label">CELULAR:</td>
+            <td>@CELULAR</td>
+        </tr>
+        <tr>
+            <td class="label">EVALUADOR (A):</td>
+            <td colspan="3">@EVALUADOR</td>
+        </tr>
+    </table>
+
+    <!-- ASPECTOS GENERALES -->
+    <table>
+        <tr>
+            <td colspan="4" class="section-title">
+                ASPECTOS GENERALES DE LA ENTREVISTA – OPERATIVO
+            </td>
+        </tr>
+        <tr>
+            <td colspan="4" class="textarea aspectos-generales">
+                <span class="bold">Aspecto Académico:</span><br>
+                @ASPECTOS_ACADEMICOS<br><br>
+
+                <span class="bold">Aspecto Laboral:</span><br>
+                @EXPERIENCIA<br>
+                <span class="bold">Ha trabajado en ALP?</span> @HA_TRABAJADO_EN_ALP<br>
+                <span class="bold">Validación AM:</span> @VALIDACION_AM<br>
+                <span class="bold">EPS:</span> @EPS<br><br>
+
+                <span class="bold">Aspecto Personal:</span>
+                <p>- FORTALEZAS: @FORTALEZAS</p>
+                <p>- ÁREAS DE MEJORA: @AREAS_DE_MEJORA</p><br>
+
+                <span class="bold">Concepto - Prueba Física:</span> @PRUEBA_FISICA
+            </td>
+        </tr>
+    </table>
+
+    <!-- CONCEPTO FINAL -->
+    <table class="footer">
+        <tr>
+            <td class="label">CONCEPTO FINAL:</td>
+            <td class="concepto">@CONCEPTO_FINAL</td>
+        </tr>
+        <tr>
+            <td class="label">OBSERVACIONES:</td>
+            <td>@OBSERVACIONES</td>
+        </tr>
+    </table>
+
+</div>
+</body>
+</html>

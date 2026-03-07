@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Confirmación de Referencias</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: #fff;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            border: 0px solid #000;
+            padding: 20px;
+        }
+
+        /* ENCABEZADO */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logos {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .logos img {
+            height: 50px;
+        }
+
+        .title {
+            text-align: center;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+
+        /* TABLAS */
+        table {
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        td {
+            border: 1px solid #000;
+            padding: 6px 8px;
+            font-size: 14px;
+            vertical-align: top;
+        }
+
+        .label {
+            font-weight: bold;
+            width: 20%;
+        }
+
+        .value {
+            width: 30%;
+        }
+
+        .section-title {
+            font-weight: bold;
+            margin-top: 10px;
+        }
+
+        .footer-table td {
+            font-weight: bold;
+        }
+        .img-logo {
+            width: 400px;
+            height: auto !important;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+
+    <!-- ENCABEZADO -->
+    <div class="header">
+        <div class="logos">
+            <!-- Reemplaza las rutas por tus logos reales -->
+            <img class="img-logo" src="@LOGO" alt="ASEO">
+            <!-- <img src="logo2.png" alt="Logo 2">
+            <img src="logo3.png" alt="Logo 3"> -->
+        </div>
+        <div>
+            <!-- <img src="logo4.png" alt="Logo 4" style="height:50px;"> -->
+        </div>
+    </div>
+
+    <!-- TÍTULO -->
+    <div class="title">
+        CONFIRMACIÓN REFERENCIAS - F-GTH03 V.03
+    </div>
+
+    <!-- TABLA SUPERIOR -->
+    <table>
+        <tr>
+            <td class="label">TIPO DE REFERENCIAS:</td>
+            <td class="value">LABORALES</td>
+            <td class="label">DOCUMENTO:</td>
+            <td class="value">@IDENTIFICACION</td>
+        </tr>
+        <tr>
+            <td class="label">N° Referencia:</td>
+            <td colspan="3">1</td>
+        </tr>
+    </table>
+
+    <!-- CUADRO PRINCIPAL -->
+    <table>
+        <tr>
+            <td>
+                <p><strong>EMPRESA REFERENCIADA:</strong><br> @EMPRESA_REFERENCIADA<br></p>
+
+                <p><strong>CARGO:</strong><br> @CARGO<br></p>
+
+                <p><strong>TIEMPO LABORADO:</strong><br> @TIEMPO_LABORADO<br></p>
+
+                <p><strong>MOTIVO DEL RETIRO:</strong><br> @MOTIVO_RETIRO<br></p>
+
+                <p><strong>EVALUACIÓN GENERAL DEL DESEMPEÑO:</strong><br> @EVALUACION_DESEMPEÑO<br></p>
+
+                <p><strong>Persona que da la referencia:</strong> @NOMBRE_REFERENCIA<br></p>
+                <p><strong>Teléfono de la referencia:</strong> @TELEFONO_REFERENCIA<br></p>
+            </td>
+        </tr>
+    </table>
+
+    <!-- CONCEPTO FINAL -->
+    <table>
+        <tr>
+            <td class="label">CONCEPTO FINAL:</td>
+            <td>@CONCEPTO_FINAL</td>
+        </tr>
+    </table>
+
+    <!-- OBSERVACIONES -->
+    <table>
+        <tr>
+            <td class="label">Observaciones:</td>
+            <td>@OBSERVACIONES</td>
+        </tr>
+    </table>
+
+    <!-- FECHA -->
+    <table>
+        <tr>
+            <td class="label">Fecha registro:</td>
+            <td>@FECHA_REGISTRO</td>
+        </tr>
+    </table>
+
+    <!-- REFERENCIADOR -->
+    <table class="footer-table">
+        <tr>
+            <td class="label">Referenciador ALP:</td>
+            <td>@REFERENCIADOR_ALP</td>
+        </tr>
+    </table>
+
+</div>
+
+</body>
+</html>

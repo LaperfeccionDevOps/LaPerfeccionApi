@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Autorización Tratamiento de Datos Personales</title>
+    <style>
+            @page {
+                margin-left: 2.5cm;
+                margin-right: 2.5cm;
+            }
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            font-size: 20px;
+            color: #000;
+            line-height: 1.7;
+            margin-top: 40px;
+            margin-bottom: 40px;
+            margin-left: 2.5cm;
+            margin-right: 2.5cm;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        .header img {
+            height: 60px;
+        }
+
+        h2 {
+            text-align: center;
+            font-size: 20px;
+            margin-bottom: 30px;
+            text-transform: uppercase;
+        }
+
+        p {
+            text-align: justify;
+            margin-bottom: 10px;
+        }
+
+        .contacto {
+            margin-top: 15px;
+            text-align: right;
+            padding-left: 80px;
+        }
+
+        .contacto p {
+            margin: 3px 0;
+        }
+
+        .firma {
+            margin-top: 40px;
+        }
+
+        .firma img {
+            height: 70px;
+        }
+
+        .linea-firma {
+            margin-top: 10px;
+            border-top: 1px solid #000;
+            width: 250px;
+        }
+
+        .footer {
+            font-family: Arial, Helvetica, sans-serif;
+            font-size: 20px;
+            color: #000;
+            line-height: 1.7;
+            margin-top: 30px;
+            margin-bottom: 40px;
+        }
+        .img-logo {
+            width: 280px;
+            height: auto !important;
+            margin-top:10px
+        }
+    </style>
+</head>
+<body>
+    <!-- ENCABEZADO -->
+    <div class="header">
+        <img class="img-logo" src="@LOGO" alt="ASEO">
+        <!--<img src="@LOGO_CERTIFICACION" alt="Logo Certificación">-->
+    </div>
+
+    <!-- TÍTULO -->
+    <h2><b>AUTORIZACIÓN TRATAMIENTO DE DATOS PERSONALES</b></h2>
+
+    <!-- CONTENIDO -->
+    <p>
+        Yo <strong>@NOMBRES</strong>, identificado(a) con 
+        <strong>@TIPO_IDENTIFICACION</strong> número <strong>@NUMERO_IDENTIFICACION</strong> 
+        expedida en <strong>@CIUDAD_EXPEDICION</strong>, en cumplimiento de la Ley 1581 de 2012 
+        y el Decreto 1377 de 2013, sobre la protección de Datos Personales, 
+        en calidad de aspirante que hace parte de su proceso de selección de personal 
+        en <strong>ASESOS LA PERFECCIÓN SAS (ALP)</strong>, autorizo expresamente a esta Compañía 
+        para almacenar, consultar, procesar y en general a dar tratamiento a la información 
+        personal que haya suministrado, la cual es indispensable para adelantar el proceso 
+        de selección del cual hago parte.
+    </p>
+
+    <p>
+        En caso de no ser seleccionado, podré solicitar la eliminación de mis datos personales 
+        que hayan sido almacenados en los archivos de ALP y en caso contrario, autorizo su 
+        tratamiento por parte de la Compañía.
+    </p>
+
+    <p>
+        Declaro que he leído la Política sobre Tratamiento de Datos Personales de ALP, disponible en 
+        <strong>Descargar; así como haber sido informado que para conocer los 
+        datos personales que reposan en ALP, actualizarlos y/o corregirlos, debo dirigirme a la 
+        Gerencia de Talento Humano de ALP, a través de los siguientes canales:
+    </p>
+
+    <!-- CONTACTO -->
+    <div class="contacto">
+        <p>• Extensión 1020 del conmutador (571) 420 48 93</p>
+        <p>• Correo electrónico: calidad@aseoslaperfeccion.com</p>
+        <p>• Personalmente en su oficina ubicada en la Calle 4 Bis #53C-50.-<br>
+             Bogotá
+        </p>
+    </div>
+
+    <p class="footer">
+        En constancia de lo anterior se firma en la ciudad de <strong>Bogotá D.C.</strong> 
+        el día <strong>@FECHA_FIRMA</strong>
+    </p>
+
+    <!-- FIRMA -->
+    <div class="firma">
+        <p><strong>Firma autoriza</strong></p>
+        <img src="@FIRMA" alt="Firma">
+        <div class="linea-firma"></div>
+        <p>
+            <strong>@NOMBRES</strong><br>
+            Emitido bajo el correo: @EMAIL
+        </p>
+    </div>
+</body>
+</html>
