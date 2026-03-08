@@ -71,9 +71,14 @@
         .footer-table td {
             font-weight: bold;
         }
+
         .img-logo {
             width: 400px;
             height: auto !important;
+        }
+
+        .uppercase {
+            text-transform: uppercase;
         }
     </style>
 </head>
@@ -117,18 +122,17 @@
     <table>
         <tr>
             <td>
-                <p><strong>EMPRESA REFERENCIADA:</strong><br> @EMPRESA_REFERENCIADA<br></p>
+                <p><strong>EMPRESA REFERENCIADA:</strong><br> <span class="uppercase">@EMPRESA_REFERENCIADA</span><br></p>
 
-                <p><strong>CARGO:</strong><br> @CARGO<br></p>
+                <p><strong>CARGO:</strong><br> <span class="uppercase">@CARGO</span><br></p>
 
-                <p><strong>TIEMPO LABORADO:</strong><br> @TIEMPO_LABORADO<br></p>
+                <p><strong>TIEMPO LABORADO:</strong><br> <span class="uppercase">@TIEMPO_LABORADO</span><br></p>
 
-                <p><strong>MOTIVO DEL RETIRO:</strong><br> @MOTIVO_RETIRO<br></p>
+                <p><strong>MOTIVO DEL RETIRO:</strong><br> <span class="uppercase">@MOTIVO_RETIRO</span><br></p>
 
-                <p><strong>EVALUACIÓN GENERAL DEL DESEMPEÑO:</strong><br> @EVALUACION_DESEMPEÑO<br></p>
-
-                <p><strong>Persona que da la referencia:</strong> @NOMBRE_REFERENCIA<br></p>
-                <p><strong>Teléfono de la referencia:</strong> @TELEFONO_REFERENCIA<br></p>
+                <p><strong>EVALUACIÓN GENERAL DEL DESEMPEÑO:</strong><br> <span class="uppercase">@EVALUACION_DESEMPEÑO</span><br></p>
+                <p><strong class="uppercase">PERSONA QUE DA LA REFERENCIA:</strong> <span class="uppercase">@NOMBRE_REFERENCIA</span><br></p>
+                <p><strong class="uppercase">TELÉFONO DE LA REFERENCIA:</strong> <span class="uppercase">@TELEFONO_REFERENCIA</span><br></p>
             </td>
         </tr>
     </table>
@@ -137,7 +141,7 @@
     <table>
         <tr>
             <td class="label">CONCEPTO FINAL:</td>
-            <td>@CONCEPTO_FINAL</td>
+            <td><span class="uppercase">@CONCEPTO_FINAL</span></td>
         </tr>
     </table>
 
@@ -145,7 +149,7 @@
     <table>
         <tr>
             <td class="label">Observaciones:</td>
-            <td>@OBSERVACIONES</td>
+            <td><span class="uppercase">@OBSERVACIONES</span></td>
         </tr>
     </table>
 
@@ -161,7 +165,7 @@
     <table class="footer-table">
         <tr>
             <td class="label">Referenciador ALP:</td>
-            <td>@REFERENCIADOR_ALP</td>
+            <td><span class="uppercase">@REFERENCIADOR_ALP</span></td>
         </tr>
     </table>
 
