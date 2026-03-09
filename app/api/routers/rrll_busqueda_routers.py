@@ -33,7 +33,6 @@ class TrabajadorBusquedaOut(BaseModel):
     Apellidos: str
     NombreCompleto: str
 
-
 class TrabajadorBusquedaDetalleOut(BaseModel):
     IdRegistroPersonal: int
     IdTipoIdentificacion: int
@@ -53,10 +52,10 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
 
     IdMotivoRetiro: Optional[int] = None
     MotivoRetiroNombre: Optional[str] = None
+    FechaProceso: Optional[str] = None
 
     FechaInicio: Optional[str] = None
     FechaUltimoDiaLaborado: Optional[str] = None
-
 
 class RetiroLaboralCreate(BaseModel):
     IdRegistroPersonal: int
@@ -208,78 +207,126 @@ def buscar_trabajador_detalle_por_documento(
         raise HTTPException(status_code=400, detail=f"tipo_documento inválido: {tipo_documento}. Usa CC, CE, TI o PPT.")
 
     q = text("""
-SELECT
-  rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
-  rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
-  rp."NumeroIdentificacion"    AS "NumeroDocumento",
-  rp."Nombres"                 AS "Nombres",
-  rp."Apellidos"               AS "Apellidos",
-  COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto",
-
-  da."Direccion"               AS "Direccion",
-  da."Barrio"                  AS "Barrio",
-  rp."Celular"                 AS "Telefono",
-  rp."Email"                   AS "Correo",
-
-  cg."NombreCargo"             AS "Cargo",
-
-  COALESCE(rrll."IdCliente", acc."IdCliente")         AS "IdCliente",
-  c."Nombre"                                            AS "ClienteNombre",
-
-  rrll."IdMotivoRetiro"                                 AS "IdMotivoRetiro",
-  mr."Nombre"                                           AS "MotivoRetiroNombre",
-
-  cb."FechaIngreso"::text                               AS "FechaInicio"
-
-FROM public."RegistroPersonal" rp
-
-LEFT JOIN public."DatosAdicionales" da
-  ON da."IdRegistroPersonal" = rp."IdRegistroPersonal"
-
-LEFT JOIN LATERAL (
     SELECT
-      a."IdCliente",
-      a."IdCargo"
-    FROM public."AsignacionCargoCliente" a
-    WHERE a."IdRegistroPersonal" = rp."IdRegistroPersonal"
-    ORDER BY
-      COALESCE(a."FechaActualizacion", a."FechaCreacion") DESC NULLS LAST,
-      a."IdAsignacionCargoCliente" DESC
-    LIMIT 1
-) acc ON true
+      rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+      rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+      rp."NumeroIdentificacion"    AS "NumeroDocumento",
+      rp."Nombres"                 AS "Nombres",
+      rp."Apellidos"               AS "Apellidos",
+      COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto",
 
-LEFT JOIN LATERAL (
-    SELECT
-      rl."IdCliente",
-      rl."IdMotivoRetiro"
-    FROM public."RetiroLaboral" rl
-    WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-      AND rl."Activo" = true
-    ORDER BY rl."IdRetiroLaboral" DESC
-    LIMIT 1
-) rrll ON true
+      da."Direccion"               AS "Direccion",
+      da."Barrio"                  AS "Barrio",
+      rp."Celular"                 AS "Telefono",
+      rp."Email"                   AS "Correo",
 
-LEFT JOIN public."Cliente" c
-  ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
+      cg."NombreCargo"             AS "Cargo",
 
-LEFT JOIN public."MotivoRetiro" mr
-  ON mr."IdMotivoRetiro" = rrll."IdMotivoRetiro"
+      COALESCE(rrll."IdCliente", acc."IdCliente") AS "IdCliente",
+      c."Nombre"                                  AS "ClienteNombre",
 
-LEFT JOIN public."Cargo" cg
-  ON cg."IdCargo" = acc."IdCargo"
+      rrll."IdMotivoRetiro"                       AS "IdMotivoRetiro",
+      mr."Nombre"                                 AS "MotivoRetiroNombre",
+      rrll."FechaProceso"::text                   AS "FechaProceso",
 
-LEFT JOIN LATERAL (
-    SELECT cb2."FechaIngreso"
-    FROM public."ContratacionBasica" cb2
-    WHERE cb2."IdRegistroPersonal" = rp."IdRegistroPersonal"
-    ORDER BY cb2."IdContratacionBasica" DESC
-    LIMIT 1
-) cb ON true
+      cb."FechaIngreso"::text                     AS "FechaInicio"
 
-WHERE rp."IdTipoIdentificacion" = :id_tipo
-  AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
-LIMIT 1;
-""")
+    FROM public."RegistroPersonal" rp
+
+    LEFT JOIN public."DatosAdicionales" da
+      ON da."IdRegistroPersonal" = rp."IdRegistroPersonal"
+
+    LEFT JOIN LATERAL (
+        SELECT
+          a."IdCliente",
+          a."IdCargo"
+        FROM public."AsignacionCargoCliente" a
+        WHERE a."IdRegistroPersonal" = rp."IdRegistroPersonal"
+        ORDER BY
+          COALESCE(a."FechaActualizacion", a."FechaCreacion") DESC NULLS LAST,
+          a."IdAsignacionCargoCliente" DESC
+        LIMIT 1
+    ) acc ON true
+
+    LEFT JOIN LATERAL (
+        SELECT
+          rl."IdCliente",
+          rl."IdMotivoRetiro",
+          rl."FechaProceso"
+        FROM public."RetiroLaboral" rl
+        WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+          AND rl."Activo" = true
+        ORDER BY rl."IdRetiroLaboral" DESC
+        LIMIT 1
+    ) rrll ON true
+
+    LEFT JOIN public."Cliente" c
+      ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
+
+    LEFT JOIN public."MotivoRetiro" mr
+      ON mr."IdMotivoRetiro" = rrll."IdMotivoRetiro"
+
+    LEFT JOIN public."Cargo" cg
+      ON cg."IdCargo" = acc."IdCargo"
+
+    LEFT JOIN LATERAL (
+        SELECT cb2."FechaIngreso"
+        FROM public."ContratacionBasica" cb2
+        WHERE cb2."IdRegistroPersonal" = rp."IdRegistroPersonal"
+        ORDER BY cb2."IdContratacionBasica" DESC
+        LIMIT 1
+    ) cb ON true
+
+    WHERE rp."IdTipoIdentificacion" = :id_tipo
+      AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
+    LIMIT 1;
+    """)
+
+    row = db.execute(q, {"id_tipo": id_tipo, "numero": numero}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No se encontró trabajador con ese documento.")
+
+    out = dict(row)
+
+    # ✅ EXTRA: traer FechaUltimoDiaLaborado (sin romper si no existe)
+    try:
+        q_paz_ops = text("""
+            SELECT "FechaUltimoDiaLaborado"
+            FROM public."PazYSalvoOperaciones"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+            ORDER BY "IdPazYSalvo" DESC
+            LIMIT 1;
+        """)
+        paz = db.execute(q_paz_ops, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
+        out["FechaUltimoDiaLaborado"] = (
+            paz["FechaUltimoDiaLaborado"].isoformat()
+            if paz and paz.get("FechaUltimoDiaLaborado")
+            else None
+        )
+    except ProgrammingError:
+        db.rollback()
+        try:
+            q_paz = text("""
+                SELECT "FechaUltimoDiaLaborado"
+                FROM public."PazYSalvo"
+                WHERE "IdRegistroPersonal" = :id_registro_personal
+                ORDER BY "IdPazYSalvo" DESC
+                LIMIT 1;
+            """)
+            paz2 = db.execute(q_paz, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
+            out["FechaUltimoDiaLaborado"] = (
+                paz2["FechaUltimoDiaLaborado"].isoformat()
+                if paz2 and paz2.get("FechaUltimoDiaLaborado")
+                else None
+            )
+        except Exception:
+            db.rollback()
+            out["FechaUltimoDiaLaborado"] = None
+    except Exception:
+        db.rollback()
+        out["FechaUltimoDiaLaborado"] = None
+
+    return out
     row = db.execute(q, {"id_tipo": id_tipo, "numero": numero}).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="No se encontró trabajador con ese documento.")
