@@ -33,6 +33,7 @@ from api.routers.contratado_routers import router as contratado_router
 from api.routers.configuracion_routers import router as configuracion_router
 from api.routers import retiro_laboral_routers
 from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
+from api.routers.retiro_laboral_adjunto_routers import router as retiro_laboral_adjunto_router
 
 
 app = FastAPI(
@@ -108,6 +109,7 @@ app.include_router(rechazo_contratacion_router)
 app.include_router(configuracion_router, prefix="/api")
 app.include_router(retiro_laboral_routers.router)
 app.include_router(rrll_busqueda_router)
+app.include_router(retiro_laboral_adjunto_router)
 
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
