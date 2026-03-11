@@ -32,7 +32,6 @@ class TrabajadorBusquedaOut(BaseModel):
     Nombres: str
     Apellidos: str
     NombreCompleto: str
-
 class TrabajadorBusquedaDetalleOut(BaseModel):
     IdRegistroPersonal: int
     IdTipoIdentificacion: int
@@ -50,12 +49,18 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     IdCliente: Optional[int] = None
     ClienteNombre: Optional[str] = None
 
+    IdRetiroLaboral: Optional[int] = None
     IdMotivoRetiro: Optional[int] = None
     MotivoRetiroNombre: Optional[str] = None
     FechaProceso: Optional[str] = None
 
+    IdTipificacionRetiro: Optional[int] = None
+    ObservacionRetiro: Optional[str] = None
+    DevolucionCarnet: Optional[bool] = None
+
     FechaInicio: Optional[str] = None
     FechaUltimoDiaLaborado: Optional[str] = None
+
 
 class RetiroLaboralCreate(BaseModel):
     IdRegistroPersonal: int
@@ -225,9 +230,13 @@ def buscar_trabajador_detalle_por_documento(
       COALESCE(rrll."IdCliente", acc."IdCliente") AS "IdCliente",
       c."Nombre"                                  AS "ClienteNombre",
 
+      rrll."IdRetiroLaboral"                      AS "IdRetiroLaboral",
       rrll."IdMotivoRetiro"                       AS "IdMotivoRetiro",
       mr."Nombre"                                 AS "MotivoRetiroNombre",
       rrll."FechaProceso"::text                   AS "FechaProceso",
+      rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
+      rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
+      rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
 
       cb."FechaIngreso"::text                     AS "FechaInicio"
 
@@ -248,17 +257,21 @@ def buscar_trabajador_detalle_por_documento(
         LIMIT 1
     ) acc ON true
 
-    LEFT JOIN LATERAL (
-        SELECT
-          rl."IdCliente",
-          rl."IdMotivoRetiro",
-          rl."FechaProceso"
-        FROM public."RetiroLaboral" rl
-        WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-          AND rl."Activo" = true
-        ORDER BY rl."IdRetiroLaboral" DESC
-        LIMIT 1
-    ) rrll ON true
+   LEFT JOIN LATERAL (
+    SELECT
+      rl."IdRetiroLaboral",
+      rl."IdCliente",
+      rl."IdMotivoRetiro",
+      rl."FechaProceso",
+      rl."IdTipificacionRetiro",
+      rl."ObservacionRetiro",
+      rl."DevolucionCarnet"
+    FROM public."RetiroLaboral" rl
+    WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+      AND rl."Activo" = true
+    ORDER BY rl."IdRetiroLaboral" DESC
+    LIMIT 1
+) rrll ON true
 
     LEFT JOIN public."Cliente" c
       ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
@@ -375,11 +388,14 @@ def validar_retiro_activo(
     db: Session = Depends(get_db)
 ):
     q = text("""
-        SELECT
+            SELECT
             "IdRetiroLaboral",
             "IdRegistroPersonal",
             "IdCliente",
             "IdMotivoRetiro",
+            "IdTipificacionRetiro",
+            "ObservacionRetiro",
+            "DevolucionCarnet",
             "EstadoCasoRRLL",
             "FechaProceso",
             "FechaRetiro",
@@ -388,7 +404,7 @@ def validar_retiro_activo(
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-          AND "Activo" = true
+        AND "Activo" = true
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)

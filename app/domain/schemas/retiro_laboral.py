@@ -20,3 +20,9 @@ class RetiroLaboralEstadoUpdate(BaseModel):
     IdEstadoProceso: int
     FechaCierre: Optional[datetime] = None
     UsuarioActualizacion: Optional[str] = None
+
+class RetiroLaboralDetalleUpdate(BaseModel):
+    IdTipificacionRetiro: Optional[int] = None
+    ObservacionRetiro: Optional[str] = None
+    DevolucionCarnet: Optional[bool] = None
+    UsuarioActualizacion: Optional[str] = None
