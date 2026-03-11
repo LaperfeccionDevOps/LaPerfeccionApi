@@ -154,8 +154,6 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
                 c."Nombre" AS "NombreCliente",
                 rl."IdMotivoRetiro",
                 mr."Nombre" AS "NombreMotivoRetiro",
-                rl."IdEstadoProceso",
-                ep."Nombre" AS "NombreEstadoProceso",
                 rl."FechaProceso",
                 rl."FechaRetiro",
                 rl."FechaCierre",
@@ -164,6 +162,7 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
                 rl."IdTipificacionRetiro",
                 rl."ObservacionRetiro",
                 rl."DevolucionCarnet",
+                rl."EstadoCasoRRLL",
                 rl."Activo",
                 rl."FechaCreacion",
                 rl."FechaActualizacion",
@@ -173,8 +172,6 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
                 ON rl."IdCliente" = c."IdCliente"
             LEFT JOIN public."MotivoRetiro" mr
                 ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            LEFT JOIN public."EstadoProceso" ep
-                ON rl."IdEstadoProceso" = ep."IdEstadoProceso"
             WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
@@ -194,7 +191,6 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar retiro laboral: {str(e)}")
-
 
 @router.put("/{id_retiro_laboral}/estado")
 def actualizar_estado_retiro_laboral(
