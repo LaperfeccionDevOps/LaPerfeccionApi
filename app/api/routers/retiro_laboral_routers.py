@@ -280,56 +280,60 @@ def actualizar_estado_retiro_laboral(
             status_code=500,
             detail=f"Error al actualizar estado del retiro laboral: {str(e)}"
         )
-    
-        @router.put("/{id_retiro_laboral}/detalle")
-        def actualizar_detalle_retiro_laboral(
-            id_retiro_laboral: int,
-            payload: RetiroLaboralDetalleUpdate,
-            db: Session = Depends(get_db)
-        ):
-            try:
-                query = text("""
-                    UPDATE public."RetiroLaboral"
-                    SET
-                        "IdTipificacionRetiro" = :IdTipificacionRetiro,
-                        "ObservacionRetiro" = :ObservacionRetiro,
-                        "DevolucionCarnet" = :DevolucionCarnet,
-                        "FechaActualizacion" = CURRENT_TIMESTAMP,
-                        "UsuarioActualizacion" = :UsuarioActualizacion
-                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
-                    RETURNING
-                        "IdRetiroLaboral",
-                        "IdTipificacionRetiro",
-                        "ObservacionRetiro",
-                        "DevolucionCarnet",
-                        "FechaActualizacion",
-                        "UsuarioActualizacion";
-                """)
 
-                result = db.execute(query, {
-                    "IdTipificacionRetiro": payload.IdTipificacionRetiro,
-                    "ObservacionRetiro": payload.ObservacionRetiro,
-                    "DevolucionCarnet": payload.DevolucionCarnet,
-                    "UsuarioActualizacion": payload.UsuarioActualizacion,
-                    "id_retiro_laboral": id_retiro_laboral
-                })
 
-                retiro_actualizado = result.mappings().first()
+@router.put("/{id_retiro_laboral}/detalle")
+def actualizar_detalle_retiro_laboral(
+    id_retiro_laboral: int,
+    payload: RetiroLaboralDetalleUpdate,
+    db: Session = Depends(get_db)
+):
+    try:
+        query = text("""
+            UPDATE public."RetiroLaboral"
+            SET
+                "IdTipificacionRetiro" = :IdTipificacionRetiro,
+                "ObservacionRetiro" = :ObservacionRetiro,
+                "DevolucionCarnet" = :DevolucionCarnet,
+                "FechaActualizacion" = CURRENT_TIMESTAMP,
+                "UsuarioActualizacion" = :UsuarioActualizacion
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral
+            RETURNING
+                "IdRetiroLaboral",
+                "IdTipificacionRetiro",
+                "ObservacionRetiro",
+                "DevolucionCarnet",
+                "FechaActualizacion",
+                "UsuarioActualizacion";
+        """)
 
-                if not retiro_actualizado:
-                    db.rollback()
-                    raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+        result = db.execute(query, {
+            "IdTipificacionRetiro": payload.IdTipificacionRetiro,
+            "ObservacionRetiro": payload.ObservacionRetiro,
+            "DevolucionCarnet": payload.DevolucionCarnet,
+            "UsuarioActualizacion": payload.UsuarioActualizacion,
+            "id_retiro_laboral": id_retiro_laboral
+        })
 
-                db.commit()
+        retiro_actualizado = result.mappings().first()
 
-                return {
-                    "success": True,
-                    "message": "Detalle del retiro laboral actualizado correctamente.",
-                    "data": dict(retiro_actualizado)
-                }
+        if not retiro_actualizado:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-            except HTTPException:
-                raise
-            except Exception as e:
-                db.rollback()
-                raise HTTPException(status_code=500, detail=f"Error al actualizar detalle del retiro laboral: {str(e)}")
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Detalle del retiro laboral actualizado correctamente.",
+            "data": dict(retiro_actualizado)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar detalle del retiro laboral: {str(e)}"
+        )
