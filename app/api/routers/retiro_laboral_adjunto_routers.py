@@ -12,7 +12,8 @@ from infrastructure.db.deps import get_db
 
 router = APIRouter(prefix="/api/rrll", tags=["RRLL - Adjuntos"])
 
-BASE_STORAGE = Path("storage/rrll/retiros")
+APP_DIR = Path(__file__).resolve().parents[2]
+BASE_STORAGE = APP_DIR / "storage" / "rrll" / "retiros"
 
 
 class RetiroAdjuntoOut(BaseModel):
@@ -277,11 +278,19 @@ def descargar_adjunto(
           AND COALESCE("Activo", true) = true
         LIMIT 1;
     """)
+
     row = db.execute(q, {"id_adjunto": id_adjunto}).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="No existe el adjunto.")
 
-    ruta = Path(row["RutaArchivo"])
+    ruta_guardada = row["RutaArchivo"] or ""
+    ruta = Path(ruta_guardada)
+
+    if not ruta.is_absolute():
+        ruta = APP_DIR / ruta
+
+    ruta = ruta.resolve()
+
     if not ruta.exists():
         raise HTTPException(status_code=404, detail="El archivo no existe físicamente en servidor.")
 
@@ -290,7 +299,6 @@ def descargar_adjunto(
         media_type=row["MimeType"] or "application/pdf",
         filename=row["NombreDescarga"]
     )
-
 
 @router.delete("/adjuntos/{id_adjunto}")
 def eliminar_adjunto(
