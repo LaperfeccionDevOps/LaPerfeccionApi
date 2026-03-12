@@ -15,10 +15,11 @@ class RetiroLaboralCreate(BaseModel):
     ObservacionGeneral: Optional[str] = None
     UsuarioActualizacion: Optional[str] = None
 
-
 class RetiroLaboralEstadoUpdate(BaseModel):
+    EstadoCasoRRLL: str
     IdEstadoProceso: int
     FechaCierre: Optional[datetime] = None
+    FechaEnvioNomina: Optional[datetime] = None
     UsuarioActualizacion: Optional[str] = None
 
 class RetiroLaboralDetalleUpdate(BaseModel):

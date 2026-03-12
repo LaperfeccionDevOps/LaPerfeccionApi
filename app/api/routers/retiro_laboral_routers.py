@@ -199,29 +199,65 @@ def actualizar_estado_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
-        query = text("""
+        # 1. Buscar el IdRegistroPersonal del retiro
+        query_retiro = text("""
+            SELECT
+                "IdRetiroLaboral",
+                "IdRegistroPersonal"
+            FROM public."RetiroLaboral"
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+        """)
+
+        retiro_row = db.execute(
+            query_retiro,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro_row:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+
+        id_registro_personal = retiro_row["IdRegistroPersonal"]
+
+        # 2. Actualizar trazabilidad del caso en RetiroLaboral
+        query_update_retiro = text("""
             UPDATE public."RetiroLaboral"
             SET
-                "IdEstadoProceso" = :IdEstadoProceso,
+                "EstadoCasoRRLL" = :EstadoCasoRRLL,
                 "FechaCierre" = :FechaCierre,
+                "FechaEnvioNomina" = :FechaEnvioNomina,
                 "FechaActualizacion" = CURRENT_TIMESTAMP,
                 "UsuarioActualizacion" = :UsuarioActualizacion
             WHERE "IdRetiroLaboral" = :id_retiro_laboral
             RETURNING "IdRetiroLaboral";
         """)
 
-        result = db.execute(query, {
-            "IdEstadoProceso": payload.IdEstadoProceso,
+        result_retiro = db.execute(query_update_retiro, {
+            "EstadoCasoRRLL": payload.EstadoCasoRRLL,
             "FechaCierre": payload.FechaCierre,
+            "FechaEnvioNomina": payload.FechaEnvioNomina,
             "UsuarioActualizacion": payload.UsuarioActualizacion,
             "id_retiro_laboral": id_retiro_laboral
         })
 
-        retiro_actualizado = result.scalar()
+        retiro_actualizado = result_retiro.scalar()
 
         if not retiro_actualizado:
             db.rollback()
-            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+            raise HTTPException(status_code=404, detail="No se pudo actualizar el retiro laboral.")
+
+        # 3. Actualizar estado oficial del trabajador en RegistroPersonal
+        query_update_registro = text("""
+            UPDATE public."RegistroPersonal"
+            SET
+                "IdEstadoProceso" = :IdEstadoProceso
+            WHERE "IdRegistroPersonal" = :IdRegistroPersonal;
+        """)
+
+        db.execute(query_update_registro, {
+            "IdEstadoProceso": payload.IdEstadoProceso,
+            "IdRegistroPersonal": id_registro_personal
+        })
 
         db.commit()
 
@@ -230,6 +266,8 @@ def actualizar_estado_retiro_laboral(
             "message": "Estado del retiro laboral actualizado correctamente.",
             "data": {
                 "IdRetiroLaboral": retiro_actualizado,
+                "IdRegistroPersonal": id_registro_personal,
+                "EstadoCasoRRLL": payload.EstadoCasoRRLL,
                 "IdEstadoProceso": payload.IdEstadoProceso
             }
         }
@@ -238,58 +276,60 @@ def actualizar_estado_retiro_laboral(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error al actualizar estado del retiro laboral: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar estado del retiro laboral: {str(e)}"
+        )
+    
+        @router.put("/{id_retiro_laboral}/detalle")
+        def actualizar_detalle_retiro_laboral(
+            id_retiro_laboral: int,
+            payload: RetiroLaboralDetalleUpdate,
+            db: Session = Depends(get_db)
+        ):
+            try:
+                query = text("""
+                    UPDATE public."RetiroLaboral"
+                    SET
+                        "IdTipificacionRetiro" = :IdTipificacionRetiro,
+                        "ObservacionRetiro" = :ObservacionRetiro,
+                        "DevolucionCarnet" = :DevolucionCarnet,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :UsuarioActualizacion
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                    RETURNING
+                        "IdRetiroLaboral",
+                        "IdTipificacionRetiro",
+                        "ObservacionRetiro",
+                        "DevolucionCarnet",
+                        "FechaActualizacion",
+                        "UsuarioActualizacion";
+                """)
 
+                result = db.execute(query, {
+                    "IdTipificacionRetiro": payload.IdTipificacionRetiro,
+                    "ObservacionRetiro": payload.ObservacionRetiro,
+                    "DevolucionCarnet": payload.DevolucionCarnet,
+                    "UsuarioActualizacion": payload.UsuarioActualizacion,
+                    "id_retiro_laboral": id_retiro_laboral
+                })
 
-@router.put("/{id_retiro_laboral}/detalle")
-def actualizar_detalle_retiro_laboral(
-    id_retiro_laboral: int,
-    payload: RetiroLaboralDetalleUpdate,
-    db: Session = Depends(get_db)
-):
-    try:
-        query = text("""
-            UPDATE public."RetiroLaboral"
-            SET
-                "IdTipificacionRetiro" = :IdTipificacionRetiro,
-                "ObservacionRetiro" = :ObservacionRetiro,
-                "DevolucionCarnet" = :DevolucionCarnet,
-                "FechaActualizacion" = CURRENT_TIMESTAMP,
-                "UsuarioActualizacion" = :UsuarioActualizacion
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral
-            RETURNING
-                "IdRetiroLaboral",
-                "IdTipificacionRetiro",
-                "ObservacionRetiro",
-                "DevolucionCarnet",
-                "FechaActualizacion",
-                "UsuarioActualizacion";
-        """)
+                retiro_actualizado = result.mappings().first()
 
-        result = db.execute(query, {
-            "IdTipificacionRetiro": payload.IdTipificacionRetiro,
-            "ObservacionRetiro": payload.ObservacionRetiro,
-            "DevolucionCarnet": payload.DevolucionCarnet,
-            "UsuarioActualizacion": payload.UsuarioActualizacion,
-            "id_retiro_laboral": id_retiro_laboral
-        })
+                if not retiro_actualizado:
+                    db.rollback()
+                    raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-        retiro_actualizado = result.mappings().first()
+                db.commit()
 
-        if not retiro_actualizado:
-            db.rollback()
-            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+                return {
+                    "success": True,
+                    "message": "Detalle del retiro laboral actualizado correctamente.",
+                    "data": dict(retiro_actualizado)
+                }
 
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Detalle del retiro laboral actualizado correctamente.",
-            "data": dict(retiro_actualizado)
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error al actualizar detalle del retiro laboral: {str(e)}")
+            except HTTPException:
+                raise
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(status_code=500, detail=f"Error al actualizar detalle del retiro laboral: {str(e)}")
