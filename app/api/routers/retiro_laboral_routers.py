@@ -9,7 +9,10 @@ from domain.schemas.retiro_laboral import (
     RetiroLaboralDetalleUpdate,
 )
 
-from services.rrll_documentos_service import generar_y_registrar_primer_llamado
+from services.rrll_documentos_service import (
+    generar_y_registrar_primer_llamado,
+    generar_y_registrar_segundo_llamado,
+)
 
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
@@ -364,4 +367,32 @@ def generar_primer_llamado_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error al generar y registrar el primer llamado: {str(e)}"
+        )
+
+
+@router.post("/{id_retiro_laboral}/documentos/segundo-llamado/generar")
+def generar_segundo_llamado_endpoint(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        row = generar_y_registrar_segundo_llamado(
+            db=db,
+            id_retiro_laboral=id_retiro_laboral,
+            usuario_actualizacion="RRLL"
+        )
+
+        return {
+            "success": True,
+            "message": "Segundo llamado generado y registrado correctamente.",
+            "data": row
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar y registrar el segundo llamado: {str(e)}"
         )
