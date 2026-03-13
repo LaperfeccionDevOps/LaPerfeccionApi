@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 from domain.schemas.retiro_laboral import (
@@ -8,6 +8,8 @@ from domain.schemas.retiro_laboral import (
     RetiroLaboralEstadoUpdate,
     RetiroLaboralDetalleUpdate,
 )
+
+from services.rrll_documentos_service import generar_y_registrar_primer_llamado
 
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
@@ -192,6 +194,7 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar retiro laboral: {str(e)}")
 
+
 @router.put("/{id_retiro_laboral}/estado")
 def actualizar_estado_retiro_laboral(
     id_retiro_laboral: int,
@@ -199,7 +202,6 @@ def actualizar_estado_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
-        # 1. Buscar el IdRegistroPersonal del retiro
         query_retiro = text("""
             SELECT
                 "IdRetiroLaboral",
@@ -219,7 +221,6 @@ def actualizar_estado_retiro_laboral(
 
         id_registro_personal = retiro_row["IdRegistroPersonal"]
 
-        # 2. Actualizar trazabilidad del caso en RetiroLaboral
         query_update_retiro = text("""
             UPDATE public."RetiroLaboral"
             SET
@@ -246,7 +247,6 @@ def actualizar_estado_retiro_laboral(
             db.rollback()
             raise HTTPException(status_code=404, detail="No se pudo actualizar el retiro laboral.")
 
-        # 3. Actualizar estado oficial del trabajador en RegistroPersonal
         query_update_registro = text("""
             UPDATE public."RegistroPersonal"
             SET
@@ -336,4 +336,32 @@ def actualizar_detalle_retiro_laboral(
         raise HTTPException(
             status_code=500,
             detail=f"Error al actualizar detalle del retiro laboral: {str(e)}"
+        )
+
+
+@router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
+def generar_primer_llamado_endpoint(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        row = generar_y_registrar_primer_llamado(
+            db=db,
+            id_retiro_laboral=id_retiro_laboral,
+            usuario_actualizacion="RRLL"
+        )
+
+        return {
+            "success": True,
+            "message": "Primer llamado generado y registrado correctamente.",
+            "data": row
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar y registrar el primer llamado: {str(e)}"
         )
