@@ -42,7 +42,10 @@ def _clean_text(value):
 def _replace_text_in_paragraph(paragraph, replacements: dict):
     for key, value in replacements.items():
         if key in paragraph.text:
-            paragraph.text = paragraph.text.replace(key, str(value))
+            # Intentar reemplazar sin destruir formato
+            for run in paragraph.runs:
+                if key in run.text:
+                    run.text = run.text.replace(key, str(value))
 
 
 def _replace_text_in_table(table, replacements: dict):
