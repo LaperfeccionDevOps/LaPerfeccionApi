@@ -12,6 +12,7 @@ from domain.schemas.retiro_laboral import (
 from services.rrll_documentos_service import (
     generar_y_registrar_primer_llamado,
     generar_y_registrar_segundo_llamado,
+    generar_y_registrar_carta_finalizacion,
 )
 
 
@@ -395,4 +396,32 @@ def generar_segundo_llamado_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error al generar y registrar el segundo llamado: {str(e)}"
+        )
+
+
+@router.post("/{id_retiro_laboral}/documentos/carta-finalizacion/generar")
+def generar_carta_finalizacion_endpoint(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        row = generar_y_registrar_carta_finalizacion(
+            db=db,
+            id_retiro_laboral=id_retiro_laboral,
+            usuario_actualizacion="RRLL"
+        )
+
+        return {
+            "success": True,
+            "message": "Carta de finalización generada y registrada correctamente.",
+            "data": row
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar y registrar la carta de finalización: {str(e)}"
         )
