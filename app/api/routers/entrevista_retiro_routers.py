@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import uuid
 from typing import List
 from io import BytesIO
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,6 +30,9 @@ router = APIRouter(
     tags=["Entrevista Retiro"]
 )
 
+BASE_DIR = Path(__file__).resolve().parent
+PDF_DIR = BASE_DIR / "entrevistas_pdf"
+PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 # =========================================================
 #   SCHEMAS
@@ -54,6 +58,39 @@ class GuardarEntrevistaRequest(BaseModel):
 # =========================================================
 def _valor_respuesta(r):
     return r.get("RespuestaOpcion") or r.get("RespuestaTexto") or ""
+
+
+def _formatear_fecha_colombia(fecha):
+    if not fecha:
+        return ""
+
+    try:
+        tz_col = timezone(timedelta(hours=-5))
+
+        if isinstance(fecha, str):
+            fecha = fecha.strip().replace("Z", "+00:00")
+            fecha_dt = datetime.fromisoformat(fecha)
+        else:
+            fecha_dt = fecha
+
+        # Si viene sin zona, asumimos UTC
+        if fecha_dt.tzinfo is None:
+            fecha_utc = fecha_dt.replace(tzinfo=timezone.utc)
+        else:
+            fecha_utc = fecha_dt.astimezone(timezone.utc)
+
+        fecha_col = fecha_utc.astimezone(tz_col)
+
+        fecha_str = fecha_col.strftime("%d/%m/%Y")
+        hora_str = fecha_col.strftime("%I:%M %p").lower()
+        hora_str = hora_str.lstrip("0")
+        hora_str = hora_str.replace("am", "a. m.").replace("pm", "p. m.")
+
+        return f"{fecha_str} {hora_str}"
+
+    except Exception as e:
+        print("Error formateando fecha Colombia:", repr(e))
+        return str(fecha)
 
 
 def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
@@ -86,7 +123,7 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
         alignment=TA_LEFT,
         fontSize=11,
         leading=14,
-        textColor=colors.HexColor("#0f172a"),
+        textColor=colors.HexColor("#059669"),
         spaceAfter=8,
     )
 
@@ -117,14 +154,13 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
     )
 
     elements = []
-
-    elements.append(Paragraph("ENTREVISTA DE RETIRO", title_style))
+    elements.append(Paragraph("ENTREVISTA DE RETIRO ASEOS LA PERFECCIÓN S.A.S", title_style))
     elements.append(Spacer(1, 8))
 
-    nombre = cabecera.get("NombreCompleto", "")
-    documento = cabecera.get("NumeroIdentificacionConfirmada", "")
-    fecha_envio = str(cabecera.get("FechaEnvio", "") or "")
-    estado = cabecera.get("Estado", "")
+    nombre = (cabecera.get("NombreCompleto") or "").upper()
+    documento = str(cabecera.get("NumeroIdentificacionConfirmada") or "").upper()
+    fecha_envio = (_formatear_fecha_colombia(cabecera.get("FechaEnvio")) or "").upper()
+    estado = (cabecera.get("Estado") or "").upper()
 
     cabecera_data = [
         ["Trabajador", nombre],
@@ -148,8 +184,9 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
     elements.append(tabla_cabecera)
     elements.append(Spacer(1, 14))
 
-    observaciones = [r for r in respuestas if int(r.get("Orden", 0)) <= 8]
-    dotacion = [r for r in respuestas if int(r.get("Orden", 0)) >= 9]
+    descripcion_retiro = [r for r in respuestas if int(r.get("Orden", 0)) == 1]
+    observaciones = [r for r in respuestas if 2 <= int(r.get("Orden", 0)) <= 9]
+    dotacion = [r for r in respuestas if int(r.get("Orden", 0)) >= 10]
 
     def render_bloque(titulo: str, items: list[dict]):
         if not items:
@@ -171,7 +208,7 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
         tabla = Table(rows, colWidths=[4.3 * inch, 2.3 * inch], repeatRows=1)
         tabla.setStyle(
             TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#10b981")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -185,8 +222,9 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
         elements.append(tabla)
         elements.append(Spacer(1, 12))
 
-    render_bloque("1. OBSERVACIONES FINALES", observaciones)
-    render_bloque("2. ENTREGA DE DOTACIÓN", dotacion)
+    render_bloque("1. DESCRIPCIÓN DEL RETIRO", descripcion_retiro)
+    render_bloque("2. OBSERVACIONES FINALES", observaciones)
+    render_bloque("3. ENTREGA DE DOTACIÓN", dotacion)
 
     doc.build(elements)
     buffer.seek(0)
@@ -383,6 +421,111 @@ def validar_acceso_entrevista_retiro(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al validar acceso de entrevista: {str(e)}"
+        )
+
+
+# =========================================================
+#   CONSULTAR FORMULARIO PÚBLICO POR TOKEN
+# =========================================================
+@router.get(
+    "/entrevista-retiro/formulario-por-token",
+    summary="Consultar formulario público de entrevista de retiro por token"
+)
+def consultar_formulario_entrevista_por_token(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        retiro = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    rl."TokenEntrevista",
+                    rl."EstadoEntrevista",
+                    rp."NumeroIdentificacion",
+                    rp."Nombres",
+                    rp."Apellidos"
+                FROM "RetiroLaboral" rl
+                INNER JOIN "RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                WHERE rl."TokenEntrevista" = :token
+                LIMIT 1
+            """),
+            {"token": token}
+        ).mappings().first()
+
+        if not retiro:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Token de entrevista no válido"
+            )
+
+        if retiro["EstadoEntrevista"] != "PENDIENTE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La entrevista ya no se encuentra disponible"
+            )
+
+        entrevista_existente = db.execute(
+            text("""
+                SELECT 1
+                FROM "EntrevistaRetiro"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                LIMIT 1
+            """),
+            {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
+        ).first()
+
+        if entrevista_existente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La entrevista de retiro ya fue diligenciada"
+            )
+
+        preguntas = db.execute(
+            text("""
+                SELECT
+                    "IdPreguntaEntrevistaRetiro",
+                    "CodigoPregunta",
+                    "TextoPregunta",
+                    "TipoRespuesta",
+                    "EsObligatoria",
+                    "Orden",
+                    "Activa"
+                FROM "EntrevistaRetiroPregunta"
+                WHERE "Activa" = TRUE
+                ORDER BY "Orden" ASC
+            """)
+        ).mappings().all()
+
+        nombre_completo = f'{retiro["Nombres"]} {retiro["Apellidos"]}'.strip()
+
+        return {
+            "message": "Formulario consultado correctamente",
+            "data": {
+                "IdRetiroLaboral": retiro["IdRetiroLaboral"],
+                "IdRegistroPersonal": retiro["IdRegistroPersonal"],
+                "NumeroIdentificacion": str(retiro["NumeroIdentificacion"]).strip(),
+                "NombreCompleto": nombre_completo,
+                "EstadoEntrevista": retiro["EstadoEntrevista"],
+                "Preguntas": [dict(p) for p in preguntas]
+            }
+        }
+
+    except HTTPException as e:
+        raise e
+
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error SQL al consultar formulario por token: {str(e)}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al consultar formulario por token: {str(e)}"
         )
 
 
@@ -763,6 +906,7 @@ def consultar_entrevista_retiro_por_retiro(
 )
 def generar_pdf_entrevista_retiro(
     id_retiro_laboral: int,
+    descargar: bool = Query(False),
     db: Session = Depends(get_db),
 ):
     try:
@@ -795,6 +939,23 @@ def generar_pdf_entrevista_retiro(
                 detail="No existe entrevista de retiro para ese IdRetiroLaboral"
             )
 
+       # ✅ Si ya existe el PDF en disco, devolverlo sin regenerar
+        ruta_pdf_guardada = cabecera.get("RutaPdf")
+        if ruta_pdf_guardada:
+            archivo_pdf = Path(ruta_pdf_guardada)
+            if archivo_pdf.exists() and archivo_pdf.is_file():
+                return FileResponse(
+                    path=str(archivo_pdf),
+                    media_type="application/pdf",
+                    filename=archivo_pdf.name,
+                    headers={
+                        "Content-Disposition": (
+                            f'attachment; filename="{archivo_pdf.name}"'
+                            if descargar
+                            else f'inline; filename="{archivo_pdf.name}"'
+                        )
+                    }
+                )
         respuestas = db.execute(
             text("""
                 SELECT
@@ -824,24 +985,38 @@ def generar_pdf_entrevista_retiro(
 
         pdf_buffer = _build_entrevista_pdf(data_cabecera, [dict(r) for r in respuestas])
 
+        nombre_archivo = f"entrevista_retiro_{id_retiro_laboral}.pdf"
+        ruta_pdf = PDF_DIR / nombre_archivo
+
+        with open(ruta_pdf, "wb") as f:
+            f.write(pdf_buffer.getvalue())
+
         db.execute(
             text("""
                 UPDATE "EntrevistaRetiro"
                 SET
-                    "PdfGenerado" = TRUE
+                    "PdfGenerado" = TRUE,
+                    "RutaPdf" = :ruta_pdf
                 WHERE "IdEntrevistaRetiro" = :id_entrevista
             """),
-            {"id_entrevista": cabecera["IdEntrevistaRetiro"]}
+            {
+                "ruta_pdf": str(ruta_pdf),
+                "id_entrevista": cabecera["IdEntrevistaRetiro"]
+            }
         )
         db.commit()
 
-        nombre_archivo = f'entrevista_retiro_{id_retiro_laboral}.pdf'
+        pdf_buffer.seek(0)
 
         return StreamingResponse(
             pdf_buffer,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'inline; filename="{nombre_archivo}"'
+                "Content-Disposition": (
+                    f'attachment; filename="{nombre_archivo}"'
+                    if descargar
+                    else f'inline; filename="{nombre_archivo}"'
+                )
             }
         )
 
