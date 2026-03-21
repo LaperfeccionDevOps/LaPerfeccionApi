@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -84,11 +85,11 @@ def exportar_excel_retiros(
 
         thin_side = Side(style="thin", color="B7B7B7")
         border_tabla = Border(
-        left=thin_side,
-        right=thin_side,
-        top=thin_side,
-        bottom=thin_side
-)
+            left=thin_side,
+            right=thin_side,
+            top=thin_side,
+            bottom=thin_side
+        )
 
         for col_num, header in enumerate(headers, start=1):
             cell = ws.cell(row=header_row, column=col_num, value=header)
@@ -103,10 +104,25 @@ def exportar_excel_retiros(
             FROM public.fn_reporte_retiros_excel(:fecha_inicio, :fecha_fin)
         """)
 
-        resultados = db.execute(q, {
-            "fecha_inicio": fecha_inicio,
-            "fecha_fin": fecha_fin
-        }).mappings().all()
+        resultados = db.execute(
+            q,
+            {
+                "fecha_inicio": fecha_inicio,
+                "fecha_fin": fecha_fin
+            }
+        ).mappings().all()
+
+        # Tipificaciones para lista desplegable en Excel
+        q_tipificaciones = text("""
+            SELECT "Nombre"
+            FROM public."TipificacionRetiro"
+            ORDER BY "IdTipificacionRetiro"
+        """)
+
+        tipificaciones = [
+            row["Nombre"]
+            for row in db.execute(q_tipificaciones).mappings().all()
+        ]
 
         datos = [
             [
@@ -133,19 +149,53 @@ def exportar_excel_retiros(
             ws.append(fila)
 
         fila_datos_fin = header_row + len(datos)
-        ws.auto_filter.ref = f"A{header_row}:M{fila_datos_fin}"
 
+        # Filtros automáticos
+        ws.auto_filter.ref = f"A{header_row}:M{max(fila_datos_fin, header_row)}"
+
+        # Congelar encabezado
         ws.freeze_panes = "A6"
 
-        for row in ws.iter_rows(min_row=header_row, max_row=fila_datos_fin, min_col=1, max_col=len(headers)):
-         for cell in row:
-          cell.border = border_tabla
+        # Bordes y formato base para tabla
+        for row in ws.iter_rows(
+            min_row=header_row,
+            max_row=max(fila_datos_fin, header_row),
+            min_col=1,
+            max_col=len(headers)
+        ):
+            for cell in row:
+                cell.border = border_tabla
 
         # Centrar algunas columnas
         columnas_centradas = ["A", "B", "G", "H", "I", "J", "L"]
-        for row_num in range(fila_datos_inicio, fila_datos_inicio + len(datos)):
+        for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
             for col in columnas_centradas:
-                ws[f"{col}{row_num}"].alignment = Alignment(horizontal="center", vertical="center")
+                ws[f"{col}{row_num}"].alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True
+                )
+
+        # Hoja oculta para listas desplegables
+        ws_listas = wb.create_sheet(title="Listas")
+        for idx, tip in enumerate(tipificaciones, start=1):
+            ws_listas.cell(row=idx, column=1, value=tip)
+        ws_listas.sheet_state = "hidden"
+
+        # Lista desplegable para TIPIFICACION DE RETIRO (columna L)
+        if tipificaciones:
+            dv_tipificacion = DataValidation(
+                type="list",
+                formula1=f"=Listas!$A$1:$A${len(tipificaciones)}",
+                allow_blank=True
+            )
+            dv_tipificacion.prompt = "Seleccione una tipificación de retiro"
+            dv_tipificacion.promptTitle = "Tipificación de Retiro"
+            dv_tipificacion.error = "Seleccione una tipificación válida de la lista"
+            dv_tipificacion.errorTitle = "Valor no válido"
+
+            ws.add_data_validation(dv_tipificacion)
+            dv_tipificacion.add(f"L6:L{max(fila_datos_fin, 1000)}")
 
         # Ajuste manual de anchos
         anchos = {
