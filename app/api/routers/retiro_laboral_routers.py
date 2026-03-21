@@ -154,31 +154,32 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
     try:
         query = text("""
             SELECT
-                rl."IdRetiroLaboral",
-                rl."IdRegistroPersonal",
-                rl."IdCliente",
-                c."Nombre" AS "NombreCliente",
-                rl."IdMotivoRetiro",
-                mr."Nombre" AS "NombreMotivoRetiro",
-                rl."FechaProceso",
-                rl."FechaRetiro",
-                rl."FechaCierre",
-                rl."FechaEnvioNomina",
-                rl."ObservacionGeneral",
-                rl."IdTipificacionRetiro",
-                rl."ObservacionRetiro",
-                rl."DevolucionCarnet",
-                rl."EstadoCasoRRLL",
-                rl."Activo",
-                rl."FechaCreacion",
-                rl."FechaActualizacion",
-                rl."UsuarioActualizacion"
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."Cliente" c
-                ON rl."IdCliente" = c."IdCliente"
-            LEFT JOIN public."MotivoRetiro" mr
-                ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
+               rl."IdRetiroLaboral",
+        rl."IdRegistroPersonal",
+        rl."IdCliente",
+        c."Nombre" AS "NombreCliente",
+        rl."IdMotivoRetiro",
+        mr."Nombre" AS "NombreMotivoRetiro",
+        rl."FechaProceso",
+        rl."FechaRetiro",
+        rl."FechaCierre",
+        rl."FechaEnvioNomina",
+        rl."ObservacionGeneral",
+        rl."IdTipificacionRetiro",
+        rl."ObservacionRetiro",
+        rl."DevolucionCarnet",
+        rl."RetiroLegalizado",
+        rl."EstadoCasoRRLL",
+        rl."Activo",
+        rl."FechaCreacion",
+        rl."FechaActualizacion",
+        rl."UsuarioActualizacion"
+    FROM public."RetiroLaboral" rl
+    LEFT JOIN public."Cliente" c
+        ON rl."IdCliente" = c."IdCliente"
+    LEFT JOIN public."MotivoRetiro" mr
+        ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
+    WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
         result = db.execute(query, {"id_retiro_laboral": id_retiro_laboral})
@@ -296,9 +297,10 @@ def actualizar_detalle_retiro_laboral(
         query = text("""
             UPDATE public."RetiroLaboral"
             SET
-                "IdTipificacionRetiro" = :IdTipificacionRetiro,
-                "ObservacionRetiro" = :ObservacionRetiro,
-                "DevolucionCarnet" = :DevolucionCarnet,
+                "IdTipificacionRetiro" = COALESCE(:IdTipificacionRetiro, "IdTipificacionRetiro"),
+                "ObservacionRetiro" = COALESCE(:ObservacionRetiro, "ObservacionRetiro"),
+                "DevolucionCarnet" = COALESCE(:DevolucionCarnet, "DevolucionCarnet"),
+                "RetiroLegalizado" = COALESCE(:RetiroLegalizado, "RetiroLegalizado"),
                 "FechaActualizacion" = CURRENT_TIMESTAMP,
                 "UsuarioActualizacion" = :UsuarioActualizacion
             WHERE "IdRetiroLaboral" = :id_retiro_laboral
@@ -307,6 +309,7 @@ def actualizar_detalle_retiro_laboral(
                 "IdTipificacionRetiro",
                 "ObservacionRetiro",
                 "DevolucionCarnet",
+                "RetiroLegalizado",
                 "FechaActualizacion",
                 "UsuarioActualizacion";
         """)
@@ -315,34 +318,36 @@ def actualizar_detalle_retiro_laboral(
             "IdTipificacionRetiro": payload.IdTipificacionRetiro,
             "ObservacionRetiro": payload.ObservacionRetiro,
             "DevolucionCarnet": payload.DevolucionCarnet,
+            "RetiroLegalizado": payload.RetiroLegalizado,
             "UsuarioActualizacion": payload.UsuarioActualizacion,
             "id_retiro_laboral": id_retiro_laboral
         })
 
-        retiro_actualizado = result.mappings().first()
-
-        if not retiro_actualizado:
-            db.rollback()
-            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
-
+        row = result.fetchone()
         db.commit()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="No se encontró el retiro laboral para actualizar."
+            )
 
         return {
             "success": True,
-            "message": "Detalle del retiro laboral actualizado correctamente.",
-            "data": dict(retiro_actualizado)
+            "message": "Detalle del retiro actualizado correctamente.",
+            "data": dict(row._mapping)
         }
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error al actualizar detalle del retiro laboral: {str(e)}"
+            detail=f"Error actualizando detalle del retiro: {str(e)}"
         )
-
-
+    
 @router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
 def generar_primer_llamado_endpoint(
     id_retiro_laboral: int,

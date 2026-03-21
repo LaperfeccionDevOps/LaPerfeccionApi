@@ -26,4 +26,5 @@ class RetiroLaboralDetalleUpdate(BaseModel):
     IdTipificacionRetiro: Optional[int] = None
     ObservacionRetiro: Optional[str] = None
     DevolucionCarnet: Optional[bool] = None
-    UsuarioActualizacion: Optional[str] = None
+    RetiroLegalizado: Optional[str] = None
+    UsuarioActualizacion: str

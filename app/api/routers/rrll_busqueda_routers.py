@@ -32,6 +32,8 @@ class TrabajadorBusquedaOut(BaseModel):
     Nombres: str
     Apellidos: str
     NombreCompleto: str
+
+
 class TrabajadorBusquedaDetalleOut(BaseModel):
     IdRegistroPersonal: int
     IdTipoIdentificacion: int
@@ -134,7 +136,7 @@ TIPO_DOC_TO_ID = {
 
 
 # =========================
-# Helpers: actualizar estado global trabajador
+# Helpers
 # =========================
 def _actualizar_estado_global_trabajador(db: Session, id_registro_personal: int, id_estado_proceso: int):
     q = text("""
@@ -154,6 +156,46 @@ def _validar_estado_caso(valor: str) -> str:
     if v not in ("ABIERTO", "ENVIADO_NOMINA", "CERRADO"):
         raise HTTPException(status_code=400, detail="EstadoCasoRRLL inválido. Usa ABIERTO, ENVIADO_NOMINA o CERRADO.")
     return v
+
+
+def _obtener_fecha_ultimo_dia_laborado(db: Session, id_registro_personal: int):
+    """
+    Regla de negocio para cabecera:
+    1) Intentar desde PazYSalvoOperaciones
+    2) Si no existe tabla o falla, intentar desde PazYSalvo
+    3) Si no hay dato, devolver None
+    """
+    try:
+        q_paz_ops = text("""
+            SELECT "FechaUltimoDiaLaborado"
+            FROM public."PazYSalvoOperaciones"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+            ORDER BY "IdPazYSalvo" DESC
+            LIMIT 1;
+        """)
+        paz = db.execute(q_paz_ops, {"id_registro_personal": id_registro_personal}).mappings().first()
+        if paz and paz.get("FechaUltimoDiaLaborado"):
+            return paz["FechaUltimoDiaLaborado"]
+    except ProgrammingError:
+        db.rollback()
+    except Exception:
+        db.rollback()
+
+    try:
+        q_paz = text("""
+            SELECT "FechaUltimoDiaLaborado"
+            FROM public."PazYSalvo"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+            ORDER BY "IdPazYSalvo" DESC
+            LIMIT 1;
+        """)
+        paz2 = db.execute(q_paz, {"id_registro_personal": id_registro_personal}).mappings().first()
+        if paz2 and paz2.get("FechaUltimoDiaLaborado"):
+            return paz2["FechaUltimoDiaLaborado"]
+    except Exception:
+        db.rollback()
+
+    return None
 
 
 # =========================
@@ -212,87 +254,87 @@ def buscar_trabajador_detalle_por_documento(
         raise HTTPException(status_code=400, detail=f"tipo_documento inválido: {tipo_documento}. Usa CC, CE, TI o PPT.")
 
     q = text("""
-    SELECT
-      rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
-      rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
-      rp."NumeroIdentificacion"    AS "NumeroDocumento",
-      rp."Nombres"                 AS "Nombres",
-      rp."Apellidos"               AS "Apellidos",
-      COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto",
-
-      da."Direccion"               AS "Direccion",
-      da."Barrio"                  AS "Barrio",
-      rp."Celular"                 AS "Telefono",
-      rp."Email"                   AS "Correo",
-
-      cg."NombreCargo"             AS "Cargo",
-
-      COALESCE(rrll."IdCliente", acc."IdCliente") AS "IdCliente",
-      c."Nombre"                                  AS "ClienteNombre",
-
-      rrll."IdRetiroLaboral"                      AS "IdRetiroLaboral",
-      rrll."IdMotivoRetiro"                       AS "IdMotivoRetiro",
-      mr."Nombre"                                 AS "MotivoRetiroNombre",
-      rrll."FechaProceso"::text                   AS "FechaProceso",
-      rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
-      rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
-      rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
-
-      cb."FechaIngreso"::text                     AS "FechaInicio"
-
-    FROM public."RegistroPersonal" rp
-
-    LEFT JOIN public."DatosAdicionales" da
-      ON da."IdRegistroPersonal" = rp."IdRegistroPersonal"
-
-    LEFT JOIN LATERAL (
         SELECT
-          a."IdCliente",
-          a."IdCargo"
-        FROM public."AsignacionCargoCliente" a
-        WHERE a."IdRegistroPersonal" = rp."IdRegistroPersonal"
-        ORDER BY
-          COALESCE(a."FechaActualizacion", a."FechaCreacion") DESC NULLS LAST,
-          a."IdAsignacionCargoCliente" DESC
-        LIMIT 1
-    ) acc ON true
+          rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+          rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+          rp."NumeroIdentificacion"    AS "NumeroDocumento",
+          rp."Nombres"                 AS "Nombres",
+          rp."Apellidos"               AS "Apellidos",
+          COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto",
 
-   LEFT JOIN LATERAL (
-    SELECT
-      rl."IdRetiroLaboral",
-      rl."IdCliente",
-      rl."IdMotivoRetiro",
-      rl."FechaProceso",
-      rl."IdTipificacionRetiro",
-      rl."ObservacionRetiro",
-      rl."DevolucionCarnet"
-    FROM public."RetiroLaboral" rl
-    WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-      AND rl."Activo" = true
-    ORDER BY rl."IdRetiroLaboral" DESC
-    LIMIT 1
-) rrll ON true
+          da."Direccion"               AS "Direccion",
+          da."Barrio"                  AS "Barrio",
+          rp."Celular"                 AS "Telefono",
+          rp."Email"                   AS "Correo",
 
-    LEFT JOIN public."Cliente" c
-      ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
+          cg."NombreCargo"             AS "Cargo",
 
-    LEFT JOIN public."MotivoRetiro" mr
-      ON mr."IdMotivoRetiro" = rrll."IdMotivoRetiro"
+          COALESCE(rrll."IdCliente", acc."IdCliente") AS "IdCliente",
+          c."Nombre"                                  AS "ClienteNombre",
 
-    LEFT JOIN public."Cargo" cg
-      ON cg."IdCargo" = acc."IdCargo"
+          rrll."IdRetiroLaboral"                      AS "IdRetiroLaboral",
+          rrll."IdMotivoRetiro"                       AS "IdMotivoRetiro",
+          mr."Nombre"                                 AS "MotivoRetiroNombre",
+          rrll."FechaProceso"::text                   AS "FechaProceso",
+          rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
+          rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
+          rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
 
-    LEFT JOIN LATERAL (
-        SELECT cb2."FechaIngreso"
-        FROM public."ContratacionBasica" cb2
-        WHERE cb2."IdRegistroPersonal" = rp."IdRegistroPersonal"
-        ORDER BY cb2."IdContratacionBasica" DESC
-        LIMIT 1
-    ) cb ON true
+          cb."FechaIngreso"::text                     AS "FechaInicio"
 
-    WHERE rp."IdTipoIdentificacion" = :id_tipo
-      AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
-    LIMIT 1;
+        FROM public."RegistroPersonal" rp
+
+        LEFT JOIN public."DatosAdicionales" da
+          ON da."IdRegistroPersonal" = rp."IdRegistroPersonal"
+
+        LEFT JOIN LATERAL (
+            SELECT
+              a."IdCliente",
+              a."IdCargo"
+            FROM public."AsignacionCargoCliente" a
+            WHERE a."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            ORDER BY
+              COALESCE(a."FechaActualizacion", a."FechaCreacion") DESC NULLS LAST,
+              a."IdAsignacionCargoCliente" DESC
+            LIMIT 1
+        ) acc ON true
+
+        LEFT JOIN LATERAL (
+            SELECT
+              rl."IdRetiroLaboral",
+              rl."IdCliente",
+              rl."IdMotivoRetiro",
+              rl."FechaProceso",
+              rl."IdTipificacionRetiro",
+              rl."ObservacionRetiro",
+              rl."DevolucionCarnet"
+            FROM public."RetiroLaboral" rl
+            WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+              AND rl."Activo" = true
+            ORDER BY rl."IdRetiroLaboral" DESC
+            LIMIT 1
+        ) rrll ON true
+
+        LEFT JOIN public."Cliente" c
+          ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
+
+        LEFT JOIN public."MotivoRetiro" mr
+          ON mr."IdMotivoRetiro" = rrll."IdMotivoRetiro"
+
+        LEFT JOIN public."Cargo" cg
+          ON cg."IdCargo" = acc."IdCargo"
+
+        LEFT JOIN LATERAL (
+            SELECT cb2."FechaIngreso"
+            FROM public."ContratacionBasica" cb2
+            WHERE cb2."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            ORDER BY cb2."IdContratacionBasica" DESC
+            LIMIT 1
+        ) cb ON true
+
+        WHERE rp."IdTipoIdentificacion" = :id_tipo
+          AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
+        LIMIT 1;
     """)
 
     row = db.execute(q, {"id_tipo": id_tipo, "numero": numero}).mappings().first()
@@ -301,80 +343,8 @@ def buscar_trabajador_detalle_por_documento(
 
     out = dict(row)
 
-    # ✅ EXTRA: traer FechaUltimoDiaLaborado (sin romper si no existe)
-    try:
-        q_paz_ops = text("""
-            SELECT "FechaUltimoDiaLaborado"
-            FROM public."PazYSalvoOperaciones"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-            ORDER BY "IdPazYSalvo" DESC
-            LIMIT 1;
-        """)
-        paz = db.execute(q_paz_ops, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
-        out["FechaUltimoDiaLaborado"] = (
-            paz["FechaUltimoDiaLaborado"].isoformat()
-            if paz and paz.get("FechaUltimoDiaLaborado")
-            else None
-        )
-    except ProgrammingError:
-        db.rollback()
-        try:
-            q_paz = text("""
-                SELECT "FechaUltimoDiaLaborado"
-                FROM public."PazYSalvo"
-                WHERE "IdRegistroPersonal" = :id_registro_personal
-                ORDER BY "IdPazYSalvo" DESC
-                LIMIT 1;
-            """)
-            paz2 = db.execute(q_paz, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
-            out["FechaUltimoDiaLaborado"] = (
-                paz2["FechaUltimoDiaLaborado"].isoformat()
-                if paz2 and paz2.get("FechaUltimoDiaLaborado")
-                else None
-            )
-        except Exception:
-            db.rollback()
-            out["FechaUltimoDiaLaborado"] = None
-    except Exception:
-        db.rollback()
-        out["FechaUltimoDiaLaborado"] = None
-
-    return out
-    row = db.execute(q, {"id_tipo": id_tipo, "numero": numero}).mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="No se encontró trabajador con ese documento.")
-
-    out = dict(row)
-
-    # ✅ EXTRA: traer FechaUltimoDiaLaborado (sin romper si no existe)
-    try:
-        q_paz_ops = text("""
-            SELECT "FechaUltimoDiaLaborado"
-            FROM public."PazYSalvoOperaciones"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-            ORDER BY "IdPazYSalvo" DESC
-            LIMIT 1;
-        """)
-        paz = db.execute(q_paz_ops, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
-        out["FechaUltimoDiaLaborado"] = (paz["FechaUltimoDiaLaborado"].isoformat() if paz and paz.get("FechaUltimoDiaLaborado") else None)
-    except ProgrammingError:
-        db.rollback()
-        try:
-            q_paz = text("""
-                SELECT "FechaUltimoDiaLaborado"
-                FROM public."PazYSalvo"
-                WHERE "IdRegistroPersonal" = :id_registro_personal
-                ORDER BY "IdPazYSalvo" DESC
-                LIMIT 1;
-            """)
-            paz2 = db.execute(q_paz, {"id_registro_personal": out["IdRegistroPersonal"]}).mappings().first()
-            out["FechaUltimoDiaLaborado"] = (paz2["FechaUltimoDiaLaborado"].isoformat() if paz2 and paz2.get("FechaUltimoDiaLaborado") else None)
-        except Exception:
-            db.rollback()
-            out["FechaUltimoDiaLaborado"] = None
-    except Exception:
-        db.rollback()
-        out["FechaUltimoDiaLaborado"] = None
+    fecha_ultimo_dia = _obtener_fecha_ultimo_dia_laborado(db, out["IdRegistroPersonal"])
+    out["FechaUltimoDiaLaborado"] = fecha_ultimo_dia.isoformat() if fecha_ultimo_dia else None
 
     return out
 
@@ -388,7 +358,7 @@ def validar_retiro_activo(
     db: Session = Depends(get_db)
 ):
     q = text("""
-            SELECT
+        SELECT
             "IdRetiroLaboral",
             "IdRegistroPersonal",
             "IdCliente",
@@ -404,49 +374,26 @@ def validar_retiro_activo(
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-        AND "Activo" = true
+          AND "Activo" = true
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)
     active = db.execute(q, {"id_registro_personal": id_registro_personal}).mappings().first()
 
-    # Paz y Salvo -> FechaUltimoDiaLaborado
-    fecha_ultimo_dia = None
-    try:
-        q_paz_ops = text("""
-            SELECT "FechaUltimoDiaLaborado"
-            FROM public."PazYSalvoOperaciones"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-            ORDER BY "IdPazYSalvo" DESC
-            LIMIT 1;
-        """)
-        paz = db.execute(q_paz_ops, {"id_registro_personal": id_registro_personal}).mappings().first()
-        fecha_ultimo_dia = paz["FechaUltimoDiaLaborado"] if paz else None
-    except ProgrammingError:
-        db.rollback()
-        try:
-            q_paz = text("""
-                SELECT "FechaUltimoDiaLaborado"
-                FROM public."PazYSalvo"
-                WHERE "IdRegistroPersonal" = :id_registro_personal
-                ORDER BY "IdPazYSalvo" DESC
-                LIMIT 1;
-            """)
-            paz2 = db.execute(q_paz, {"id_registro_personal": id_registro_personal}).mappings().first()
-            fecha_ultimo_dia = paz2["FechaUltimoDiaLaborado"] if paz2 else None
-        except Exception:
-            db.rollback()
-            fecha_ultimo_dia = None
-    except Exception:
-        db.rollback()
-        fecha_ultimo_dia = None
+    fecha_ultimo_dia = _obtener_fecha_ultimo_dia_laborado(db, id_registro_personal)
 
     if active:
         retiro = dict(active)
         retiro["FechaUltimoDiaLaborado"] = fecha_ultimo_dia
         return {"tieneRetiroActivo": True, "retiro": retiro}
 
-    return {"tieneRetiroActivo": False, "retiro": {"IdRegistroPersonal": id_registro_personal, "FechaUltimoDiaLaborado": fecha_ultimo_dia}}
+    return {
+        "tieneRetiroActivo": False,
+        "retiro": {
+            "IdRegistroPersonal": id_registro_personal,
+            "FechaUltimoDiaLaborado": fecha_ultimo_dia
+        }
+    }
 
 
 # =========================
@@ -459,7 +406,7 @@ def crear_retiro_laboral(
 ):
     estado_caso = _validar_estado_caso(payload.EstadoCasoRRLL)
 
-    # ✅ Regla: solo 1 retiro ACTIVO por trabajador (esto amarra con el índice único WHERE Activo=true)
+    # ✅ Regla: solo 1 retiro ACTIVO por trabajador
     q_active = text("""
         SELECT "IdRetiroLaboral"
         FROM public."RetiroLaboral"
@@ -470,7 +417,10 @@ def crear_retiro_laboral(
     """)
     active = db.execute(q_active, {"id_registro_personal": payload.IdRegistroPersonal}).mappings().first()
     if active:
-        raise HTTPException(status_code=409, detail=f"Ya existe un retiro ACTIVO para este trabajador (IdRetiroLaboral={active['IdRetiroLaboral']}).")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya existe un retiro ACTIVO para este trabajador (IdRetiroLaboral={active['IdRetiroLaboral']})."
+        )
 
     # ✅ Si lo crean como CERRADO o ENVIADO_NOMINA, debe nacer INACTIVO
     activo_inicial = True
@@ -595,7 +545,7 @@ def actualizar_retiro_laboral(
     elif nuevo_estado_caso == "ABIERTO":
         activo_forzado = True
 
-    # ✅ SI VA A QUEDAR Activo=true, validar que no exista otro Activo=true (esto evita el 500 por índice único)
+    # ✅ SI VA A QUEDAR Activo=true, validar que no exista otro Activo=true
     if activo_forzado is True:
         q_other = text("""
             SELECT "IdRetiroLaboral"
@@ -616,7 +566,6 @@ def actualizar_retiro_laboral(
                 detail=f"No se puede activar. Ya existe otro retiro ACTIVO para este trabajador (IdRetiroLaboral={other['IdRetiroLaboral']})."
             )
 
-    # ✅ Reglas de estado global (RegistroPersonal)
     def _aplicar_estado_global_si_corresponde():
         if not nuevo_estado_caso:
             return
@@ -628,7 +577,6 @@ def actualizar_retiro_laboral(
             _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
 
         elif nuevo_estado_caso == "CERRADO":
-            # RRLL cierra y lo manda a nómina
             _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
 
     q_update = text("""
