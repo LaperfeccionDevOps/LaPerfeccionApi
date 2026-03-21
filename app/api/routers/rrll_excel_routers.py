@@ -98,6 +98,8 @@ def exportar_excel_retiros(
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = border_tabla
 
+            ws.row_dimensions[header_row].height = 35
+
         # Datos reales desde la función SQL
         q = text("""
             SELECT *
@@ -166,12 +168,31 @@ def exportar_excel_retiros(
             for cell in row:
                 cell.border = border_tabla
 
+        for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
+             ws.row_dimensions[row_num].height = 30
+
+    # si hay texto largo en descripción u observación, aumentar altura
+        texto_k = ws[f"K{row_num}"].value or ""
+        texto_m = ws[f"M{row_num}"].value or ""
+
+        if len(str(texto_k)) > 40 or len(str(texto_m)) > 40:
+         ws.row_dimensions[row_num].height = 45
+
         # Centrar algunas columnas
         columnas_centradas = ["A", "B", "G", "H", "I", "J", "L"]
         for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
             for col in columnas_centradas:
                 ws[f"{col}{row_num}"].alignment = Alignment(
                     horizontal="center",
+                    vertical="center",
+                    wrap_text=True
+                )
+
+        columnas_texto_largo = ["K", "M"]
+        for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
+            for col in columnas_texto_largo:
+                ws[f"{col}{row_num}"].alignment = Alignment(
+                    horizontal="left",
                     vertical="center",
                     wrap_text=True
                 )
