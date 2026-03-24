@@ -13,9 +13,13 @@ from pydantic import BaseModel  # ✅ para el payload del PUT
 from infrastructure.db.deps import get_db
 from domain.schemas.aspirante import RegistroPersonalCreate, RegistroPersonalOut
 from domain.models.aspirante import RegistroPersonal
-from application.services.aspirante_service import crear_registro, actualizar_registro
+from application.services.aspirante_service import (
+    crear_registro,
+    actualizar_registro,
+    crear_experiencia_laboral_seleccion,
+)
 from infrastructure.security.role_guard import require_roles_ids
-
+from domain.schemas.aspirante import ExperienciaLaboralCreateSeleccionSchema
 router = APIRouter()
 
 # ------------------ Roles (IDs de tu BD) ------------------
@@ -512,3 +516,13 @@ def actualizar_registro_personal_full(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error controlado {str(e)}",
         )
+    
+    # =========================================================
+#   CREAR EXPERIENCIA LABORAL (SELECCIÓN)
+# =========================================================
+@router.post("/experiencia-laboral")
+def crear_experiencia_laboral_seleccion_endpoint(
+    payload: ExperienciaLaboralCreateSeleccionSchema,
+    db: Session = Depends(get_db),
+):
+    return crear_experiencia_laboral_seleccion(db, payload) 
