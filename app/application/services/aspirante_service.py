@@ -5,6 +5,7 @@ from domain.models.aspirante import (
     NucleoFamiliarORM,
     ReferenciaORM,
     ExperienciaLaboralORM,
+    ExperienciaLaboralValidacion,
     DocumentacionORM,
     DatosAdicionalesORM,
 )
@@ -306,4 +307,41 @@ def crear_experiencia_laboral_seleccion(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error controlado creando experiencia laboral: {str(e)}",
+        )
+
+
+def eliminar_experiencia_laboral_seleccion(
+    db: Session,
+    id_experiencia_laboral: int
+) -> dict:
+    try:
+        experiencia = db.query(ExperienciaLaboralORM).filter(
+            ExperienciaLaboralORM.IdExperienciaLaboral == id_experiencia_laboral
+        ).first()
+
+        if not experiencia:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Experiencia laboral no encontrada",
+            )
+
+        db.query(ExperienciaLaboralValidacion).filter(
+            ExperienciaLaboralValidacion.IdExperienciaLaboral == id_experiencia_laboral
+        ).delete(synchronize_session=False)
+
+        db.query(ExperienciaLaboralORM).filter(
+            ExperienciaLaboralORM.IdExperienciaLaboral == id_experiencia_laboral
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        return {"message": "Experiencia laboral eliminada correctamente"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error controlado eliminando experiencia laboral: {str(e)}",
         )

@@ -26,6 +26,7 @@ origins = [
     "http://192.168.10.231:3001",
     "http://192.168.10.210:8302",
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "https://laperfeccion.app",
 ]
 
@@ -36,9 +37,9 @@ app.add_middleware(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
