@@ -8,11 +8,11 @@ from domain.schemas.retiro_laboral import (
     RetiroLaboralEstadoUpdate,
     RetiroLaboralDetalleUpdate,
 )
-
 from services.rrll_documentos_service import (
     generar_y_registrar_primer_llamado,
     generar_y_registrar_segundo_llamado,
     generar_y_registrar_carta_finalizacion,
+    generar_y_registrar_paquete_retiro,
 )
 
 
@@ -429,4 +429,32 @@ def generar_carta_finalizacion_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error al generar y registrar la carta de finalización: {str(e)}"
+        )
+
+
+@router.post("/{id_retiro_laboral}/documentos/paquete-retiro/generar")
+def generar_paquete_retiro_endpoint(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        row = generar_y_registrar_paquete_retiro(
+            db=db,
+            id_retiro_laboral=id_retiro_laboral,
+            usuario_actualizacion="RRLL"
+        )
+
+        return {
+            "success": True,
+            "message": "Paquete de retiro generado y registrado correctamente.",
+            "data": row
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar y registrar el paquete de retiro: {str(e)}"
         )
