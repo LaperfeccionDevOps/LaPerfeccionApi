@@ -71,7 +71,7 @@ def protegido_seleccion(current=Depends(require_roles_ids(ROL_SELECCION))):
 
 
 # ✅ Config central
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES = 360
 
 pwd_context = CryptContext(
     schemes=["pbkdf2_sha256"],
