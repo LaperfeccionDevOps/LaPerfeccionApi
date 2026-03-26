@@ -55,6 +55,7 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     IdMotivoRetiro: Optional[int] = None
     MotivoRetiroNombre: Optional[str] = None
     FechaProceso: Optional[str] = None
+    FechaCierre: Optional[str] = None
 
     IdTipificacionRetiro: Optional[int] = None
     ObservacionRetiro: Optional[str] = None
@@ -276,6 +277,7 @@ def buscar_trabajador_detalle_por_documento(
           rrll."IdMotivoRetiro"                       AS "IdMotivoRetiro",
           mr."Nombre"                                 AS "MotivoRetiroNombre",
           rrll."FechaProceso"::text                   AS "FechaProceso",
+          rrll."FechaCierre"::text                    AS "FechaCierre",
           rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
           rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
           rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
@@ -299,21 +301,24 @@ def buscar_trabajador_detalle_por_documento(
             LIMIT 1
         ) acc ON true
 
-        LEFT JOIN LATERAL (
-            SELECT
-              rl."IdRetiroLaboral",
-              rl."IdCliente",
-              rl."IdMotivoRetiro",
-              rl."FechaProceso",
-              rl."IdTipificacionRetiro",
-              rl."ObservacionRetiro",
-              rl."DevolucionCarnet"
-            FROM public."RetiroLaboral" rl
-            WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-              AND rl."Activo" = true
-            ORDER BY rl."IdRetiroLaboral" DESC
-            LIMIT 1
-        ) rrll ON true
+       LEFT JOIN LATERAL (
+    SELECT
+      rl."IdRetiroLaboral",
+      rl."IdCliente",
+      rl."IdMotivoRetiro",
+      rl."FechaProceso",
+      rl."FechaRetiro",
+      rl."FechaCierre",
+      rl."IdTipificacionRetiro",
+      rl."ObservacionRetiro",
+      rl."DevolucionCarnet",
+      rl."EstadoCasoRRLL",
+      rl."Activo"
+    FROM public."RetiroLaboral" rl
+    WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+    ORDER BY rl."IdRetiroLaboral" DESC
+    LIMIT 1
+) rrll ON true
 
         LEFT JOIN public."Cliente" c
           ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")

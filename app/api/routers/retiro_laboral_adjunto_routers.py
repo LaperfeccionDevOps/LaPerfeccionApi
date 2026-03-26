@@ -46,6 +46,51 @@ def _validar_pdf(file: UploadFile):
     return extension, content_type
 
 
+def _validar_archivo(file: UploadFile):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="El archivo es obligatorio.")
+
+    extension = Path(file.filename).suffix.lower()
+
+    extensiones_permitidas = {
+        ".pdf",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".doc",
+        ".docx",
+    }
+
+    mime_types_permitidos = {
+        "application/pdf",
+        "application/octet-stream",
+        "image/png",
+        "image/jpg",
+        "image/jpeg",
+        "image/webp",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+
+    if extension not in extensiones_permitidas:
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se permiten archivos PDF, imágenes (PNG, JPG, JPEG, WEBP) o Word (DOC, DOCX)."
+        )
+
+    content_type = (file.content_type or "").lower()
+
+    # Permitimos octet-stream porque a veces navegador/Windows lo manda así
+    if content_type and content_type not in mime_types_permitidos:
+        raise HTTPException(
+            status_code=400,
+            detail="El tipo de archivo no es válido. Solo se permiten PDF, imágenes o Word."
+        )
+
+    return extension, content_type or "application/octet-stream"
+
+
 def _obtener_retiro_activo(db: Session, id_retiro_laboral: int):
     q = text("""
         SELECT
@@ -104,13 +149,13 @@ async def cargar_adjunto_retiro(
 ):
     _obtener_retiro_activo(db, id_retiro_laboral)
 
-    extension, content_type = _validar_pdf(file)
+    extension, content_type = _validar_archivo(file)
 
     carpeta_retiro = BASE_STORAGE / str(id_retiro_laboral)
     carpeta_retiro.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nombre_sanitizado = f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{timestamp}.pdf"
+    nombre_sanitizado = f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{timestamp}{extension}"
     ruta_fisica = carpeta_retiro / nombre_sanitizado
 
     contenido = await file.read()

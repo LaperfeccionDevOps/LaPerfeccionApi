@@ -182,7 +182,13 @@ def exportar_excel_retiros(
                 row.get("fecha_ingreso"),
                 row.get("fecha_retiro"),
                 row.get("total_tiempo_de_trabajo"),
-                row.get("retiro_legalizado"),
+                (
+                    "PRESENCIAL"
+                    if str(row.get("retiro_legalizado") or "").strip().upper() == "SI"
+                    else "VIRTUAL"
+                    if str(row.get("retiro_legalizado") or "").strip().upper() == "NO"
+                    else ""
+                ),
                 row.get("descripcion_motivo_especifico_del_retiro"),
                 row.get("tipificacion_de_retiro"),
                 row.get("observacion_que_debe_mejorar_la_compania"),
@@ -333,10 +339,17 @@ def exportar_excel_retiros(
         motivo_counter = Counter()
 
         for row in resultados:
-            retiro_legalizado = normalizar_texto(
+            retiro_legalizado_raw = normalizar_texto(
                 row.get("retiro_legalizado"),
-                "SIN DATO"
+                ""
             ).upper()
+
+            if retiro_legalizado_raw == "SI":
+                retiro_legalizado = "PRESENCIAL"
+            elif retiro_legalizado_raw == "NO":
+                retiro_legalizado = "VIRTUAL"
+            else:
+                retiro_legalizado = ""
 
             tipificacion = normalizar_texto(
                 row.get("tipificacion_de_retiro"),
@@ -351,14 +364,15 @@ def exportar_excel_retiros(
             )
             motivo = normalizar_texto(motivo, "SIN MOTIVO REGISTRADO")
 
-            legalizados_counter[retiro_legalizado] += 1
+            if retiro_legalizado:
+                legalizados_counter[retiro_legalizado] += 1
+
             tipificacion_counter[tipificacion] += 1
             motivo_counter[motivo] += 1
 
         total_retiros = len(resultados)
-        total_legalizados_si = legalizados_counter.get("SI", 0)
-        total_legalizados_no = legalizados_counter.get("NO", 0)
-        total_legalizados_sin_dato = legalizados_counter.get("SIN DATO", 0)
+        total_legalizados_presencial = legalizados_counter.get("PRESENCIAL", 0)
+        total_legalizados_virtual = legalizados_counter.get("VIRTUAL", 0)
 
         tipificacion_top = (
             max(tipificacion_counter.items(), key=lambda x: x[1])[0]
@@ -394,9 +408,8 @@ def exportar_excel_retiros(
 
         metricas = [
             ("Total de retiros analizados", total_retiros),
-            ("Retiros legalizados (SI)", total_legalizados_si),
-            ("Retiros no legalizados (NO)", total_legalizados_no),
-            ("Retiros sin dato de legalización", total_legalizados_sin_dato),
+            ("Retiros presenciales", total_legalizados_presencial),
+            ("Retiros virtuales", total_legalizados_virtual),
             ("Tipificación más frecuente", tipificacion_top),
             ("Motivo de retiro más frecuente", motivo_top),
         ]
@@ -425,7 +438,7 @@ def exportar_excel_retiros(
         style_header(ws_dashboard["A13"])
         style_header(ws_dashboard["B13"])
 
-        estados_legalizados = ["SI", "NO", "SIN DATO"]
+        estados_legalizados = ["PRESENCIAL", "VIRTUAL"]
         fila_legalizados_inicio = 14
 
         for i, estado in enumerate(estados_legalizados, start=fila_legalizados_inicio):
@@ -443,8 +456,8 @@ def exportar_excel_retiros(
         pie_legalizados.varyColors = True
         pie_legalizados.legend = None
 
-        labels_legalizados = Reference(ws_dashboard, min_col=1, min_row=14, max_row=16)
-        data_legalizados = Reference(ws_dashboard, min_col=2, min_row=14, max_row=16)
+        labels_legalizados = Reference(ws_dashboard, min_col=1, min_row=14, max_row=15)
+        data_legalizados = Reference(ws_dashboard, min_col=2, min_row=14, max_row=15)
 
         pie_legalizados.add_data(data_legalizados, titles_from_data=False)
         pie_legalizados.set_categories(labels_legalizados)
@@ -517,20 +530,15 @@ def exportar_excel_retiros(
         bar_tipificaciones.gapWidth = 110
         bar_tipificaciones.overlap = 0
 
-        # Quitar títulos de ejes
         bar_tipificaciones.x_axis.title = None
         bar_tipificaciones.y_axis.title = None
 
-        # Valores en el mismo orden de la tabla
         data_tip = Reference(ws_dashboard, min_col=2, min_row=30, max_row=fila_tip_fin)
-
-        # Categorías desde la tipificación real
         categories_tip = Reference(ws_dashboard, min_col=1, min_row=30, max_row=fila_tip_fin)
 
         bar_tipificaciones.add_data(data_tip, titles_from_data=False)
         bar_tipificaciones.set_categories(categories_tip)
 
-        # Mostrar solo el valor al final de cada barra
         bar_tipificaciones.dLbls = DataLabelList()
         bar_tipificaciones.dLbls.showVal = True
         bar_tipificaciones.dLbls.showCatName = False
@@ -538,25 +546,23 @@ def exportar_excel_retiros(
         bar_tipificaciones.dLbls.showLegendKey = False
         bar_tipificaciones.dLbls.position = "outEnd"
 
-        # Quitar escala inferior
         try:
             bar_tipificaciones.x_axis.delete = True
         except Exception:
             pass
 
-        # Quitar categorías del lado izquierdo del gráfico
         try:
             bar_tipificaciones.y_axis.delete = True
         except Exception:
             pass
 
-        # Quitar cuadrícula
         try:
             bar_tipificaciones.x_axis.majorGridlines = None
         except Exception:
             pass
 
         ws_dashboard.add_chart(bar_tipificaciones, "D28")
+
         # ==================================================
         # BLOQUE 3 - MOTIVOS DE RETIRO (TABLA + GRÁFICA)
         # ==================================================
@@ -572,7 +578,7 @@ def exportar_excel_retiros(
         ws_dashboard["B45"] = "CANTIDAD"
         style_header(ws_dashboard["A45"])
         style_header(ws_dashboard["B45"])
- 
+
         fila_motivo_inicio = 46
         for idx, (motivo, cantidad) in enumerate(top_motivos, start=fila_motivo_inicio):
             ws_dashboard[f"A{idx}"] = motivo
@@ -612,20 +618,15 @@ def exportar_excel_retiros(
         bar_motivos.gapWidth = 110
         bar_motivos.overlap = 0
 
-        # Quitar títulos de ejes
         bar_motivos.x_axis.title = None
         bar_motivos.y_axis.title = None
 
-        # Valores en el mismo orden de la tabla
         data_mot = Reference(ws_dashboard, min_col=2, min_row=46, max_row=fila_motivo_fin)
-
-        # Categorías desde la columna de motivos real
         categories_mot = Reference(ws_dashboard, min_col=1, min_row=46, max_row=fila_motivo_fin)
 
         bar_motivos.add_data(data_mot, titles_from_data=False)
         bar_motivos.set_categories(categories_mot)
 
-        # Mostrar solo el valor al final de cada barra
         bar_motivos.dLbls = DataLabelList()
         bar_motivos.dLbls.showVal = True
         bar_motivos.dLbls.showCatName = False
@@ -633,19 +634,16 @@ def exportar_excel_retiros(
         bar_motivos.dLbls.showLegendKey = False
         bar_motivos.dLbls.position = "outEnd"
 
-        # Quitar escala inferior
         try:
             bar_motivos.x_axis.delete = True
         except Exception:
             pass
 
-        # Quitar categorías del lado izquierdo del gráfico
         try:
             bar_motivos.y_axis.delete = True
         except Exception:
             pass
 
-        # Quitar cuadrícula
         try:
             bar_motivos.x_axis.majorGridlines = None
         except Exception:
