@@ -74,8 +74,10 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
             ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
         LEFT JOIN public."DatosAdicionales" da
             ON rp."IdRegistroPersonal" = da."IdRegistroPersonal"
-        LEFT JOIN public."Cargo" ca
-            ON rp."IdTipoCargo"::integer = ca."IdCargo"
+       LEFT JOIN public."AsignacionCargoCliente" acc
+            ON acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+       LEFT JOIN public."Cargo" ca
+            ON acc."IdCargo" = ca."IdCargo"
         LEFT JOIN public."PazYSalvoOperaciones" psy
             ON psy."IdRetiroLaboral" = rl."IdRetiroLaboral"
         WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
