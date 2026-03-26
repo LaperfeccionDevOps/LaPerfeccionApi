@@ -81,6 +81,19 @@ class ExperienciaLaboralSchema(BaseModel):
 
     class Config:
         orm_mode = True
+        
+class ExperienciaLaboralCreateSeleccionSchema(BaseModel):
+    IdRegistroPersonal: int
+    Cargo: Optional[str] = None
+    Compania: Optional[str] = None
+    TiempoDuracion: Optional[str] = None
+    Funciones: Optional[str] = None
+    JefeInmediato: Optional[str] = None
+    TelefonoJefe: Optional[str] = None
+    TieneExperienciaPrevia: Optional[bool] = True
+
+    class Config:
+        orm_mode = True
 
 
 class DocumentacionSchema(BaseModel):

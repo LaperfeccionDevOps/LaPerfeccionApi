@@ -5,10 +5,14 @@ from domain.models.aspirante import (
     NucleoFamiliarORM,
     ReferenciaORM,
     ExperienciaLaboralORM,
+    ExperienciaLaboralValidacion,
     DocumentacionORM,
     DatosAdicionalesORM,
 )
-from domain.schemas.aspirante import RegistroPersonalCreate
+from domain.schemas.aspirante import (
+    RegistroPersonalCreate,
+    ExperienciaLaboralCreateSeleccionSchema,
+)
 from infrastructure.repositories.aspirante_repo import create
 import base64
 import re
@@ -78,7 +82,6 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
             )
             db.add(relacion)
             documentacion_objs.append(doc_obj)
-            
 
         if payload.DatosAdicionales:
             datos_adicionales_dict = payload.DatosAdicionales.dict()
@@ -158,21 +161,25 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
                 el_data = el.dict()
                 id_exp = el_data.get("IdExperienciaLaboral")
                 if id_exp:
-                    exp_obj = db.query(ExperienciaLaboralORM).filter(ExperienciaLaboralORM.IdExperienciaLaboral == id_exp, ExperienciaLaboralORM.IdRegistroPersonal == id_registro).first()
+                    exp_obj = db.query(ExperienciaLaboralORM).filter(
+                        ExperienciaLaboralORM.IdExperienciaLaboral == id_exp,
+                        ExperienciaLaboralORM.IdRegistroPersonal == id_registro
+                    ).first()
                     if exp_obj:
                         for key, value in el_data.items():
                             if key != "IdExperienciaLaboral":
                                 setattr(exp_obj, key, value)
                         continue  # Ya actualizado, no crear nuevo
-                # Si no existe (o no tiene IdExperienciaLaboral), verificar si ya existe uno igual (por campos únicos, si aplica)
+
+                # Si no existe (o no tiene IdExperienciaLaboral), verificar si ya existe uno igual
                 existe = None
                 if not id_exp:
-                    # Si no hay ID, buscar por campos clave (ajustar si hay campos únicos)
                     existe = db.query(ExperienciaLaboralORM).filter(
                         ExperienciaLaboralORM.IdRegistroPersonal == id_registro,
                         ExperienciaLaboralORM.Cargo == el_data.get("Cargo"),
                         ExperienciaLaboralORM.Compania == el_data.get("Compania")
                     ).first()
+
                 if not existe:
                     new_exp = ExperienciaLaboralORM(**{**el_data, "IdRegistroPersonal": id_registro})
                     db.add(new_exp)
@@ -181,23 +188,42 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
         from domain.models.aspirante import RelacionTipoDocumentacionORM, TipoDocumentacion
         if payload.Documentacion:
             # Buscar relaciones de documentos de ingreso
-            relaciones_ingreso = db.query(RelacionTipoDocumentacionORM).join(DocumentacionORM, RelacionTipoDocumentacionORM.IdDocumento == DocumentacionORM.IdDocumento)
-            relaciones_ingreso = relaciones_ingreso.join(TipoDocumentacion, DocumentacionORM.IdTipoDocumentacion == TipoDocumentacion.IdTipoDocumentacion)
-            relaciones_ingreso = relaciones_ingreso.filter(RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro, TipoDocumentacion.IdCategoria == 6).all()
+            relaciones_ingreso = db.query(RelacionTipoDocumentacionORM).join(
+                DocumentacionORM,
+                RelacionTipoDocumentacionORM.IdDocumento == DocumentacionORM.IdDocumento
+            )
+            relaciones_ingreso = relaciones_ingreso.join(
+                TipoDocumentacion,
+                DocumentacionORM.IdTipoDocumentacion == TipoDocumentacion.IdTipoDocumentacion
+            )
+            relaciones_ingreso = relaciones_ingreso.filter(
+                RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro,
+                TipoDocumentacion.IdCategoria == 6
+            ).all()
 
             # Eliminar relaciones y documentos de ingreso
             ids_doc_ingreso = [rel.IdDocumento for rel in relaciones_ingreso]
             if ids_doc_ingreso:
-                db.query(RelacionTipoDocumentacionORM).filter(RelacionTipoDocumentacionORM.IdDocumento.in_(ids_doc_ingreso), RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro).delete(synchronize_session=False)
-                db.query(DocumentacionORM).filter(DocumentacionORM.IdDocumento.in_(ids_doc_ingreso)).delete(synchronize_session=False)
+                db.query(RelacionTipoDocumentacionORM).filter(
+                    RelacionTipoDocumentacionORM.IdDocumento.in_(ids_doc_ingreso),
+                    RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro
+                ).delete(synchronize_session=False)
+
+                db.query(DocumentacionORM).filter(
+                    DocumentacionORM.IdDocumento.in_(ids_doc_ingreso)
+                ).delete(synchronize_session=False)
 
             # Agregar nuevos documentos de ingreso
             documentacion_objs = []
             for doc in payload.Documentacion:
                 doc_data = doc.dict()
+
                 # Solo agregar si es de ingreso
                 if doc_data.get("IdTipoDocumentacion"):
-                    tipo_doc = db.query(TipoDocumentacion).filter(TipoDocumentacion.IdTipoDocumentacion == doc_data["IdTipoDocumentacion"]).first()
+                    tipo_doc = db.query(TipoDocumentacion).filter(
+                        TipoDocumentacion.IdTipoDocumentacion == doc_data["IdTipoDocumentacion"]
+                    ).first()
+
                     if tipo_doc and tipo_doc.IdCategoria == 6:
                         base64_str = doc_data["DocumentoCargado"]
                         try:
@@ -206,9 +232,11 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
                         except Exception as e:
                             print(f"Error al procesar base64: {e}")
                             doc_data["DocumentoCargado"] = None
+
                         doc_obj = DocumentacionORM(**doc_data)
                         db.add(doc_obj)
                         db.flush()
+
                         relacion = RelacionTipoDocumentacionORM(
                             IdRegistroPersonal=id_registro,
                             IdDocumento=doc_obj.IdDocumento,
@@ -218,7 +246,10 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
 
         # Actualizar DatosAdicionales
         if payload.DatosAdicionales:
-            db.query(DatosAdicionalesORM).filter(DatosAdicionalesORM.IdRegistroPersonal == id_registro).delete()
+            db.query(DatosAdicionalesORM).filter(
+                DatosAdicionalesORM.IdRegistroPersonal == id_registro
+            ).delete()
+
             datos_adicionales_dict = payload.DatosAdicionales.dict()
             datos_adicionales_dict["IdRegistroPersonal"] = id_registro
             datos_adicionales = DatosAdicionalesORM(**datos_adicionales_dict)
@@ -235,4 +266,82 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error controlado {str(e)}",
+        )
+
+
+def crear_experiencia_laboral_seleccion(
+    db: Session,
+    payload: ExperienciaLaboralCreateSeleccionSchema
+) -> ExperienciaLaboralORM:
+    try:
+        registro = db.query(RegistroPersonal).filter(
+            RegistroPersonal.IdRegistroPersonal == payload.IdRegistroPersonal
+        ).first()
+
+        if not registro:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="RegistroPersonal no encontrado",
+            )
+
+        nueva_experiencia = ExperienciaLaboralORM(
+            IdRegistroPersonal=payload.IdRegistroPersonal,
+            Cargo=payload.Cargo,
+            Compania=payload.Compania,
+            TiempoDuracion=payload.TiempoDuracion,
+            Funciones=payload.Funciones,
+            JefeInmediato=payload.JefeInmediato,
+            TelefonoJefe=payload.TelefonoJefe,
+            TieneExperienciaPrevia=payload.TieneExperienciaPrevia,
+        )
+
+        db.add(nueva_experiencia)
+        db.commit()
+        db.refresh(nueva_experiencia)
+
+        return nueva_experiencia
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error controlado creando experiencia laboral: {str(e)}",
+        )
+
+
+def eliminar_experiencia_laboral_seleccion(
+    db: Session,
+    id_experiencia_laboral: int
+) -> dict:
+    try:
+        experiencia = db.query(ExperienciaLaboralORM).filter(
+            ExperienciaLaboralORM.IdExperienciaLaboral == id_experiencia_laboral
+        ).first()
+
+        if not experiencia:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Experiencia laboral no encontrada",
+            )
+
+        db.query(ExperienciaLaboralValidacion).filter(
+            ExperienciaLaboralValidacion.IdExperienciaLaboral == id_experiencia_laboral
+        ).delete(synchronize_session=False)
+
+        db.query(ExperienciaLaboralORM).filter(
+            ExperienciaLaboralORM.IdExperienciaLaboral == id_experiencia_laboral
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        return {"message": "Experiencia laboral eliminada correctamente"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error controlado eliminando experiencia laboral: {str(e)}",
         )

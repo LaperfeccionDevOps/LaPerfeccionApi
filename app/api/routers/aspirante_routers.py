@@ -11,9 +11,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel  # ✅ para el payload del PUT
 
 from infrastructure.db.deps import get_db
-from domain.schemas.aspirante import RegistroPersonalCreate, RegistroPersonalOut
+from domain.schemas.aspirante import (
+    RegistroPersonalCreate,
+    RegistroPersonalOut,
+    ExperienciaLaboralCreateSeleccionSchema,
+)
 from domain.models.aspirante import RegistroPersonal
-from application.services.aspirante_service import crear_registro, actualizar_registro
+from application.services.aspirante_service import (
+    crear_registro,
+    actualizar_registro,
+    crear_experiencia_laboral_seleccion,
+    eliminar_experiencia_laboral_seleccion,
+)
 from infrastructure.security.role_guard import require_roles_ids
 
 router = APIRouter()
@@ -102,6 +111,7 @@ class RegistroPersonalUpdate(BaseModel):
     PesoKilogramos: Optional[float] = None
     AlturaMetros: Optional[float] = None
     UsuarioActualizacion: Optional[str] = None
+
 
 @router.put("/registro-personal/{id_registro}")
 def actualizar_registro_personal(
@@ -316,7 +326,7 @@ def listar_aspirantes(
         """
 
         rows = db.execute(text(sql), params).mappings().all()
-        return rows  # devuelve rp.* incluyendo IdFondoCesantias
+        return rows
 
     except SQLAlchemyError as e:
         raise HTTPException(
@@ -356,21 +366,10 @@ def buscar_aspirantes_por_fecha_y_estado(
     except SQLAlchemyError as e:
         raise HTTPException(status_code=500, detail=f"Error en busqueda: {str(e)}")
 
+
 # =========================================================
 #   OBTENER ASPIRANTE POR DOCUMENTO
 # =========================================================
-# @router.get("/aspirantes/documento/{numero}", response_model=RegistroPersonalOut)
-# def obtener_aspirante_por_documento(
-#     numero: str,
-#     db: Session = Depends(get_db),
-# ):
-#     aspirante = _get_registro_personal_by_documento(db, numero)
-
-#     if not aspirante:
-#         raise HTTPException(status_code=404, detail="Aspirante no encontrado")
-
-#     return aspirante
-
 @router.get("/aspirantes/documento")
 def obtener_registro_personal(
     id: str,
@@ -464,7 +463,7 @@ def obtener_registro_personal(
 
 
 # =========================================================
-#   PUT /registro-personal/full/{id_registro} que usa actualizar_registro para actualizar completamente el registro y sus relaciones.
+#   PUT /registro-personal/full/{id_registro}
 # =========================================================
 @router.put("/registro-personal/full/{id_registro}", response_model=RegistroPersonalOut)
 def actualizar_registro_personal_full(
@@ -476,7 +475,6 @@ def actualizar_registro_personal_full(
     Actualiza completamente un RegistroPersonal y sus relaciones asociadas.
     """
     try:
-        # 1. Consultar el valor de la configuración (tabla "Configuracion", columna "Valor")
         config_row = db.execute(
             text('SELECT "Valor" FROM "Configuracion" WHERE "Nombre" = :nombre LIMIT 1'),
             {"nombre": "RegistrosActualzacionesPermitidos"}
@@ -485,7 +483,6 @@ def actualizar_registro_personal_full(
             raise HTTPException(status_code=500, detail="No se encontró configuración para RegistrosActualizacionesPermitidos")
         valor_config = int(config_row[0])
 
-        # 2. Consultar el contador actual de la tabla ContadorRegistroPersonal
         print('id_registro', id_registro)
         contador_row = db.execute(
             text('SELECT "Contador" FROM "ContadorRegistroPersonal" WHERE "IdRegistroPersonal" = :id LIMIT 1'),
@@ -495,14 +492,12 @@ def actualizar_registro_personal_full(
             raise HTTPException(status_code=400, detail="No se encontró contador para el registro personal")
         contador_actual = int(contador_row[0])
 
-        # 3. Validar si Valor <= Contador
         if valor_config <= contador_actual:
             raise HTTPException(
                 status_code=400,
                 detail="No es posible actualizar el registro ya que alcanzó el límite permitido para actualizar. Para más información, contactar con el área de Talento Humano."
             )
 
-        # 4. Si pasa la validación, actualizar el registro normalmente
         registro = actualizar_registro(db, id_registro, payload)
         return registro
     except HTTPException as e:
@@ -512,3 +507,28 @@ def actualizar_registro_personal_full(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error controlado {str(e)}",
         )
+
+
+# =========================================================
+#   CREAR EXPERIENCIA LABORAL (SELECCIÓN)
+# =========================================================
+@router.post("/experiencia-laboral")
+def crear_experiencia_laboral_seleccion_endpoint(
+    payload: ExperienciaLaboralCreateSeleccionSchema,
+    db: Session = Depends(get_db),
+):
+    return crear_experiencia_laboral_seleccion(db, payload)
+
+
+# =========================================================
+#   ELIMINAR EXPERIENCIA LABORAL (SELECCIÓN)
+# =========================================================
+@router.delete("/experiencia-laboral/{id_experiencia_laboral}")
+def eliminar_experiencia_laboral_endpoint(
+    id_experiencia_laboral: int,
+    db: Session = Depends(get_db),
+):
+    return eliminar_experiencia_laboral_seleccion(
+        db,
+        id_experiencia_laboral
+    )
