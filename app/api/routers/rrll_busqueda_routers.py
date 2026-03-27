@@ -162,6 +162,9 @@ def _validar_estado_caso(valor: str) -> str:
 
 
 def _obtener_fecha_ultimo_dia_laborado(db: Session, id_registro_personal: int):
+
+
+    
     """
     Regla de negocio para cabecera:
     1) Intentar desde PazYSalvoOperaciones
@@ -199,6 +202,48 @@ def _obtener_fecha_ultimo_dia_laborado(db: Session, id_registro_personal: int):
         db.rollback()
 
     return None
+
+def _vincular_entrevista_pendiente_a_retiro(
+    db: Session,
+    id_registro_personal: int,
+    id_retiro_laboral: int
+):
+    """
+    Busca la entrevista de retiro más reciente pendiente de vincular
+    para el trabajador y la asocia al retiro recién creado/actualizado.
+    """
+    entrevista_pendiente = db.execute(
+        text("""
+            SELECT "IdEntrevistaRetiro"
+            FROM public."EntrevistaRetiro"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+              AND "IdRetiroLaboral" IS NULL
+              AND "Estado" = 'PENDIENTE_VINCULAR'
+            ORDER BY "FechaCreacion" DESC, "IdEntrevistaRetiro" DESC
+            LIMIT 1
+        """),
+        {"id_registro_personal": id_registro_personal}
+    ).mappings().first()
+
+    if not entrevista_pendiente:
+        return None
+
+    vinculada = db.execute(
+        text("""
+            UPDATE public."EntrevistaRetiro"
+            SET
+                "IdRetiroLaboral" = :id_retiro_laboral,
+                "Estado" = 'VINCULADA'
+            WHERE "IdEntrevistaRetiro" = :id_entrevista
+            RETURNING "IdEntrevistaRetiro", "IdRetiroLaboral", "Estado"
+        """),
+        {
+            "id_retiro_laboral": id_retiro_laboral,
+            "id_entrevista": entrevista_pendiente["IdEntrevistaRetiro"]
+        }
+    ).mappings().first()
+
+    return vinculada
 
 
 # =========================
@@ -499,15 +544,24 @@ def crear_retiro_laboral(
             "activo": activo_inicial,
             "usuario_actualizacion": payload.UsuarioActualizacion,
         }).mappings().first()
+
+        if row:
+            _vincular_entrevista_pendiente_a_retiro(
+                db=db,
+                id_registro_personal=row["IdRegistroPersonal"],
+                id_retiro_laboral=row["IdRetiroLaboral"]
+            )
+
         db.commit()
+
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error creando retiro: {str(e)}")
 
     if not row:
         raise HTTPException(status_code=500, detail="No se pudo crear el retiro.")
-    return dict(row)
 
+    return dict(row)
 
 # =========================
 # PUT: actualizar retiro (y sincroniza estado global)

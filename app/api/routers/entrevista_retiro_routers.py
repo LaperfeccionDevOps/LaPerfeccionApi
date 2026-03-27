@@ -803,26 +803,83 @@ def guardar_entrevista_retiro(
         id_entrevista = entrevista["IdEntrevistaRetiro"]
 
         # =========================================
+        # VALIDAR PREGUNTAS
+        # =========================================
+        ids_preguntas = [r.id_pregunta for r in payload.respuestas]
+
+        preguntas_db = db.execute(
+            text("""
+                SELECT
+                    "IdPreguntaEntrevistaRetiro",
+                    "TipoRespuesta",
+                    "Activa"
+                FROM "EntrevistaRetiroPregunta"
+                WHERE "IdPreguntaEntrevistaRetiro" = ANY(:ids_preguntas)
+            """),
+            {"ids_preguntas": ids_preguntas}
+        ).mappings().all()
+
+        mapa_preguntas = {
+            p["IdPreguntaEntrevistaRetiro"]: dict(p)
+            for p in preguntas_db
+        }
+
+        for r in payload.respuestas:
+            pregunta = mapa_preguntas.get(r.id_pregunta)
+            if not pregunta:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"La pregunta {r.id_pregunta} no existe"
+                )
+            if pregunta["Activa"] is False:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"La pregunta {r.id_pregunta} está inactiva"
+                )
+
+        now = datetime.utcnow()
+
+        # =========================================
         # INSERT RESPUESTAS
         # =========================================
         for r in payload.respuestas:
+            pregunta = mapa_preguntas[r.id_pregunta]
+            tipo_respuesta = str(pregunta["TipoRespuesta"]).strip().upper()
+            valor = r.respuesta.strip() if r.respuesta else ""
+
+            respuesta_texto = None
+            respuesta_opcion = None
+
+            if tipo_respuesta in ("SI_NO", "OPCION"):
+                respuesta_opcion = valor
+            else:
+                respuesta_texto = valor
+
             db.execute(
                 text("""
-                    INSERT INTO "EntrevistaRetiroRespuesta" (
+                    INSERT INTO "EntrevistaRetiroRespuesta"
+                    (
                         "IdEntrevistaRetiro",
-                        "IdPregunta",
-                        "RespuestaTexto"
+                        "IdPreguntaEntrevistaRetiro",
+                        "RespuestaTexto",
+                        "RespuestaOpcion",
+                        "FechaRegistro"
                     )
-                    VALUES (
+                    VALUES
+                    (
                         :id_entrevista,
                         :id_pregunta,
-                        :respuesta
+                        :respuesta_texto,
+                        :respuesta_opcion,
+                        :fecha_registro
                     )
                 """),
                 {
                     "id_entrevista": id_entrevista,
                     "id_pregunta": r.id_pregunta,
-                    "respuesta": r.respuesta
+                    "respuesta_texto": respuesta_texto,
+                    "respuesta_opcion": respuesta_opcion,
+                    "fecha_registro": now,
                 }
             )
 
@@ -831,7 +888,9 @@ def guardar_entrevista_retiro(
         return {
             "message": "Entrevista guardada correctamente",
             "data": {
-                "IdEntrevistaRetiro": id_entrevista
+                "IdEntrevistaRetiro": id_entrevista,
+                "IdRetiroLaboral": id_retiro_laboral,
+                "EstadoEntrevista": "RESPONDIDA" if id_retiro_laboral else "PENDIENTE_VINCULAR"
             }
         }
 
