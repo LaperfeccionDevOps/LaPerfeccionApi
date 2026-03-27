@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import uuid
-from typing import List
+from typing import List, Optional
 from io import BytesIO
 from pathlib import Path
 
@@ -47,10 +47,14 @@ class RespuestaItem(BaseModel):
     respuesta: str
 
 
+
 class GuardarEntrevistaRequest(BaseModel):
-    token: str
+    token: Optional[str] = None
     numero_identificacion: str
     respuestas: List[RespuestaItem]
+
+class ValidarIdentificacionEntrevistaRequest(BaseModel):
+    numero_identificacion: str
 
 
 # =========================================================
@@ -424,6 +428,85 @@ def validar_acceso_entrevista_retiro(
         )
 
 
+@router.post(
+    "/entrevista-retiro/validar-identificacion",
+    summary="Validar trabajador para entrevista de retiro por identificación"
+)
+def validar_identificacion_entrevista_retiro(
+    payload: ValidarIdentificacionEntrevistaRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        numero_in = str(payload.numero_identificacion).strip()
+
+        trabajador = db.execute(
+            text("""
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."NumeroIdentificacion",
+                    rp."Nombres",
+                    rp."Apellidos"
+                FROM "RegistroPersonal" rp
+                WHERE REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero_identificacion
+                LIMIT 1
+            """),
+            {"numero_identificacion": numero_in}
+        ).mappings().first()
+
+        if not trabajador:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No se encontró un trabajador con ese número de identificación"
+            )
+
+        retiro_activo = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."TokenEntrevista",
+                    rl."EstadoEntrevista",
+                    rl."Activo",
+                    rl."FechaProceso"
+                FROM "RetiroLaboral" rl
+                WHERE rl."IdRegistroPersonal" = :id_registro_personal
+                  AND rl."Activo" = TRUE
+                ORDER BY rl."IdRetiroLaboral" DESC
+                LIMIT 1
+            """),
+            {"id_registro_personal": trabajador["IdRegistroPersonal"]}
+        ).mappings().first()
+
+        nombre_completo = f'{trabajador["Nombres"]} {trabajador["Apellidos"]}'.strip()
+
+        return {
+            "message": "Identificación validada correctamente",
+            "data": {
+                "IdRegistroPersonal": trabajador["IdRegistroPersonal"],
+                "NumeroIdentificacion": str(trabajador["NumeroIdentificacion"]).strip(),
+                "NombreCompleto": nombre_completo,
+                "TieneRetiroActivo": bool(retiro_activo),
+                "IdRetiroLaboral": retiro_activo["IdRetiroLaboral"] if retiro_activo else None,
+                "EstadoEntrevista": retiro_activo["EstadoEntrevista"] if retiro_activo else None,
+                "TokenEntrevista": retiro_activo["TokenEntrevista"] if retiro_activo else None
+            }
+        }
+
+    except HTTPException as e:
+        raise e
+
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error SQL al validar identificación de entrevista: {str(e)}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al validar identificación de entrevista: {str(e)}"
+        )
+
+
 # =========================================================
 #   CONSULTAR FORMULARIO PÚBLICO POR TOKEN
 # =========================================================
@@ -586,43 +669,11 @@ def guardar_entrevista_retiro(
     db: Session = Depends(get_db),
 ):
     try:
-        retiro = db.execute(
-            text("""
-                SELECT
-                    rl."IdRetiroLaboral",
-                    rl."IdRegistroPersonal",
-                    rl."EstadoEntrevista",
-                    rp."NumeroIdentificacion"
-                FROM "RetiroLaboral" rl
-                INNER JOIN "RegistroPersonal" rp
-                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-                WHERE rl."TokenEntrevista" = :token
-                LIMIT 1
-            """),
-            {"token": payload.token}
-        ).mappings().first()
+        numero_in = str(payload.numero_identificacion).strip()
 
-        if not retiro:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Token inválido"
-            )
-
-        if retiro["EstadoEntrevista"] != "PENDIENTE":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La entrevista ya fue respondida o no está disponible"
-            )
-
-        numero_bd = str(retiro["NumeroIdentificacion"]).strip()
-        numero_in = payload.numero_identificacion.strip()
-
-        if numero_bd != numero_in:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Identificación incorrecta"
-            )
-
+        # =========================================
+        # VALIDACIÓN: máximo 5 entrevistas
+        # =========================================
         total_entrevistas = db.execute(
             text("""
                 SELECT COUNT(*) AS total
@@ -637,23 +688,6 @@ def guardar_entrevista_retiro(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El trabajador ya alcanzó el máximo de 5 entrevistas de retiro."
             )
-        
-
-        existe = db.execute(
-            text("""
-                SELECT 1
-                FROM "EntrevistaRetiro"
-                WHERE "IdRetiroLaboral" = :id_retiro_laboral
-                LIMIT 1
-            """),
-            {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
-        ).first()
-
-        if existe:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La entrevista ya fue diligenciada"
-            )
 
         if not payload.respuestas:
             raise HTTPException(
@@ -661,6 +695,93 @@ def guardar_entrevista_retiro(
                 detail="Debe enviar al menos una respuesta"
             )
 
+        # =========================================
+        # OBTENER TRABAJADOR POR IDENTIFICACIÓN
+        # =========================================
+        trabajador = db.execute(
+            text("""
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."NumeroIdentificacion"
+                FROM "RegistroPersonal" rp
+                WHERE REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero_identificacion
+                LIMIT 1
+            """),
+            {"numero_identificacion": numero_in}
+        ).mappings().first()
+
+        if not trabajador:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Identificación incorrecta"
+            )
+
+        id_retiro_laboral = None
+        id_registro_personal = trabajador["IdRegistroPersonal"]
+        actualizar_estado_retiro = False
+
+        # =========================================
+        # CASO 1: CON TOKEN (flujo actual)
+        # =========================================
+        if payload.token:
+            retiro = db.execute(
+                text("""
+                    SELECT
+                        rl."IdRetiroLaboral",
+                        rl."IdRegistroPersonal",
+                        rl."EstadoEntrevista",
+                        rp."NumeroIdentificacion"
+                    FROM "RetiroLaboral" rl
+                    INNER JOIN "RegistroPersonal" rp
+                        ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                    WHERE rl."TokenEntrevista" = :token
+                    LIMIT 1
+                """),
+                {"token": payload.token}
+            ).mappings().first()
+
+            if not retiro:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Token inválido"
+                )
+
+            if retiro["EstadoEntrevista"] != "PENDIENTE":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="La entrevista ya fue respondida o no está disponible"
+                )
+
+            numero_bd = str(retiro["NumeroIdentificacion"]).strip()
+            if numero_bd != numero_in:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Identificación incorrecta"
+                )
+
+            existe = db.execute(
+                text("""
+                    SELECT 1
+                    FROM "EntrevistaRetiro"
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                    LIMIT 1
+                """),
+                {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
+            ).first()
+
+            if existe:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="La entrevista ya fue diligenciada"
+                )
+
+            id_retiro_laboral = retiro["IdRetiroLaboral"]
+            id_registro_personal = retiro["IdRegistroPersonal"]
+            actualizar_estado_retiro = True
+
+        # =========================================
+        # VALIDAR PREGUNTAS
+        # =========================================
         ids_preguntas = [r.id_pregunta for r in payload.respuestas]
 
         preguntas_db = db.execute(
@@ -695,6 +816,9 @@ def guardar_entrevista_retiro(
 
         now = datetime.utcnow()
 
+        # =========================================
+        # INSERT CABECERA
+        # =========================================
         cabecera = db.execute(
             text("""
                 INSERT INTO "EntrevistaRetiro"
@@ -722,11 +846,11 @@ def guardar_entrevista_retiro(
                 RETURNING "IdEntrevistaRetiro"
             """),
             {
-                "id_retiro_laboral": retiro["IdRetiroLaboral"],
-                "id_registro_personal": retiro["IdRegistroPersonal"],
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_registro_personal": id_registro_personal,
                 "numero_identificacion": numero_in,
                 "fecha_envio": now,
-                "estado": "RESPONDIDA",
+                "estado": "RESPONDIDA" if id_retiro_laboral else "PENDIENTE_VINCULAR",
                 "pdf_generado": False,
                 "ruta_pdf": None,
                 "fecha_creacion": now,
@@ -735,6 +859,9 @@ def guardar_entrevista_retiro(
 
         id_entrevista = cabecera[0]
 
+        # =========================================
+        # INSERT RESPUESTAS
+        # =========================================
         for r in payload.respuestas:
             pregunta = mapa_preguntas[r.id_pregunta]
             tipo_respuesta = str(pregunta["TipoRespuesta"]).strip().upper()
@@ -776,21 +903,25 @@ def guardar_entrevista_retiro(
                 }
             )
 
-        db.execute(
-            text("""
-                UPDATE "RetiroLaboral"
-                SET
-                    "EstadoEntrevista" = 'RESPONDIDA',
-                    "FechaRespuestaEntrevista" = :fecha_respuesta,
-                    "FechaActualizacion" = :fecha_actualizacion
-                WHERE "IdRetiroLaboral" = :id_retiro_laboral
-            """),
-            {
-                "fecha_respuesta": now,
-                "fecha_actualizacion": now,
-                "id_retiro_laboral": retiro["IdRetiroLaboral"]
-            }
-        )
+        # =========================================
+        # SOLO SI HAY TOKEN: marcar retiro respondido
+        # =========================================
+        if actualizar_estado_retiro and id_retiro_laboral:
+            db.execute(
+                text("""
+                    UPDATE "RetiroLaboral"
+                    SET
+                        "EstadoEntrevista" = 'RESPONDIDA',
+                        "FechaRespuestaEntrevista" = :fecha_respuesta,
+                        "FechaActualizacion" = :fecha_actualizacion
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                """),
+                {
+                    "fecha_respuesta": now,
+                    "fecha_actualizacion": now,
+                    "id_retiro_laboral": id_retiro_laboral
+                }
+            )
 
         db.commit()
 
@@ -798,8 +929,8 @@ def guardar_entrevista_retiro(
             "message": "Entrevista guardada correctamente",
             "data": {
                 "IdEntrevistaRetiro": id_entrevista,
-                "IdRetiroLaboral": retiro["IdRetiroLaboral"],
-                "EstadoEntrevista": "RESPONDIDA"
+                "IdRetiroLaboral": id_retiro_laboral,
+                "EstadoEntrevista": "RESPONDIDA" if id_retiro_laboral else "PENDIENTE_VINCULAR"
             }
         }
 
@@ -818,98 +949,6 @@ def guardar_entrevista_retiro(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al guardar entrevista: {str(e)}"
-        )
-
-
-# =========================================================
-#   CONSULTAR ENTREVISTA DE RETIRO POR ID RETIRO LABORAL
-# =========================================================
-@router.get(
-    "/entrevista-retiro/{id_retiro_laboral}",
-    summary="Consultar entrevista de retiro por IdRetiroLaboral"
-)
-def consultar_entrevista_retiro_por_retiro(
-    id_retiro_laboral: int,
-    db: Session = Depends(get_db),
-):
-    try:
-        cabecera = db.execute(
-            text("""
-                SELECT
-                    er."IdEntrevistaRetiro",
-                    er."IdRetiroLaboral",
-                    er."IdRegistroPersonal",
-                    er."NumeroIdentificacionConfirmada",
-                    er."FechaEnvio",
-                    er."Estado",
-                    er."PdfGenerado",
-                    er."RutaPdf",
-                    er."FechaCreacion",
-                    rp."Nombres",
-                    rp."Apellidos"
-                FROM "EntrevistaRetiro" er
-                INNER JOIN "RegistroPersonal" rp
-                    ON rp."IdRegistroPersonal" = er."IdRegistroPersonal"
-                WHERE er."IdRetiroLaboral" = :id_retiro_laboral
-                LIMIT 1
-            """),
-            {"id_retiro_laboral": id_retiro_laboral}
-        ).mappings().first()
-
-        if not cabecera:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No existe entrevista de retiro para ese IdRetiroLaboral"
-            )
-
-        respuestas = db.execute(
-            text("""
-                SELECT
-                    r."IdRespuestaEntrevistaRetiro",
-                    r."IdEntrevistaRetiro",
-                    r."IdPreguntaEntrevistaRetiro",
-                    p."CodigoPregunta",
-                    p."TextoPregunta",
-                    p."TipoRespuesta",
-                    p."Orden",
-                    r."RespuestaTexto",
-                    r."RespuestaOpcion",
-                    r."FechaRegistro"
-                FROM "EntrevistaRetiroRespuesta" r
-                INNER JOIN "EntrevistaRetiroPregunta" p
-                    ON p."IdPreguntaEntrevistaRetiro" = r."IdPreguntaEntrevistaRetiro"
-                WHERE r."IdEntrevistaRetiro" = :id_entrevista
-                ORDER BY p."Orden" ASC
-            """),
-            {"id_entrevista": cabecera["IdEntrevistaRetiro"]}
-        ).mappings().all()
-
-        nombre_completo = f'{cabecera["Nombres"]} {cabecera["Apellidos"]}'.strip()
-
-        data_cabecera = dict(cabecera)
-        data_cabecera["NombreCompleto"] = nombre_completo
-
-        return {
-            "message": "Entrevista consultada correctamente",
-            "data": {
-                "cabecera": data_cabecera,
-                "respuestas": [dict(r) for r in respuestas]
-            }
-        }
-
-    except HTTPException as e:
-        raise e
-
-    except SQLAlchemyError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error SQL al consultar entrevista: {str(e)}"
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al consultar entrevista: {str(e)}"
         )
 
 
