@@ -623,6 +623,22 @@ def guardar_entrevista_retiro(
                 detail="Identificación incorrecta"
             )
 
+        total_entrevistas = db.execute(
+            text("""
+                SELECT COUNT(*) AS total
+                FROM "EntrevistaRetiro"
+                WHERE "NumeroIdentificacionConfirmada" = :numero_identificacion
+            """),
+            {"numero_identificacion": numero_in}
+        ).scalar()
+
+        if total_entrevistas is not None and int(total_entrevistas) >= 5:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El trabajador ya alcanzó el máximo de 5 entrevistas de retiro."
+            )
+        
+
         existe = db.execute(
             text("""
                 SELECT 1

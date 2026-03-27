@@ -56,6 +56,7 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     MotivoRetiroNombre: Optional[str] = None
     FechaProceso: Optional[str] = None
     FechaCierre: Optional[str] = None
+    FechaEnvioOperaciones: Optional[str] = None
 
     IdTipificacionRetiro: Optional[int] = None
     ObservacionRetiro: Optional[str] = None
@@ -96,6 +97,7 @@ class RetiroLaboralUpdate(BaseModel):
     FechaProceso: Optional[date] = None
     FechaRetiro: Optional[date] = None
     FechaCierre: Optional[datetime] = None
+    FechaEnvioOperaciones: Optional[datetime] = None
     FechaEnvioNomina: Optional[datetime] = None
     ObservacionGeneral: Optional[str] = None
     Activo: Optional[bool] = None
@@ -278,6 +280,7 @@ def buscar_trabajador_detalle_por_documento(
           mr."Nombre"                                 AS "MotivoRetiroNombre",
           rrll."FechaProceso"::text                   AS "FechaProceso",
           rrll."FechaCierre"::text                    AS "FechaCierre",
+          pys."FechaCreacion"::text                   AS "FechaEnvioOperaciones",
           rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
           rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
           rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
@@ -309,6 +312,7 @@ def buscar_trabajador_detalle_por_documento(
       rl."FechaProceso",
       rl."FechaRetiro",
       rl."FechaCierre",
+      rl."FechaEnvioOperaciones",
       rl."IdTipificacionRetiro",
       rl."ObservacionRetiro",
       rl."DevolucionCarnet",
@@ -319,6 +323,17 @@ def buscar_trabajador_detalle_por_documento(
     ORDER BY rl."IdRetiroLaboral" DESC
     LIMIT 1
 ) rrll ON true
+             
+        LEFT JOIN LATERAL (
+        SELECT
+        p."FechaCreacion",
+        p."FechaUltimoDiaLaborado",
+        p."IdRetiroLaboral"
+        FROM public."PazYSalvoOperaciones" p
+        WHERE p."IdRetiroLaboral" = rrll."IdRetiroLaboral"
+        ORDER BY p."IdPazYSalvo" DESC
+        LIMIT 1
+    ) pys ON true
 
         LEFT JOIN public."Cliente" c
           ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
@@ -375,6 +390,7 @@ def validar_retiro_activo(
             "FechaProceso",
             "FechaRetiro",
             "Activo",
+            "FechaEnvioOperaciones"
             "FechaEnvioNomina",
             "FechaCierre"
         FROM public."RetiroLaboral"
@@ -511,6 +527,7 @@ def actualizar_retiro_laboral(
             "EstadoCasoRRLL",
             "FechaProceso",
             "FechaRetiro",
+            "FechaEnvioOperaciones",
             "FechaEnvioNomina",
             "FechaCierre",
             "ObservacionGeneral",
@@ -593,6 +610,7 @@ def actualizar_retiro_laboral(
             "FechaProceso" = COALESCE(:fecha_proceso, "FechaProceso"),
             "FechaRetiro" = COALESCE(:fecha_retiro, "FechaRetiro"),
             "FechaCierre" = COALESCE(:fecha_cierre, "FechaCierre"),
+            "FechaEnvioOperaciones" = COALESCE(:fecha_envio_operaciones, "FechaEnvioOperaciones"),
             "FechaEnvioNomina" = COALESCE(:fecha_envio_nomina, "FechaEnvioNomina"),
             "ObservacionGeneral" = COALESCE(:observacion_general, "ObservacionGeneral"),
             "Activo" = COALESCE(:activo, "Activo"),
@@ -612,22 +630,23 @@ def actualizar_retiro_laboral(
     """)
 
     try:
-        row = db.execute(q_update, {
-            "id_retiro_laboral": id_retiro_laboral,
-            "id_cliente": payload.IdCliente if payload else None,
-            "id_motivo_retiro": payload.IdMotivoRetiro if payload else None,
-            "estado_caso_rrll": nuevo_estado_caso,
-            "fecha_proceso": payload.FechaProceso if payload else None,
-            "fecha_retiro": payload.FechaRetiro if payload else None,
-            "fecha_cierre": fecha_cierre_forzada,
-            "fecha_envio_nomina": fecha_envio_nomina_forzada,
-            "observacion_general": payload.ObservacionGeneral if payload else None,
-            "activo": activo_forzado,
-            "usuario_actualizacion": payload.UsuarioActualizacion if payload else None,
-        }).mappings().first()
+     row = db.execute(q_update, {
+        "id_retiro_laboral": id_retiro_laboral,
+        "id_cliente": payload.IdCliente if payload else None,
+        "id_motivo_retiro": payload.IdMotivoRetiro if payload else None,
+        "estado_caso_rrll": nuevo_estado_caso,
+        "fecha_proceso": payload.FechaProceso if payload else None,
+        "fecha_retiro": payload.FechaRetiro if payload else None,
+        "fecha_cierre": fecha_cierre_forzada,
+        "fecha_envio_operaciones": payload.FechaEnvioOperaciones if payload else None,
+        "fecha_envio_nomina": fecha_envio_nomina_forzada,
+        "observacion_general": payload.ObservacionGeneral if payload else None,
+        "activo": activo_forzado,
+        "usuario_actualizacion": payload.UsuarioActualizacion if payload else None,
+    }).mappings().first()
 
-        _aplicar_estado_global_si_corresponde()
-        db.commit()
+     _aplicar_estado_global_si_corresponde()
+     db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error actualizando retiro: {str(e)}")
