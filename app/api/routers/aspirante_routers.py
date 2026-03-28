@@ -105,11 +105,12 @@ def crear_registro_personal(
 #   (Selección / TH / Contratación)
 # =========================================================
 class RegistroPersonalUpdate(BaseModel):
-    # Solo lo que necesitamos tocar ahora (puedes ampliar luego si quieres)
     IdFondoPensiones: Optional[int] = None
     IdFondoCesantias: Optional[int] = None
     PesoKilogramos: Optional[float] = None
     AlturaMetros: Optional[float] = None
+    ContactoEmergencia: Optional[str] = None
+    TelefonoContactoEmergencia: Optional[str] = None
     UsuarioActualizacion: Optional[str] = None
 
 
@@ -138,7 +139,15 @@ def actualizar_registro_personal(
     params = {"id": id_registro}
 
     # Campos permitidos
-    allowed = {"IdFondoPensiones", "IdFondoCesantias", "PesoKilogramos", "AlturaMetros", "UsuarioActualizacion"}
+    allowed = {
+    "IdFondoPensiones",
+    "IdFondoCesantias",
+    "PesoKilogramos",
+    "AlturaMetros",
+    "ContactoEmergencia",
+    "TelefonoContactoEmergencia",
+    "UsuarioActualizacion",
+}
 
     for k, v in data.items():
         if k in allowed:
