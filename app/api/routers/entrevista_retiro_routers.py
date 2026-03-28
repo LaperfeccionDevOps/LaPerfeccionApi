@@ -77,13 +77,11 @@ def _formatear_fecha_colombia(fecha):
         else:
             fecha_dt = fecha
 
-        # Si viene sin zona, asumimos UTC
+        # ✅ Si viene sin zona horaria, asumimos que ya está en hora Colombia
         if fecha_dt.tzinfo is None:
-            fecha_utc = fecha_dt.replace(tzinfo=timezone.utc)
+            fecha_col = fecha_dt
         else:
-            fecha_utc = fecha_dt.astimezone(timezone.utc)
-
-        fecha_col = fecha_utc.astimezone(tz_col)
+            fecha_col = fecha_dt.astimezone(tz_col)
 
         fecha_str = fecha_col.strftime("%d/%m/%Y")
         hora_str = fecha_col.strftime("%I:%M %p").lower()
@@ -941,6 +939,7 @@ def consultar_entrevista_retiro_por_retiro(
                 INNER JOIN "RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = er."IdRegistroPersonal"
                 WHERE er."IdRetiroLaboral" = :id_retiro_laboral
+                ORDER BY er."FechaCreacion" DESC, er."IdEntrevistaRetiro" DESC
                 LIMIT 1
             """),
             {"id_retiro_laboral": id_retiro_laboral}
@@ -1001,6 +1000,63 @@ def consultar_entrevista_retiro_por_retiro(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al consultar entrevista: {str(e)}"
         )
+    
+
+@router.get(
+    "/entrevista-retiro/historial/{id_registro_personal}",
+    summary="Consultar historial de entrevistas de retiro por trabajador"
+)
+def consultar_historial_entrevista_retiro(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        historial = db.execute(
+            text("""
+                SELECT
+                    er."IdEntrevistaRetiro",
+                    er."IdRetiroLaboral",
+                    er."IdRegistroPersonal",
+                    er."NumeroIdentificacionConfirmada",
+                    er."FechaEnvio",
+                    er."Estado",
+                    er."PdfGenerado",
+                    er."RutaPdf",
+                    er."FechaCreacion",
+                    rp."Nombres",
+                    rp."Apellidos"
+                FROM public."EntrevistaRetiro" er
+                INNER JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = er."IdRegistroPersonal"
+                WHERE er."IdRegistroPersonal" = :id_registro_personal
+                ORDER BY er."FechaCreacion" DESC, er."IdEntrevistaRetiro" DESC
+            """),
+            {"id_registro_personal": id_registro_personal}
+        ).mappings().all()
+
+        data = []
+        for row in historial:
+            item = dict(row)
+            item["NombreCompleto"] = f'{row["Nombres"]} {row["Apellidos"]}'.strip()
+            data.append(item)
+
+        return {
+            "message": "Historial de entrevistas consultado correctamente",
+            "total": len(data),
+            "data": data
+        }
+
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error SQL al consultar historial de entrevistas: {str(e)}"
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al consultar historial de entrevistas: {str(e)}"
+        )
 
 
 # =========================================================
@@ -1034,6 +1090,7 @@ def generar_pdf_entrevista_retiro(
                 INNER JOIN "RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = er."IdRegistroPersonal"
                 WHERE er."IdRetiroLaboral" = :id_retiro_laboral
+                ORDER BY er."FechaCreacion" DESC, er."IdEntrevistaRetiro" DESC
                 LIMIT 1
             """),
             {"id_retiro_laboral": id_retiro_laboral}
@@ -1045,7 +1102,7 @@ def generar_pdf_entrevista_retiro(
                 detail="No existe entrevista de retiro para ese IdRetiroLaboral"
             )
 
-       # ✅ Si ya existe el PDF en disco, devolverlo sin regenerar
+        # ✅ Si ya existe el PDF en disco de la última entrevista, devolverlo sin regenerar
         ruta_pdf_guardada = cabecera.get("RutaPdf")
         if ruta_pdf_guardada:
             archivo_pdf = Path(ruta_pdf_guardada)
@@ -1062,6 +1119,7 @@ def generar_pdf_entrevista_retiro(
                         )
                     }
                 )
+
         respuestas = db.execute(
             text("""
                 SELECT
@@ -1091,7 +1149,8 @@ def generar_pdf_entrevista_retiro(
 
         pdf_buffer = _build_entrevista_pdf(data_cabecera, [dict(r) for r in respuestas])
 
-        nombre_archivo = f"entrevista_retiro_{id_retiro_laboral}.pdf"
+        # ✅ PDF por entrevista, no por retiro
+        nombre_archivo = f'entrevista_retiro_{cabecera["IdEntrevistaRetiro"]}.pdf'
         ruta_pdf = PDF_DIR / nombre_archivo
 
         with open(ruta_pdf, "wb") as f:
