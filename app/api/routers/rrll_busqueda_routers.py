@@ -245,10 +245,45 @@ def _vincular_entrevista_pendiente_a_retiro(
 
     return vinculada
 
+    
+
 
 # =========================
 # Endpoints Trabajador
 # =========================
+@router.get("/trabajador/por-numero")
+def buscar_trabajador_por_numero(
+    numero_documento: str = Query(..., description="Número de documento (sin puntos)"),
+    db: Session = Depends(get_db),
+):
+    numero = _norm_num(numero_documento)
+
+    if not numero:
+        raise HTTPException(status_code=400, detail="numero_documento es obligatorio.")
+
+    q = text("""
+        SELECT
+          rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+          rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+          rp."NumeroIdentificacion"    AS "NumeroDocumento",
+          rp."Nombres"                 AS "Nombres",
+          rp."Apellidos"               AS "Apellidos",
+          COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto"
+        FROM public."RegistroPersonal" rp
+        WHERE REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
+        LIMIT 1;
+    """)
+
+    row = db.execute(q, {"numero": numero}).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontró trabajador con ese número de documento."
+        )
+
+    return dict(row)
+
 @router.get("/trabajador", response_model=TrabajadorBusquedaOut)
 def buscar_trabajador_por_documento(
     tipo_documento: str = Query(..., description="CC | CE | TI | PPT"),
