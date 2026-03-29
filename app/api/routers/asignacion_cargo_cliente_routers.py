@@ -18,11 +18,12 @@ ROUTER_VERSION = "V6-POST-RETORNA-ASIGNACION-ACTUALIZADA"
 # ----------------------------
 # Schemas
 # ----------------------------
+
 class AsignacionUpsertIn(BaseModel):
     IdRegistroPersonal: int
     IdCargo: int
-    IdCliente: int
-    Salario: float
+    IdCliente: Optional[int] = None
+    Salario: Optional[float] = None
     UsuarioActualizacion: str
 
 class AsignacionOut(BaseModel):
