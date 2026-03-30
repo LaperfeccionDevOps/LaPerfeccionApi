@@ -172,6 +172,9 @@
         </tr>
         <tr>
             <td colspan="4" class="textarea aspectos-generales">
+               <span class="bold">Núcleo Familiar:</span><br>
+                @NUCLEO_FAMILIAR<br><br>
+
                 <span class="bold">Aspecto Académico:</span><br>
                 @ASPECTOS_ACADEMICOS<br><br>
 
