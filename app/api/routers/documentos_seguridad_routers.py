@@ -1,18 +1,16 @@
 import os
-import uuid
 from pathlib import Path
 from typing import List
 from uuid import UUID as UUIDType
 
-from fastapi import APIRouter, Depends, UploadFile, status, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.orm import Session
+from fastapi.responses import FileResponse
 
 from infrastructure.db.deps import get_db
 from domain.models.documento_seguridad import DocumentoSeguridad
 from domain.schemas.documento_seguridad_schemas import DocumentoSeguridadOut
-from domain.schemas.aspirante import RegistrarDocumentosSeguridadSchema, RegistroPersonalOut
-from domain.schemas.aspirante import DocumentacionSchema
+from domain.schemas.aspirante import RegistrarDocumentosSeguridadSchema
 from domain.models.aspirante import RelacionTipoDocumentacionORM, DocumentacionORM
 import base64
 import re
@@ -22,20 +20,21 @@ router = APIRouter(
     tags=["documentos seguridad"],
 )
 
-UPLOAD_BASE = Path(os.getenv("UPLOAD_DIR", "uploads"))  # carpeta raíz
+UPLOAD_BASE = Path(os.getenv("UPLOAD_DIR", "uploads"))
+
 
 def _safe_ext(filename: str) -> str:
     ext = (Path(filename).suffix or "").lower()
-    # limita extensiones si quieres
     allowed = {".pdf", ".jpg", ".jpeg", ".png"}
     return ext if ext in allowed else ""
+
 
 def limpiar_base64(base64_str: str) -> str:
     """
     Elimina el prefijo data:*;base64, si existe. Acepta bytes o string.
     """
     if isinstance(base64_str, bytes):
-        base64_str = base64_str.decode('utf-8')
+        base64_str = base64_str.decode("utf-8")
     match = re.match(r"^data:.*?;base64,(.*)", base64_str)
     if match:
         return match.group(1)
@@ -50,15 +49,18 @@ async def subir_documento_seguridad(
     try:
         idRegistroPersonal = payload.idRegistroPersonal
         resultado = []
+
         for doc in payload.documentos_seguridad:
             doc_data = doc.dict()
-            # Buscar si ya existe documento con ese tipo y registro personal
+
             existe_relacion = db.query(RelacionTipoDocumentacionORM).join(
-                DocumentacionORM, RelacionTipoDocumentacionORM.IdDocumento == DocumentacionORM.IdDocumento
+                DocumentacionORM,
+                RelacionTipoDocumentacionORM.IdDocumento == DocumentacionORM.IdDocumento
             ).filter(
                 RelacionTipoDocumentacionORM.IdRegistroPersonal == idRegistroPersonal,
                 DocumentacionORM.IdTipoDocumentacion == doc_data["IdTipoDocumentacion"]
             ).first()
+
             base64_str = doc_data.get("DocumentoCargado")
             if base64_str:
                 try:
@@ -67,18 +69,20 @@ async def subir_documento_seguridad(
                 except Exception as e:
                     print(f"Error al procesar DocumentoCargado: {e}")
                     doc_data["DocumentoCargado"] = None
+
             if existe_relacion:
-                # Actualizar el documento existente
                 documento_existente = db.query(DocumentacionORM).filter(
                     DocumentacionORM.IdDocumento == existe_relacion.IdDocumento
                 ).first()
+
                 if documento_existente:
                     documento_existente.DocumentoCargado = doc_data["DocumentoCargado"]
                     documento_existente.Formato = doc_data["Formato"]
                     documento_existente.Nombre = doc_data["Nombre"]
                     resultado.append(documento_existente)
+
                 continue
-            # Si no existe, crear nuevo documento y relación
+
             nuevo_doc = DocumentacionORM(
                 IdTipoDocumentacion=doc_data["IdTipoDocumentacion"],
                 DocumentoCargado=doc_data["DocumentoCargado"],
@@ -87,16 +91,21 @@ async def subir_documento_seguridad(
             )
             db.add(nuevo_doc)
             db.flush()
+
             relacion = RelacionTipoDocumentacionORM(
                 IdRegistroPersonal=idRegistroPersonal,
                 IdDocumento=nuevo_doc.IdDocumento
             )
             db.add(relacion)
             resultado.append(nuevo_doc)
+
         db.commit()
+
         for d in resultado:
             db.refresh(d)
+
         return {"ok": True, "nombres": [d.Nombre for d in resultado]}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al subir documentos: {str(e)}")
 
@@ -118,7 +127,6 @@ def eliminar_documento(documento_id: UUIDType, db: Session = Depends(get_db)):
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no existe")
 
-    # borrar archivo en disco
     try:
         path = Path(doc.ruta_archivo)
         if path.exists():
@@ -131,7 +139,42 @@ def eliminar_documento(documento_id: UUIDType, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.delete("/registro/{id_registro_personal}/tipo/{id_tipo_documentacion}")
+def eliminar_documento_seguridad_por_tipo(
+    id_registro_personal: int,
+    id_tipo_documentacion: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        relacion = db.query(RelacionTipoDocumentacionORM).join(
+            DocumentacionORM,
+            RelacionTipoDocumentacionORM.IdDocumento == DocumentacionORM.IdDocumento
+        ).filter(
+            RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro_personal,
+            DocumentacionORM.IdTipoDocumentacion == id_tipo_documentacion
+        ).first()
 
+        if not relacion:
+            raise HTTPException(
+                status_code=404,
+                detail="No existe documento de seguridad para ese tipo y registro."
+            )
 
+        documento = db.query(DocumentacionORM).filter(
+            DocumentacionORM.IdDocumento == relacion.IdDocumento
+        ).first()
 
+        db.delete(relacion)
 
+        if documento:
+            db.delete(documento)
+
+        db.commit()
+
+        return {"ok": True, "detail": "Documento eliminado correctamente."}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error al eliminar documento: {str(e)}")

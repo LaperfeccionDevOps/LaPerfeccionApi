@@ -2,143 +2,211 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Autorización Tratamiento de Datos Personales</title>
+    <title>Autorización para el Tratamiento de Datos Personales</title>
     <style>
-            @page {
-                margin-left: 2.5cm;
-                margin-right: 2.5cm;
-            }
+        @page {
+            margin-top: 2.2cm;
+            margin-bottom: 2.2cm;
+            margin-left: 2.3cm;
+            margin-right: 2.3cm;
+        }
+
         body {
             font-family: Arial, Helvetica, sans-serif;
-            font-size: 20px;
+            font-size: 14px;
             color: #000;
-            line-height: 1.7;
-            margin-top: 40px;
-            margin-bottom: 40px;
-            margin-left: 2.5cm;
-            margin-right: 2.5cm;
+            line-height: 1.5;
+            margin: 0;
+            padding: 0;
         }
 
         .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
+            width: 100%;
+            display: table;
+            table-layout: fixed;
+            margin-bottom: 22px;
         }
 
-        .header img {
-            height: 60px;
+        .header-left,
+        .header-right {
+            display: table-cell;
+            width: 50%;
+            vertical-align: top;
+        }
+
+        .header-left {
+            text-align: left;
+        }
+
+        .header-right {
+            text-align: right;
+        }
+
+        .img-logo-left {
+            width: 155px;
+            height: auto;
+        }
+
+        .img-logo-right {
+            width: 180px;
+            height: auto;
         }
 
         h2 {
             text-align: center;
-            font-size: 20px;
-            margin-bottom: 30px;
+            font-size: 16px;
+            margin: 18px 0 20px 0;
             text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 0.3px;
         }
 
         p {
             text-align: justify;
-            margin-bottom: 10px;
+            margin: 0 0 10px 0;
+        }
+
+        .lista {
+            margin: 8px 0 14px 18px;
+            padding-left: 14px;
+        }
+
+        .lista li {
+            margin-bottom: 7px;
+            text-align: justify;
         }
 
         .contacto {
-            margin-top: 15px;
-            text-align: right;
-            padding-left: 80px;
+            margin: 8px 0 14px 18px;
         }
 
         .contacto p {
-            margin: 3px 0;
-        }
-
-        .firma {
-            margin-top: 40px;
-        }
-
-        .firma img {
-            height: 70px;
-        }
-
-        .linea-firma {
-            margin-top: 10px;
-            border-top: 1px solid #000;
-            width: 250px;
+            margin: 4px 0;
+            text-align: left;
         }
 
         .footer {
-            font-family: Arial, Helvetica, sans-serif;
-            font-size: 20px;
-            color: #000;
-            line-height: 1.7;
-            margin-top: 30px;
-            margin-bottom: 40px;
+            margin-top: 14px;
+            margin-bottom: 22px;
         }
-        .img-logo {
-            width: 280px;
-            height: auto !important;
-            margin-top:10px
+
+        .firma {
+            margin-top: 28px;
+        }
+
+        .firma-label {
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+
+        .firma img {
+            max-width: 180px;
+            max-height: 70px;
+            height: auto;
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        .linea-firma {
+            border-top: 1px solid #000;
+            width: 300px;
+            margin-top: 6px;
+            margin-bottom: 8px;
+        }
+
+        .firma-datos {
+            margin-top: 6px;
+        }
+
+        .resaltado {
+            font-weight: 700;
         }
     </style>
 </head>
 <body>
-    <!-- ENCABEZADO -->
     <div class="header">
-        <img class="img-logo" src="@LOGO" alt="ASEO">
-        <!--<img src="@LOGO_CERTIFICACION" alt="Logo Certificación">-->
+        <div class="header-left">
+            <img class="img-logo-left" src="@LOGO" alt="Logo izquierdo">
+        </div>
+        <div class="header-right">
+            <img class="img-logo-right" src="@LOGO2" alt="Logo derecho">
+        </div>
     </div>
 
-    <!-- TÍTULO -->
-    <h2><b>AUTORIZACIÓN TRATAMIENTO DE DATOS PERSONALES</b></h2>
+    <h2>AUTORIZACIÓN PARA EL TRATAMIENTO DE DATOS PERSONALES</h2>
 
-    <!-- CONTENIDO -->
     <p>
-        Yo <strong>@NOMBRES</strong>, identificado(a) con 
-        <strong>@TIPO_IDENTIFICACION</strong> número <strong>@NUMERO_IDENTIFICACION</strong> 
-        expedida en <strong>@CIUDAD_EXPEDICION</strong>, en cumplimiento de la Ley 1581 de 2012 
-        y el Decreto 1377 de 2013, sobre la protección de Datos Personales, 
-        en calidad de aspirante que hace parte de su proceso de selección de personal 
-        en <strong>ASESOS LA PERFECCIÓN SAS (ALP)</strong>, autorizo expresamente a esta Compañía 
-        para almacenar, consultar, procesar y en general a dar tratamiento a la información 
-        personal que haya suministrado, la cual es indispensable para adelantar el proceso 
-        de selección del cual hago parte.
+        Yo, <span class="resaltado">@NOMBRES</span>, identificado(a) con
+        <span class="resaltado">@TIPO_IDENTIFICACION</span> N.° <span class="resaltado">@NUMERO_IDENTIFICACION</span>,
+        en mi calidad de titular de los datos personales, manifiesto que de manera libre, previa,
+        expresa e informada autorizo a <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>,
+        identificada con NIT N.° 800.068.462-4 (en adelante, la Empresa), para que recolecte,
+        almacene, use, circule, suprima, consulte, actualice, procese y, en general, trate mis
+        datos personales, de conformidad con lo dispuesto en la Ley 1581 de 2012, el Decreto 1377
+        de 2013, el Decreto 1074 de 2015 y las demás normas que regulen la materia en Colombia.
     </p>
 
     <p>
-        En caso de no ser seleccionado, podré solicitar la eliminación de mis datos personales 
-        que hayan sido almacenados en los archivos de ALP y en caso contrario, autorizo su 
-        tratamiento por parte de la Compañía.
+        La presente autorización se otorga para las siguientes finalidades, entre otras legalmente permitidas:
+    </p>
+
+    <ul class="lista">
+        <li>Adelantar y gestionar procesos de reclutamiento, selección y evaluación de personal.</li>
+        <li>Verificar la información suministrada en la hoja de vida y documentos de soporte.</li>
+        <li>Contactarme para fines relacionados con el proceso de selección.</li>
+        <li>
+            En caso de ser vinculado(a), administrar la relación laboral o contractual, incluyendo
+            afiliaciones al sistema de seguridad social, nómina, bienestar, seguridad y salud en el
+            trabajo, control disciplinario, cumplimiento de obligaciones legales y contractuales, y
+            demás actividades propias de la gestión del talento humano.
+        </li>
+        <li>Dar cumplimiento a obligaciones legales, contractuales, contables, administrativas y judiciales.</li>
+        <li>
+            Conservar la información durante la vigencia de la relación laboral o contractual y con
+            posterioridad a su terminación, por el tiempo necesario para atender obligaciones legales,
+            contractuales o requerimientos de autoridades competentes.
+        </li>
+    </ul>
+
+    <p>
+        En caso de no ser seleccionado(a), autorizo a la Empresa para conservar mis datos personales
+        por el término legal o razonable que resulte necesario para futuros procesos de selección,
+        salvo que solicite expresamente su supresión, siempre que no exista un deber legal o contractual
+        que lo impida.
     </p>
 
     <p>
-        Declaro que he leído la Política sobre Tratamiento de Datos Personales de ALP, disponible en 
-        <strong>Descargar; así como haber sido informado que para conocer los 
-        datos personales que reposan en ALP, actualizarlos y/o corregirlos, debo dirigirme a la 
-        Gerencia de Talento Humano de ALP, a través de los siguientes canales:
+        Declaro que he sido informado(a) de mis derechos como titular de la información, en especial
+        a conocer, actualizar, rectificar, solicitar la supresión de mis datos y revocar la autorización,
+        en los términos previstos por la ley, así como de los canales dispuestos por la Empresa para ejercerlos.
     </p>
 
-    <!-- CONTACTO -->
+    <p>
+        Así mismo, manifiesto que conozco y acepto la Política de Tratamiento de Datos Personales de
+        <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>, disponible en
+        <span class="resaltado">https://aseoslaperfeccion.com/</span>, y que para el ejercicio de mis
+        derechos puedo dirigirme a la Gerencia de Talento Humano a través de los siguientes canales:
+    </p>
+
     <div class="contacto">
-        <p>• Extensión 1020 del conmutador (571) 420 48 93</p>
-        <p>• Correo electrónico: calidad@aseoslaperfeccion.com</p>
-        <p>• Personalmente en su oficina ubicada en la Calle 4 Bis #53C-50.-<br>
-             Bogotá
-        </p>
+        <p>• Extensión 1020 del conmutador (601) 420 48 93</p>
+        <p>• Correo electrónico: talentohumano@aseoslaperfeccion.com</p>
+        <p>• Atención personal en la Calle 4 Bis # 53C-50, Bogotá D. C.</p>
     </div>
 
     <p class="footer">
-        En constancia de lo anterior se firma en la ciudad de <strong>Bogotá D.C.</strong> 
-        el día <strong>@FECHA_FIRMA</strong>
+        La presente autorización se entiende otorgada desde el momento en que suministro voluntariamente
+        mi información y/o suscribo el presente documento.
     </p>
 
-    <!-- FIRMA -->
     <div class="firma">
-        <p><strong>Firma autoriza</strong></p>
+        <p class="firma-label">Firma:</p>
         <img src="@FIRMA" alt="Firma">
         <div class="linea-firma"></div>
-        <p>
-            <strong>@NOMBRES</strong><br>
-            Emitido bajo el correo: @EMAIL
+        <p class="firma-datos">
+            <span class="resaltado">@NOMBRES</span><br>
+            Fecha: <span class="resaltado">@FECHA_FIRMA</span><br>
+            E-mail: <span class="resaltado">@EMAIL</span>
         </p>
     </div>
 </body>
