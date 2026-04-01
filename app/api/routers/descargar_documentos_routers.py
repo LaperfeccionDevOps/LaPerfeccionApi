@@ -36,7 +36,8 @@ class DocumentoFactory:
         plantilla_html = leer_plantilla(tipo)
         print(f"Plantilla HTML leída para tipo '{tipo}':\n{plantilla_html[:200]}...")  # Mostrar solo los primeros 200 caracteres
         return reemplazar_datos_plantilla(plantilla_html, datos)
-    
+
+            
 def reemplazar_datos_plantilla(html: str, datos: dict) -> str:
     print(f"Reemplazando datos en la plantilla HTML con: {datos}")
     # Si datos viene como {'additionalProp1': {...}}, tomar el primer valor
@@ -50,7 +51,9 @@ def reemplazar_datos_plantilla(html: str, datos: dict) -> str:
         if 'tipo' in frame.frame.f_locals:
             tipo = frame.frame.f_locals['tipo']
             break
-    for key, value in datos.items():
+
+    for key in sorted(datos.keys(), key=len, reverse=True):
+        value = datos[key]
         if tipo in ['entrevista', 'referencias']:
             html = html.replace(f"@{key}", str(value).upper())
         else:

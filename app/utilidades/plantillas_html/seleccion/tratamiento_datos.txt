@@ -5,56 +5,79 @@
     <title>Autorización para el Tratamiento de Datos Personales</title>
     <style>
         @page {
-            margin-left: 2.5cm;
-            margin-right: 2.5cm;
+            margin-top: 2.2cm;
+            margin-bottom: 2.2cm;
+            margin-left: 2.3cm;
+            margin-right: 2.3cm;
         }
 
         body {
             font-family: Arial, Helvetica, sans-serif;
-            font-size: 15px;
+            font-size: 14px;
             color: #000;
-            line-height: 1.45;
-            margin-top: 25px;
-            margin-bottom: 25px;
-            margin-left: 2.5cm;
-            margin-right: 2.5cm;
+            line-height: 1.5;
+            margin: 0;
+            padding: 0;
         }
 
         .header {
-            display: none;
+            width: 100%;
+            display: table;
+            table-layout: fixed;
+            margin-bottom: 22px;
         }
 
-        .header img {
-            height: 60px;
+        .header-left,
+        .header-right {
+            display: table-cell;
+            width: 50%;
+            vertical-align: top;
+        }
+
+        .header-left {
+            text-align: left;
+        }
+
+        .header-right {
+            text-align: right;
+        }
+
+        .img-logo-left {
+            width: 155px;
+            height: auto;
+        }
+
+        .img-logo-right {
+            width: 180px;
+            height: auto;
         }
 
         h2 {
             text-align: center;
-            font-size: 15px;
-            margin-bottom: 20px;
+            font-size: 16px;
+            margin: 18px 0 20px 0;
             text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 0.3px;
         }
 
         p {
             text-align: justify;
-            margin-bottom: 8px;
+            margin: 0 0 10px 0;
         }
 
         .lista {
-            margin-top: 8px;
-            margin-bottom: 12px;
-            padding-left: 22px;
+            margin: 8px 0 14px 18px;
+            padding-left: 14px;
         }
 
         .lista li {
-            margin-bottom: 6px;
+            margin-bottom: 7px;
             text-align: justify;
         }
 
         .contacto {
-            margin-top: 10px;
-            margin-bottom: 15px;
-            padding-left: 22px;
+            margin: 8px 0 14px 18px;
         }
 
         .contacto p {
@@ -62,53 +85,65 @@
             text-align: left;
         }
 
+        .footer {
+            margin-top: 14px;
+            margin-bottom: 22px;
+        }
+
         .firma {
-            margin-top: 30px;
+            margin-top: 28px;
+        }
+
+        .firma-label {
+            margin-bottom: 8px;
+            font-weight: 700;
         }
 
         .firma img {
-            height: 60px;
+            max-width: 180px;
+            max-height: 70px;
+            height: auto;
+            display: block;
+            margin-bottom: 6px;
         }
 
         .linea-firma {
-            margin-top: 10px;
             border-top: 1px solid #000;
-            width: 320px;
+            width: 300px;
+            margin-top: 6px;
+            margin-bottom: 8px;
         }
 
-        .footer {
-            font-family: Arial, Helvetica, sans-serif;
-            font-size: 15px;
-            color: #000;
-            line-height: 1.45;
-            margin-top: 20px;
-            margin-bottom: 25px;
+        .firma-datos {
+            margin-top: 6px;
         }
 
-        .img-logo {
-            width: 280px;
-            height: auto !important;
-            margin-top: 10px;
+        .resaltado {
+            font-weight: 700;
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <img class="img-logo" src="@LOGO" alt="ASEO">
+        <div class="header-left">
+            <img class="img-logo-left" src="@LOGO" alt="Logo izquierdo">
+        </div>
+        <div class="header-right">
+            <img class="img-logo-right" src="@LOGO2" alt="Logo derecho">
+        </div>
     </div>
 
-    <h2><b>AUTORIZACIÓN PARA EL TRATAMIENTO DE DATOS PERSONALES</b></h2>
+    <h2>AUTORIZACIÓN PARA EL TRATAMIENTO DE DATOS PERSONALES</h2>
 
     <p>
-        Yo, <strong>@NOMBRES</strong>, identificado(a) con
-        <strong>@TIPO_IDENTIFICACION</strong> N.° <strong>@NUMERO_IDENTIFICACION</strong>,
-        en mi calidad de titular de los datos personales, manifiesto que de manera libre,
-        previa, expresa e informada autorizo a <strong>ASEOS LA PERFECCIÓN S.A.S.</strong>,
+        Yo, <span class="resaltado">@NOMBRES</span>, identificado(a) con
+        <span class="resaltado">@TIPO_IDENTIFICACION</span> N.° <span class="resaltado">@NUMERO_IDENTIFICACION</span>,
+        en mi calidad de titular de los datos personales, manifiesto que de manera libre, previa,
+        expresa e informada autorizo a <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>,
         identificada con NIT N.° 800.068.462-4 (en adelante, la Empresa), para que recolecte,
-        almacene, use, circule, suprima, consulte, actualice, procese y, en general, trate
-        mis datos personales, de conformidad con lo dispuesto en la Ley 1581 de 2012,
-        el Decreto 1377 de 2013, el Decreto 1074 de 2015 y las demás normas que regulen
-        la materia en Colombia.
+        almacene, use, circule, suprima, consulte, actualice, procese y, en general, trate mis
+        datos personales, de conformidad con lo dispuesto en la Ley 1581 de 2012, el Decreto 1377
+        de 2013, el Decreto 1074 de 2015 y las demás normas que regulen la materia en Colombia.
     </p>
 
     <p>
@@ -120,16 +155,16 @@
         <li>Verificar la información suministrada en la hoja de vida y documentos de soporte.</li>
         <li>Contactarme para fines relacionados con el proceso de selección.</li>
         <li>
-            En caso de ser vinculado(a), administrar la relación laboral o contractual,
-            incluyendo afiliaciones al sistema de seguridad social, nómina, bienestar,
-            seguridad y salud en el trabajo, control disciplinario, cumplimiento de obligaciones
-            legales y contractuales, y demás actividades propias de la gestión del talento humano.
+            En caso de ser vinculado(a), administrar la relación laboral o contractual, incluyendo
+            afiliaciones al sistema de seguridad social, nómina, bienestar, seguridad y salud en el
+            trabajo, control disciplinario, cumplimiento de obligaciones legales y contractuales, y
+            demás actividades propias de la gestión del talento humano.
         </li>
         <li>Dar cumplimiento a obligaciones legales, contractuales, contables, administrativas y judiciales.</li>
         <li>
-            Conservar la información durante la vigencia de la relación laboral o contractual
-            y con posterioridad a su terminación, por el tiempo necesario para atender obligaciones
-            legales, contractuales o requerimientos de autoridades competentes.
+            Conservar la información durante la vigencia de la relación laboral o contractual y con
+            posterioridad a su terminación, por el tiempo necesario para atender obligaciones legales,
+            contractuales o requerimientos de autoridades competentes.
         </li>
     </ul>
 
@@ -148,9 +183,9 @@
 
     <p>
         Así mismo, manifiesto que conozco y acepto la Política de Tratamiento de Datos Personales de
-        <strong>ASEOS LA PERFECCIÓN S.A.S.</strong>, disponible en
-        <strong>https://aseoslaperfeccion.com/</strong>, y que para el ejercicio de mis derechos puedo
-        dirigirme a la Gerencia de Talento Humano a través de los siguientes canales:
+        <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>, disponible en
+        <span class="resaltado">https://aseoslaperfeccion.com/</span>, y que para el ejercicio de mis
+        derechos puedo dirigirme a la Gerencia de Talento Humano a través de los siguientes canales:
     </p>
 
     <div class="contacto">
@@ -165,13 +200,13 @@
     </p>
 
     <div class="firma">
-        <p><strong>Firma:</strong></p>
+        <p class="firma-label">Firma:</p>
         <img src="@FIRMA" alt="Firma">
         <div class="linea-firma"></div>
-        <p>
-            <strong>@NOMBRES</strong><br>
-            Fecha: <strong>@FECHA_FIRMA</strong><br>
-            E-mail: <strong>@EMAIL</strong>
+        <p class="firma-datos">
+            <span class="resaltado">@NOMBRES</span><br>
+            Fecha: <span class="resaltado">@FECHA_FIRMA</span><br>
+            E-mail: <span class="resaltado">@EMAIL</span>
         </p>
     </div>
 </body>
