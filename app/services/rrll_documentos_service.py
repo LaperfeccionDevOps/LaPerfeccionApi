@@ -18,6 +18,8 @@ TIPO_DOC_CARTA_FINALIZACION = 4
 TEMPLATE_PAQUETE_RETIRO = BASE_DIR / "templates" / "rrll" / "paquete" / "paquete_retiro.docx"
 TIPO_DOC_PAQUETE_RETIRO = 10
 
+TEMPLATE_PAQUETE_RETIRO_VOLUNTARIO = BASE_DIR / "templates" / "rrll" / "paquete" / "paquete_retiro_voluntario.docx"
+
 OUTPUT_DIR = BASE_DIR / "storage" / "rrll" / "generados"
 
 
@@ -253,7 +255,30 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     print("DEBUG DATOS PAQUETE:", datos)
-    doc = Document(str(TEMPLATE_PAQUETE_RETIRO))
+
+    q_motivo = text("""
+        SELECT "IdMotivoRetiro"
+        FROM public."RetiroLaboral"
+        WHERE "IdRetiroLaboral" = :id_retiro_laboral
+        LIMIT 1;
+    """)
+
+    row_motivo = db.execute(q_motivo, {
+        "id_retiro_laboral": id_retiro_laboral
+    }).mappings().first()
+
+    id_motivo = row_motivo["IdMotivoRetiro"] if row_motivo else None
+
+    print("DEBUG ID MOTIVO RETIRO:", id_motivo)
+
+    es_voluntario = (id_motivo == 1)
+
+    if es_voluntario:
+        print("DEBUG PAQUETE: usando plantilla VOLUNTARIO")
+        doc = Document(str(TEMPLATE_PAQUETE_RETIRO_VOLUNTARIO))
+    else:
+        print("DEBUG PAQUETE: usando plantilla NORMAL")
+        doc = Document(str(TEMPLATE_PAQUETE_RETIRO))
 
     fecha_fin = datos.get("FechaAusencia")
     if fecha_fin:
@@ -289,7 +314,6 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
     doc.save(str(output_path))
 
     return output_path
-
 
 def generar_y_registrar_primer_llamado(
     db,
