@@ -404,9 +404,9 @@ def buscar_trabajador_detalle_por_documento(
     LIMIT 1
 ) rrll ON true
              
-        LEFT JOIN LATERAL (
-        SELECT
-        p."FechaCreacion",
+     LEFT JOIN LATERAL (
+    SELECT
+        p."FechaCarga" AS "FechaCreacion",
         p."FechaUltimoDiaLaborado",
         p."IdRetiroLaboral"
         FROM public."PazYSalvoOperaciones" p
@@ -414,7 +414,6 @@ def buscar_trabajador_detalle_por_documento(
         ORDER BY p."IdPazYSalvo" DESC
         LIMIT 1
     ) pys ON true
-
         LEFT JOIN public."Cliente" c
           ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
 
