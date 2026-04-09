@@ -157,7 +157,6 @@ async def cargar_adjunto_retiro(
     nombre_sanitizado = f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{timestamp}{extension}"
     ruta_fisica = carpeta_retiro / nombre_sanitizado
 
-    # ✅ NUEVO: ruta relativa para guardar en BD
     ruta_relativa = Path("storage") / "rrll" / "retiros" / str(id_retiro_laboral) / nombre_sanitizado
 
     contenido = await file.read()
@@ -268,6 +267,23 @@ async def cargar_adjunto_retiro(
             "usuario_actualizacion": UsuarioActualizacion
         }).mappings().first()
 
+        # ✅ TEMPORAL:
+        # Si Yeny adjunta manualmente el Paz y Salvo (tipo 2),
+        # guardar la fecha de envío a operaciones en RetiroLaboral.
+        if IdTipoDocumentoRetiro == 2:
+            q_upd_fecha_envio = text("""
+                UPDATE public."RetiroLaboral"
+                SET
+                    "FechaEnvioOperaciones" = now(),
+                    "FechaActualizacion" = now(),
+                    "UsuarioActualizacion" = :usuario_actualizacion
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+            """)
+            db.execute(q_upd_fecha_envio, {
+                "id_retiro_laboral": id_retiro_laboral,
+                "usuario_actualizacion": UsuarioActualizacion
+            })
+
         db.commit()
         return dict(row)
 
@@ -353,9 +369,9 @@ def descargar_adjunto(
 
     if not ruta.exists():
         raise HTTPException(
-    status_code=404,
-    detail="El archivo no fue encontrado en el almacenamiento actual. Puede ser un adjunto antiguo no disponible."
-)
+            status_code=404,
+            detail="El archivo no fue encontrado en el almacenamiento actual. Puede ser un adjunto antiguo no disponible."
+        )
 
     return FileResponse(
         path=str(ruta),
@@ -373,6 +389,8 @@ def eliminar_adjunto(
     q_get = text("""
         SELECT
             "IdRetiroLaboralAdjunto",
+            "IdRetiroLaboral",
+            "IdTipoDocumentoRetiro",
             "RutaArchivo"
         FROM public."RetiroLaboralAdjunto"
         WHERE "IdRetiroLaboralAdjunto" = :id_adjunto
@@ -397,6 +415,39 @@ def eliminar_adjunto(
             "id_adjunto": id_adjunto,
             "usuario_actualizacion": usuario_actualizacion
         })
+
+        # ✅ TEMPORAL:
+        # Si se elimina el Paz y Salvo manual (tipo 2),
+        # y ya no queda otro adjunto activo de ese tipo para el retiro,
+        # limpiar la FechaEnvioOperaciones.
+        if current["IdTipoDocumentoRetiro"] == 2:
+            q_existe_otro = text("""
+                SELECT 1
+                FROM public."RetiroLaboralAdjunto"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND "IdTipoDocumentoRetiro" = 2
+                  AND COALESCE("Eliminado", false) = false
+                  AND COALESCE("Activo", true) = true
+                LIMIT 1;
+            """)
+            otro = db.execute(q_existe_otro, {
+                "id_retiro_laboral": current["IdRetiroLaboral"]
+            }).first()
+
+            if not otro:
+                q_limpiar_fecha = text("""
+                    UPDATE public."RetiroLaboral"
+                    SET
+                        "FechaEnvioOperaciones" = NULL,
+                        "FechaActualizacion" = now(),
+                        "UsuarioActualizacion" = :usuario_actualizacion
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+                """)
+                db.execute(q_limpiar_fecha, {
+                    "id_retiro_laboral": current["IdRetiroLaboral"],
+                    "usuario_actualizacion": usuario_actualizacion
+                })
+
         db.commit()
     except Exception as e:
         db.rollback()

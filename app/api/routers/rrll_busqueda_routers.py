@@ -360,7 +360,7 @@ def buscar_trabajador_detalle_por_documento(
           mr."Nombre"                                 AS "MotivoRetiroNombre",
           rrll."FechaProceso"::text                   AS "FechaProceso",
           rrll."FechaCierre"::text                    AS "FechaCierre",
-          pys."FechaCreacion"::text                   AS "FechaEnvioOperaciones",
+          COALESCE(rrll."FechaEnvioOperaciones"::text, pys."FechaCreacion"::text) AS "FechaEnvioOperaciones",
           rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
           rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
           rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
@@ -404,9 +404,9 @@ def buscar_trabajador_detalle_por_documento(
     LIMIT 1
 ) rrll ON true
              
-     LEFT JOIN LATERAL (
+  LEFT JOIN LATERAL (
     SELECT
-        p."FechaCarga" AS "FechaCreacion",
+        COALESCE(p."FechaCarga", p."FechaCreacion") AS "FechaCreacion",
         p."FechaUltimoDiaLaborado",
         p."IdRetiroLaboral"
         FROM public."PazYSalvoOperaciones" p
