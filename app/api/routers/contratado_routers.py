@@ -3,13 +3,24 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from infrastructure.db.deps import get_db
 from pydantic import BaseModel
+from datetime import datetime, timedelta
+
+from utilidades.reporte_synergy_excel import (
+    consultar_datos_reporte_synergy,
+    normalizar_filas_reporte,
+    generar_excel_reporte,
+)
+
+from utilidades.drive_service import subir_archivo_drive
 
 router = APIRouter(prefix="/api", tags=["Contratación - Contratado"])
 
 ESTADO_CONTRATADO = 25  # ✅ según tu tabla EstadoProceso
 
+
 class ContratadoUpdate(BaseModel):
     IdRegistroPersonal: int
+
 
 @router.put("/contratado")
 def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
@@ -36,9 +47,35 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
 
         db.commit()
 
+        hoy = datetime.now().date()
+        hace_30_dias = hoy - timedelta(days=800)
+
+        rows = consultar_datos_reporte_synergy(
+            db,
+            hace_30_dias.strftime("%Y-%m-%d"),
+            hoy.strftime("%Y-%m-%d")
+        )
+        filas = normalizar_filas_reporte(rows)
+        ruta_archivo = generar_excel_reporte(
+            filas if filas else [{"sin_datos": "No hay registros"}]
+        )
+
+        archivo_drive = None
+        nombre_archivo = None
+
+        if ruta_archivo:
+            nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
+            archivo_drive = subir_archivo_drive(ruta_archivo, nombre_archivo)
+
         return {
             "message": "Aspirante marcado como CONTRATADO.",
-            "data": updated
+            "data": updated,
+            "archivoGenerado": nombre_archivo,
+            "archivoDrive": {
+                "id": archivo_drive["id"] if archivo_drive else None,
+                "name": archivo_drive["name"] if archivo_drive else None,
+                "webViewLink": archivo_drive["webViewLink"] if archivo_drive else None,
+            }
         }
 
     except Exception as e:
