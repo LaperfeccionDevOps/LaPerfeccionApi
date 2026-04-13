@@ -11,7 +11,10 @@ from utilidades.reporte_synergy_excel import (
     generar_excel_reporte,
 )
 
-from utilidades.drive_service import subir_archivo_drive
+from utilidades.drive_service import (
+    subir_archivo_drive,
+    sincronizar_registro_contratacion_dotacion,
+)
 
 router = APIRouter(prefix="/api", tags=["Contratación - Contratado"])
 
@@ -62,10 +65,15 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
 
         archivo_drive = None
         nombre_archivo = None
+        archivo_sheet = None
 
         if ruta_archivo:
             nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
             archivo_drive = subir_archivo_drive(ruta_archivo, nombre_archivo)
+
+        archivo_sheet = sincronizar_registro_contratacion_dotacion(
+            filas if filas else [{"sin_datos": "No hay registros"}]
+        )
 
         return {
             "message": "Aspirante marcado como CONTRATADO.",
@@ -75,6 +83,11 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
                 "id": archivo_drive["id"] if archivo_drive else None,
                 "name": archivo_drive["name"] if archivo_drive else None,
                 "webViewLink": archivo_drive["webViewLink"] if archivo_drive else None,
+            },
+            "archivoSheet": {
+                "id": archivo_sheet["id"] if archivo_sheet else None,
+                "name": archivo_sheet["name"] if archivo_sheet else None,
+                "webViewLink": archivo_sheet["webViewLink"] if archivo_sheet else None,
             }
         }
 
