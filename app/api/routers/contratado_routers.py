@@ -9,6 +9,7 @@ from utilidades.reporte_synergy_excel import (
     consultar_datos_reporte_synergy,
     normalizar_filas_reporte,
     generar_excel_reporte,
+    enriquecer_filas_para_sheet_con_cargo,
 )
 
 from utilidades.drive_service import (
@@ -59,9 +60,11 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             hoy.strftime("%Y-%m-%d")
         )
         filas = normalizar_filas_reporte(rows)
-        ruta_archivo = generar_excel_reporte(
-            filas if filas else [{"sin_datos": "No hay registros"}]
-        )
+
+        filas_excel = filas if filas else [{"sin_datos": "No hay registros"}]
+        filas_sheet = enriquecer_filas_para_sheet_con_cargo(db, filas_excel)
+
+        ruta_archivo = generar_excel_reporte(filas_excel)
 
         archivo_drive = None
         nombre_archivo = None
@@ -71,9 +74,7 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
             archivo_drive = subir_archivo_drive(ruta_archivo, nombre_archivo)
 
-        archivo_sheet = sincronizar_registro_contratacion_dotacion(
-            filas if filas else [{"sin_datos": "No hay registros"}]
-        )
+        archivo_sheet = sincronizar_registro_contratacion_dotacion(filas_sheet)
 
         return {
             "message": "Aspirante marcado como CONTRATADO.",
