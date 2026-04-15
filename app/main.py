@@ -1,10 +1,42 @@
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from infrastructure.db.deps import get_db
 from api.routers.auth import router as auth_router
+from api.routers.aspirante_routers import router as aspirante_router
+from api.routers.consultar_combos_routers import router as consultar_combos_router
+from api.routers.cita_routers import router as cita_router
+from api.routers.entrevista_routers import router as entrevista_router
+from api.routers import estado_proceso_routers
+from api.routers.experiencia_laboral_routers import router as experiencia_laboral_router
+from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
+from api.routers.documentos_ingreso_routers import router as documentos_ingreso_router
+from api.routers.contratacion_registro_routers import router as contratacion_registro_router
+from api.routers.asignacion_cargo_cliente_routers import router as asignacion_cargo_cliente_router
+from api.routers.referencia_personal_validacion_routers import router as ref_pers_val_router
+from api.routers.experiencia_laboral_validacion_routers import router as experiencia_laboral_validacion_router
+from api.routers.perfil_aspirante_routers import router as perfil_aspirante_router
+from api.routers.datos_proceso_aspirante_routers import router as datos_proceso_aspirante_router
+from api.routers.documentos_seguridad_routers import router as documentos_seguridad_router
+from api.routers.contratos_obra_labor_routers import router as contratos_obra_labor_router
+from api.routers.entrevistas_candidato_routers import router as entrevistas_candidato_router
+from api.routers.motivo_cierre_routers import router as motivo_cierre_router
+from api.routers.observaciones_nucleo_familiar_routers import router as obs_nf_router
+from api.routers.observaciones_experiencia_laboral_routers import router as observaciones_experiencia_laboral_router
+from api.routers.contratacion_basica_routers import router as contratacion_basica_router
+from api.routers.datos_seleccion_routers import router as datos_seleccion_router
+from api.routers.formacion_educacion_routers import router as formacion_educacion_router
+from api.routers.tratamiento_datos_routers import router as tratamiento_datos_router
+from api.routers.descargar_documentos_routers import router as descargar_documentos_router
+from api.routers.documentos_contratacion_routers import router as subir_documento_contratacion
+from api.routers.rechazo_contratacion_routers import router as rechazo_contratacion_router
+from api.routers.contratado_routers import router as contratado_router
+from api.routers.configuracion_routers import router as configuracion_router
+from api.routers import retiro_laboral_routers
+from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
+from api.routers.retiro_laboral_adjunto_routers import router as retiro_laboral_adjunto_router
+from api.routers.entrevista_retiro_routers import router as entrevista_retiro_router
+from api.routers.rrll_excel_routers import router as rrll_excel_router
+
 
 app = FastAPI(
     title="La Perfeccion - Backend",
@@ -43,35 +75,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.routers.aspirante_routers import (router as aspirante_router,crear_registro_personal)
-from api.routers.consultar_combos_routers import (router as consultar_combos_router,listar_tipos_identificacion)
-from api.routers.cita_routers import router as cita_router
-from api.routers.entrevista_routers import router as entrevista_router
-from api.routers import estado_proceso_routers
-from api.routers.experiencia_laboral_routers import (router as experiencia_laboral_router)
-from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
-from api.routers.documentos_ingreso_routers import router as documentos_ingreso_router
-from api.routers.contratacion_registro_routers import router as contratacion_registro_router
-from api.routers.asignacion_cargo_cliente_routers import router as asignacion_cargo_cliente_router
-from api.routers.referencia_personal_validacion_routers import router as ref_pers_val_router
-from api.routers.experiencia_laboral_validacion_routers import router as experiencia_laboral_validacion_router
-from api.routers.perfil_aspirante_routers import router as perfil_aspirante_router
-from api.routers.datos_proceso_aspirante_routers import router as datos_proceso_aspirante_router
-from api.routers.documentos_seguridad_routers import router as documentos_seguridad_router
-from api.routers.contratos_obra_labor_routers import router as contratos_obra_labor_router
-from api.routers.entrevistas_candidato_routers import router as entrevistas_candidato_router
-from api.routers.motivo_cierre_routers import router as motivo_cierre_router
-from api.routers.observaciones_nucleo_familiar_routers import router as obs_nf_router
-from api.routers.observaciones_experiencia_laboral_routers import router as observaciones_experiencia_laboral_router
-from api.routers.contratacion_basica_routers import router as contratacion_basica_router
-from api.routers.datos_seleccion_routers import router as datos_seleccion_router
-from api.routers.formacion_educacion_routers import router as formacion_educacion_router
-from api.routers.tratamiento_datos_routers import router as tratamiento_datos_router
-from api.routers.descargar_documentos_routers import router as descargar_documentos_router
-from api.routers.documentos_contratacion_routers import router as subir_documento_contratacion
-from api.routers.rechazo_contratacion_routers import router as rechazo_contratacion_router
-from api.routers.contratado_routers import router as contratado_router
-from api.routers.configuracion_routers import router as configuracion_router
 
 # ─────────────────────────────────────────────
 # 📌 Routers
@@ -107,6 +110,11 @@ app.include_router(obs_nf_router, prefix="/api")
 app.include_router(subir_documento_contratacion, prefix="/api")
 app.include_router(rechazo_contratacion_router)
 app.include_router(configuracion_router, prefix="/api")
+app.include_router(retiro_laboral_routers.router)
+app.include_router(rrll_busqueda_router)
+app.include_router(retiro_laboral_adjunto_router)
+app.include_router(entrevista_retiro_router)
+app.include_router(rrll_excel_router)
 
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
