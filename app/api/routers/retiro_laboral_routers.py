@@ -297,6 +297,7 @@ def actualizar_detalle_retiro_laboral(
         query = text("""
             UPDATE public."RetiroLaboral"
             SET
+                "FechaRetiro" = COALESCE(:FechaRetiro, "FechaRetiro"),
                 "IdTipificacionRetiro" = COALESCE(:IdTipificacionRetiro, "IdTipificacionRetiro"),
                 "ObservacionRetiro" = COALESCE(:ObservacionRetiro, "ObservacionRetiro"),
                 "DevolucionCarnet" = COALESCE(:DevolucionCarnet, "DevolucionCarnet"),
@@ -306,6 +307,7 @@ def actualizar_detalle_retiro_laboral(
             WHERE "IdRetiroLaboral" = :id_retiro_laboral
             RETURNING
                 "IdRetiroLaboral",
+                "FechaRetiro",
                 "IdTipificacionRetiro",
                 "ObservacionRetiro",
                 "DevolucionCarnet",
@@ -315,6 +317,7 @@ def actualizar_detalle_retiro_laboral(
         """)
 
         result = db.execute(query, {
+            "FechaRetiro": payload.FechaRetiro,
             "IdTipificacionRetiro": payload.IdTipificacionRetiro,
             "ObservacionRetiro": payload.ObservacionRetiro,
             "DevolucionCarnet": payload.DevolucionCarnet,
@@ -347,7 +350,7 @@ def actualizar_detalle_retiro_laboral(
             status_code=500,
             detail=f"Error actualizando detalle del retiro: {str(e)}"
         )
-    
+        
 @router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
 def generar_primer_llamado_endpoint(
     id_retiro_laboral: int,

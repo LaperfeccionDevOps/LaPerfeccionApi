@@ -9,7 +9,6 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
-from openpyxl.chart.legend import Legend
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -472,7 +471,7 @@ def exportar_excel_retiros(
         ws_dashboard.add_chart(pie_legalizados, "E12")
 
         # ==================================================
-        # BLOQUE 2 - TIPIFICACIONES (TABLA + GRÁFICA)
+        # BLOQUE 2 - TIPIFICACIONES (SOLO TABLA)
         # ==================================================
         ws_dashboard.merge_cells("A28:B28")
         ws_dashboard["A28"] = "RESUMEN DE TIPIFICACIONES"
@@ -511,57 +510,6 @@ def exportar_excel_retiros(
             ws_dashboard.row_dimensions[idx].height = 34
 
         fila_tip_fin = max(fila_tip_inicio, fila_tip_inicio + len(top_tipificaciones) - 1)
-
-        # Columna auxiliar para la gráfica
-        ws_dashboard["C29"] = "ETIQUETA_GRAFICA_TIP"
-        for idx, (tip, _) in enumerate(top_tipificaciones, start=fila_tip_inicio):
-            ws_dashboard[f"C{idx}"] = truncar_texto(tip, 22)
-
-        # Ocultar columna auxiliar
-        ws_dashboard.column_dimensions["C"].hidden = True
-
-        bar_tipificaciones = BarChart()
-        bar_tipificaciones.type = "bar"
-        bar_tipificaciones.style = 10
-        bar_tipificaciones.title = "Tipificación de retiro"
-        bar_tipificaciones.height = 5.3
-        bar_tipificaciones.width = 8.8
-        bar_tipificaciones.legend = None
-        bar_tipificaciones.gapWidth = 110
-        bar_tipificaciones.overlap = 0
-
-        bar_tipificaciones.x_axis.title = None
-        bar_tipificaciones.y_axis.title = None
-
-        data_tip = Reference(ws_dashboard, min_col=2, min_row=30, max_row=fila_tip_fin)
-        categories_tip = Reference(ws_dashboard, min_col=1, min_row=30, max_row=fila_tip_fin)
-
-        bar_tipificaciones.add_data(data_tip, titles_from_data=False)
-        bar_tipificaciones.set_categories(categories_tip)
-
-        bar_tipificaciones.dLbls = DataLabelList()
-        bar_tipificaciones.dLbls.showVal = True
-        bar_tipificaciones.dLbls.showCatName = False
-        bar_tipificaciones.dLbls.showSerName = False
-        bar_tipificaciones.dLbls.showLegendKey = False
-        bar_tipificaciones.dLbls.position = "outEnd"
-
-        try:
-            bar_tipificaciones.x_axis.delete = True
-        except Exception:
-            pass
-
-        try:
-            bar_tipificaciones.y_axis.delete = True
-        except Exception:
-            pass
-
-        try:
-            bar_tipificaciones.x_axis.majorGridlines = None
-        except Exception:
-            pass
-
-        ws_dashboard.add_chart(bar_tipificaciones, "D28")
 
         # ==================================================
         # BLOQUE 3 - MOTIVOS DE RETIRO (TABLA + GRÁFICA)
