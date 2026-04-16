@@ -70,7 +70,7 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
             COALESCE(da."Barrio", '') AS "Barrio",
             COALESCE(rp."Celular", '') AS "Telefono",
             COALESCE(ca."NombreCargo", '') AS "Cargo",
-            psy."FechaUltimoDiaLaborado" AS "FechaAusencia"
+            COALESCE(psy."FechaUltimoDiaLaborado", rl."FechaRetiro") AS "FechaAusencia"
         FROM public."RetiroLaboral" rl
         INNER JOIN public."RegistroPersonal" rp
             ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
