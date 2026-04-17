@@ -249,3 +249,7 @@ app/__pycache__/main.cpython-314.pyc
 app/api/routers/__pycache__/formacion_educacion_routers.cpython-314.pyc
 app/repositories/__pycache__/experiencia_laboral_validacion_repo.cpython-314.pyc
 app/services/__pycache__/contratacion_basica_service.cpython-311.pyc
+app/templates/rrll/paquete/paquete_retiro_voluntario.docx
+app/credenciales/oauth_client.json
+.gitignore
+app/credenciales/token.pickle
