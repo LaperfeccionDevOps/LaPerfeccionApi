@@ -349,7 +349,12 @@ def descargar_adjunto(
         raise HTTPException(status_code=404, detail="No existe el adjunto.")
 
     ruta_guardada = row["RutaArchivo"] or ""
-    ruta = Path(ruta_guardada)
+
+# SI ES RUTA ABSOLUTA VIEJA → ignorarla
+    if ruta_guardada.startswith("C:"):
+     ruta = BASE_STORAGE / str(row["IdRetiroLaboral"]) / row["NombreArchivo"]
+    else:
+     ruta = APP_DIR / Path(ruta_guardada)
 
     if ruta.is_absolute():
         if not ruta.exists():

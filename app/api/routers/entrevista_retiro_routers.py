@@ -34,6 +34,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PDF_DIR = BASE_DIR / "entrevistas_pdf"
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 
+MAX_ENTREVISTAS_POR_RETIRO = 4
+
 # =========================================================
 #   SCHEMAS
 # =========================================================
@@ -47,11 +49,11 @@ class RespuestaItem(BaseModel):
     respuesta: str
 
 
-
 class GuardarEntrevistaRequest(BaseModel):
     token: Optional[str] = None
     numero_identificacion: str
     respuestas: List[RespuestaItem]
+
 
 class ValidarIdentificacionEntrevistaRequest(BaseModel):
     numero_identificacion: str
@@ -233,6 +235,19 @@ def _build_entrevista_pdf(cabecera: dict, respuestas: list[dict]) -> BytesIO:
     return buffer
 
 
+def _contar_entrevistas_por_retiro(db: Session, id_retiro_laboral: int) -> int:
+    total = db.execute(
+        text("""
+            SELECT COUNT(*) AS total
+            FROM "EntrevistaRetiro"
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral
+        """),
+        {"id_retiro_laboral": id_retiro_laboral}
+    ).scalar()
+
+    return int(total or 0)
+
+
 # =========================================================
 #   GENERAR TOKEN DE ENTREVISTA DE RETIRO
 # =========================================================
@@ -380,20 +395,15 @@ def validar_acceso_entrevista_retiro(
                 detail="El número de identificación no corresponde al trabajador del retiro"
             )
 
-        entrevista = db.execute(
-            text("""
-                SELECT 1
-                FROM "EntrevistaRetiro"
-                WHERE "IdRetiroLaboral" = :id_retiro_laboral
-                LIMIT 1
-            """),
-            {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
-        ).first()
+        total_entrevistas_retiro = _contar_entrevistas_por_retiro(
+            db,
+            retiro["IdRetiroLaboral"]
+        )
 
-        if entrevista:
+        if total_entrevistas_retiro >= MAX_ENTREVISTAS_POR_RETIRO:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La entrevista de retiro ya fue diligenciada"
+                detail=f"Este retiro ya alcanzó el máximo de {MAX_ENTREVISTAS_POR_RETIRO} entrevistas."
             )
 
         nombre_completo = f'{retiro["Nombres"]} {retiro["Apellidos"]}'.strip()
@@ -406,7 +416,9 @@ def validar_acceso_entrevista_retiro(
                 "NumeroIdentificacion": retiro["NumeroIdentificacion"],
                 "NombreCompleto": nombre_completo,
                 "EstadoEntrevista": retiro["EstadoEntrevista"],
-                "PuedeContinuar": True
+                "PuedeContinuar": True,
+                "TotalEntrevistasActuales": total_entrevistas_retiro,
+                "MaximoPermitido": MAX_ENTREVISTAS_POR_RETIRO
             }
         }
 
@@ -548,20 +560,15 @@ def consultar_formulario_entrevista_por_token(
                 detail="La entrevista ya no se encuentra disponible"
             )
 
-        entrevista_existente = db.execute(
-            text("""
-                SELECT 1
-                FROM "EntrevistaRetiro"
-                WHERE "IdRetiroLaboral" = :id_retiro_laboral
-                LIMIT 1
-            """),
-            {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
-        ).first()
+        total_entrevistas_retiro = _contar_entrevistas_por_retiro(
+            db,
+            retiro["IdRetiroLaboral"]
+        )
 
-        if entrevista_existente:
+        if total_entrevistas_retiro >= MAX_ENTREVISTAS_POR_RETIRO:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La entrevista de retiro ya fue diligenciada"
+                detail=f"Este retiro ya alcanzó el máximo de {MAX_ENTREVISTAS_POR_RETIRO} entrevistas."
             )
 
         preguntas = db.execute(
@@ -590,7 +597,9 @@ def consultar_formulario_entrevista_por_token(
                 "NumeroIdentificacion": str(retiro["NumeroIdentificacion"]).strip(),
                 "NombreCompleto": nombre_completo,
                 "EstadoEntrevista": retiro["EstadoEntrevista"],
-                "Preguntas": [dict(p) for p in preguntas]
+                "Preguntas": [dict(p) for p in preguntas],
+                "TotalEntrevistasActuales": total_entrevistas_retiro,
+                "MaximoPermitido": MAX_ENTREVISTAS_POR_RETIRO
             }
         }
 
@@ -670,24 +679,6 @@ def guardar_entrevista_retiro(
         numero_in = str(payload.numero_identificacion).strip()
 
         # =========================================
-        # VALIDACIÓN: máximo 5 entrevistas
-        # =========================================
-        total_entrevistas = db.execute(
-            text("""
-                SELECT COUNT(*) AS total
-                FROM "EntrevistaRetiro"
-                WHERE "NumeroIdentificacionConfirmada" = :numero_identificacion
-            """),
-            {"numero_identificacion": numero_in}
-        ).scalar()
-
-        if total_entrevistas is not None and int(total_entrevistas) >= 5:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El trabajador ya alcanzó el máximo de 5 entrevistas de retiro."
-            )
-
-        # =========================================
         # VALIDAR QUE ENVÍE RESPUESTAS
         # =========================================
         if not payload.respuestas:
@@ -751,23 +742,22 @@ def guardar_entrevista_retiro(
                     detail="Identificación incorrecta"
                 )
 
-            existe = db.execute(
-                text("""
-                    SELECT 1
-                    FROM "EntrevistaRetiro"
-                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
-                    LIMIT 1
-                """),
-                {"id_retiro_laboral": retiro["IdRetiroLaboral"]}
-            ).first()
+            id_retiro_laboral = retiro["IdRetiroLaboral"]
 
-            if existe:
+        # =========================================
+        # VALIDACIÓN: máximo 4 entrevistas por retiro
+        # =========================================
+        if id_retiro_laboral:
+            total_entrevistas_retiro = _contar_entrevistas_por_retiro(
+                db,
+                id_retiro_laboral
+            )
+
+            if total_entrevistas_retiro >= MAX_ENTREVISTAS_POR_RETIRO:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="La entrevista ya fue diligenciada"
+                    detail=f"Este retiro ya alcanzó el máximo de {MAX_ENTREVISTAS_POR_RETIRO} entrevistas."
                 )
-
-            id_retiro_laboral = retiro["IdRetiroLaboral"]
 
         # =========================================
         # INSERT ENTREVISTA
@@ -909,6 +899,7 @@ def guardar_entrevista_retiro(
             detail=f"Error al guardar entrevista: {str(e)}"
         )
 
+
 # =========================================================
 #   CONSULTAR ENTREVISTA DE RETIRO POR ID RETIRO LABORAL
 # =========================================================
@@ -1000,7 +991,7 @@ def consultar_entrevista_retiro_por_retiro(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al consultar entrevista: {str(e)}"
         )
-    
+
 
 @router.get(
     "/entrevista-retiro/historial/{id_registro_personal}",
