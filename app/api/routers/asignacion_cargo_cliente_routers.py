@@ -167,50 +167,65 @@ def version():
 @router.get(
     "/{id_registro_personal}",
     response_model=AsignacionOut,
-    response_model_exclude_none=False,  # ✅ incluye CargoNombre/ClienteNombre aunque sean None
+    response_model_exclude_none=False,
 )
 def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db)):
-    print(f"✅ [asignacion-cargo-cliente] {ROUTER_VERSION} - GET:", id_registro_personal)
+    print(f"✅ [asignacion-cargo-cliente] {ROUTER_VERSION} - GET: {id_registro_personal}")
 
-    row = db.execute(text("""
-        SELECT
-            "IdRegistroPersonal",
-            "IdCargo",
-            "IdCliente",
-            "Salario",
-            "UsuarioActualizacion",
-            "FechaCreacion",
-            "FechaActualizacion"
-        FROM public."AsignacionCargoCliente"
-        WHERE "IdRegistroPersonal" = :id
-        ORDER BY COALESCE("FechaActualizacion","FechaCreacion") DESC
-        LIMIT 1
-    """), {"id": id_registro_personal}).mappings().first()
+    try:
+        row = db.execute(text("""
+            SELECT
+                "IdRegistroPersonal",
+                "IdCargo",
+                "IdCliente",
+                "Salario",
+                "UsuarioActualizacion",
+                "FechaCreacion",
+                "FechaActualizacion"
+            FROM public."AsignacionCargoCliente"
+            WHERE "IdRegistroPersonal" = :id
+            ORDER BY COALESCE("FechaActualizacion","FechaCreacion") DESC
+            LIMIT 1
+        """), {"id": id_registro_personal}).mappings().first()
 
-    if not row:
-        raise HTTPException(
-            status_code=404,
-            detail="No existe asignación (cargo/cliente/salario) para este aspirante."
+        print(f"🔎 row crudo para {id_registro_personal}: {row}")
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="No existe asignación (cargo/cliente/salario) para este aspirante."
+            )
+
+        id_cargo = row.get("IdCargo")
+        id_cliente = row.get("IdCliente")
+
+        print(f"🔎 id_cargo={id_cargo} | id_cliente={id_cliente}")
+
+        cargo_nombre = _resolver_cargo_nombre(db, id_cargo)
+        cliente_nombre = _resolver_cliente_nombre(db, id_cliente)
+
+        print(f"🔎 cargo_nombre={cargo_nombre} | cliente_nombre={cliente_nombre}")
+
+        return AsignacionOut(
+            IdRegistroPersonal=row["IdRegistroPersonal"],
+            IdCargo=int(id_cargo) if id_cargo is not None else 0,
+            IdCliente=int(id_cliente) if id_cliente is not None else 0,
+            Salario=float(row["Salario"]) if row["Salario"] is not None else 0.0,
+            UsuarioActualizacion=row.get("UsuarioActualizacion"),
+            FechaCreacion=_dt_to_iso(row.get("FechaCreacion")),
+            FechaActualizacion=_dt_to_iso(row.get("FechaActualizacion")),
+            CargoNombre=cargo_nombre,
+            ClienteNombre=cliente_nombre,
         )
 
-    id_cargo = row.get("IdCargo")
-    id_cliente = row.get("IdCliente")
-
-    cargo_nombre = _resolver_cargo_nombre(db, id_cargo)
-    cliente_nombre = _resolver_cliente_nombre(db, id_cliente)
-
-    return AsignacionOut(
-        IdRegistroPersonal=row["IdRegistroPersonal"],
-        IdCargo=int(id_cargo) if id_cargo is not None else 0,
-        IdCliente=int(id_cliente) if id_cliente is not None else 0,
-        Salario=float(row["Salario"]) if row["Salario"] is not None else 0.0,
-        UsuarioActualizacion=row.get("UsuarioActualizacion"),
-        FechaCreacion=_dt_to_iso(row.get("FechaCreacion")),
-        FechaActualizacion=_dt_to_iso(row.get("FechaActualizacion")),
-        CargoNombre=cargo_nombre,
-        ClienteNombre=cliente_nombre,
-    )
-
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ ERROR REAL en obtener_asignacion({id_registro_personal}): {repr(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando asignación: {str(e)}"
+        )
 
 # ----------------------------
 # POST (UPSERT) ✅ MODIFICADO: retorna el registro actualizado con nombres
