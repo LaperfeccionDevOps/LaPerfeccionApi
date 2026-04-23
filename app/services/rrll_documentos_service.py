@@ -20,7 +20,10 @@ TIPO_DOC_PAQUETE_RETIRO = 10
 
 TEMPLATE_PAQUETE_RETIRO_VOLUNTARIO = BASE_DIR / "templates" / "rrll" / "paquete" / "paquete_retiro_voluntario.docx"
 
-OUTPUT_DIR = BASE_DIR / "storage" / "rrll" / "generados"
+# ✅ RUTA CORRECTA:
+# cada documento generado debe quedar dentro de:
+# app/storage/rrll/retiros/{IdRetiroLaboral}/archivo.docx
+OUTPUT_BASE_DIR = BASE_DIR / "storage" / "rrll" / "retiros"
 
 
 def _clean_text(value):
@@ -32,14 +35,18 @@ def _clean_text(value):
         return ""
 
     text_value = str(value)
-
     text_value = text_value.replace("\t", " ")
     text_value = text_value.replace("\r", " ")
     text_value = text_value.replace("\n", " ")
-
     text_value = re.sub(r"\s+", " ", text_value)
 
     return text_value.strip()
+
+
+def _upper_text(value):
+    if value is None:
+        return ""
+    return str(value).upper().strip()
 
 
 def _replace_text_in_paragraph(paragraph, replacements: dict):
@@ -55,6 +62,18 @@ def _replace_text_in_table(table, replacements: dict):
         for cell in row.cells:
             for paragraph in cell.paragraphs:
                 _replace_text_in_paragraph(paragraph, replacements)
+
+
+def _get_output_dir_for_retiro(id_retiro_laboral: int) -> Path:
+    output_dir = OUTPUT_BASE_DIR / str(id_retiro_laboral)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def _build_output_path(id_retiro_laboral: int, prefix: str) -> Path:
+    output_dir = _get_output_dir_for_retiro(id_retiro_laboral)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_dir / f"{prefix}_{id_retiro_laboral}_{timestamp}.docx"
 
 
 def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
@@ -76,9 +95,9 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
             ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
         LEFT JOIN public."DatosAdicionales" da
             ON rp."IdRegistroPersonal" = da."IdRegistroPersonal"
-       LEFT JOIN public."AsignacionCargoCliente" acc
+        LEFT JOIN public."AsignacionCargoCliente" acc
             ON acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
-       LEFT JOIN public."Cargo" ca
+        LEFT JOIN public."Cargo" ca
             ON acc."IdCargo" = ca."IdCargo"
         LEFT JOIN public."PazYSalvoOperaciones" psy
             ON psy."IdRetiroLaboral" = rl."IdRetiroLaboral"
@@ -92,7 +111,6 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
         raise ValueError(f"No se encontraron datos para IdRetiroLaboral={id_retiro_laboral}")
 
     datos = dict(row)
-
     datos["NumeroDocumento"] = _clean_text(datos.get("NumeroDocumento"))
     datos["NombreCompleto"] = _clean_text(datos.get("NombreCompleto"))
     datos["Direccion"] = _clean_text(datos.get("Direccion"))
@@ -106,8 +124,6 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
 def generar_primer_llamado(db, id_retiro_laboral: int):
     if not TEMPLATE_PRIMER_LLAMADO.exists():
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_PRIMER_LLAMADO}")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_PRIMER_LLAMADO))
@@ -142,18 +158,14 @@ def generar_primer_llamado(db, id_retiro_laboral: int):
     for table in doc.tables:
         _replace_text_in_table(table, replacements)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUT_DIR / f"primer_llamado_retiro_{id_retiro_laboral}_{timestamp}.docx"
+    output_path = _build_output_path(id_retiro_laboral, "primer_llamado_retiro")
     doc.save(str(output_path))
-
     return output_path
 
 
 def generar_segundo_llamado(db, id_retiro_laboral: int):
     if not TEMPLATE_SEGUNDO_LLAMADO.exists():
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_SEGUNDO_LLAMADO}")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_SEGUNDO_LLAMADO))
@@ -188,18 +200,14 @@ def generar_segundo_llamado(db, id_retiro_laboral: int):
     for table in doc.tables:
         _replace_text_in_table(table, replacements)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUT_DIR / f"segundo_llamado_retiro_{id_retiro_laboral}_{timestamp}.docx"
+    output_path = _build_output_path(id_retiro_laboral, "segundo_llamado_retiro")
     doc.save(str(output_path))
-
     return output_path
 
 
 def generar_carta_finalizacion(db, id_retiro_laboral: int):
     if not TEMPLATE_CARTA_FINALIZACION.exists():
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_CARTA_FINALIZACION}")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_CARTA_FINALIZACION))
@@ -234,24 +242,14 @@ def generar_carta_finalizacion(db, id_retiro_laboral: int):
     for table in doc.tables:
         _replace_text_in_table(table, replacements)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUT_DIR / f"carta_finalizacion_retiro_{id_retiro_laboral}_{timestamp}.docx"
+    output_path = _build_output_path(id_retiro_laboral, "carta_finalizacion_retiro")
     doc.save(str(output_path))
-
     return output_path
-
-
-def _upper_text(value):
-    if value is None:
-        return ""
-    return str(value).upper().strip()
 
 
 def generar_paquete_retiro(db, id_retiro_laboral: int):
     if not TEMPLATE_PAQUETE_RETIRO.exists():
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_PAQUETE_RETIRO}")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     print("DEBUG DATOS PAQUETE:", datos)
@@ -268,7 +266,6 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
     }).mappings().first()
 
     id_motivo = row_motivo["IdMotivoRetiro"] if row_motivo else None
-
     print("DEBUG ID MOTIVO RETIRO:", id_motivo)
 
     es_voluntario = (id_motivo == 1)
@@ -309,11 +306,10 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
     for table in doc.tables:
         _replace_text_in_table(table, replacements)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = OUTPUT_DIR / f"paquete_retiro_{id_retiro_laboral}_{timestamp}.docx"
+    output_path = _build_output_path(id_retiro_laboral, "paquete_retiro")
     doc.save(str(output_path))
-
     return output_path
+
 
 def generar_y_registrar_primer_llamado(
     db,
@@ -685,6 +681,7 @@ def generar_y_registrar_carta_finalizacion(
 
     db.commit()
     return dict(row)
+
 
 def generar_y_registrar_paquete_retiro(
     db,

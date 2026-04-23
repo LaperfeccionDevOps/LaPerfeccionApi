@@ -371,6 +371,7 @@ def descargar_adjunto(
 
     print("DEBUG RUTA_FINAL_RESUELTA:", ruta)
     print("DEBUG EXISTE?:", ruta.exists())
+    print("RUTA QUE INTENTA ABRIR:", ruta)
 
     if not ruta.exists():
         raise HTTPException(
