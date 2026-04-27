@@ -89,7 +89,7 @@ def listar_lugar_nacimiento(db: Session = Depends(get_db)):
 @router.get("/listado-cargo", response_model=list[sch_Cargo])
 def listar_cargo(db: Session = Depends(get_db)):
     try:
-        cargos = db.query(m_Cargo).all()
+        cargos = db.query(m_Cargo).filter(m_Cargo.Activo).order_by(m_Cargo.NombreCargo).all()
         for cargo in cargos:
             fc = getattr(cargo, 'FechaCreacion', None)
             if type(fc) is time:
