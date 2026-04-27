@@ -2,9 +2,9 @@ from typing import Generator
 from infrastructure.db.session import SessionLocal
 
 def get_db() -> Generator:
-    print("➡️ Entró a get_db()")
+    print(" Entró a get_db()")
     db = SessionLocal()
-    print("➡️ DB creada:", db)
+    print(" DB creada:", db)
     try:
         yield db
     finally:
