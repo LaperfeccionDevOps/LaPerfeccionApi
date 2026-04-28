@@ -1,3 +1,4 @@
+from datetime import datetime
 from googleapiclient.http import MediaFileUpload
 
 from utilidades.drive_oauth_service import get_drive_service, get_sheets_service
@@ -105,6 +106,64 @@ def obtener_titulo_primera_hoja(spreadsheet_id):
     return sheets[0]["properties"]["title"]
 
 
+def _parse_fecha(valor):
+    """
+    Convierte la fecha de ingreso a datetime para ordenar.
+    Si no se puede convertir, la manda al inicio sin romper el proceso.
+    """
+    if not valor:
+        return datetime.min
+
+    texto = str(valor).strip()
+
+    formatos = (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+    )
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(texto[:19], formato)
+        except ValueError:
+            continue
+
+    return datetime.min
+
+
+def ordenar_filas_por_fecha_ingreso(filas):
+    """
+    Ordena los registros para que en el Sheet queden:
+    - Primero los contratados más antiguos.
+    - Abajo los contratados más recientes.
+    - Si tienen la misma fecha, ordena por cédula/empleado.
+    """
+    if not filas:
+        return filas
+
+    if not isinstance(filas[0], dict):
+        return filas
+
+    return sorted(
+        filas,
+        key=lambda fila: (
+            _parse_fecha(
+                fila.get("fecha_ingre")
+                or fila.get("fecha_ingreso")
+                or fila.get("FechaIngreso")
+                or fila.get("fecha_ingre".upper())
+            ),
+            str(
+                fila.get("empleado")
+                or fila.get("num_doc_id")
+                or fila.get("cedula")
+                or ""
+            )
+        )
+    )
+
+
 def construir_valores_para_sheet(filas):
     if not filas:
         return [
@@ -134,9 +193,13 @@ def construir_valores_para_sheet(filas):
 
     return filas
 
+
 def actualizar_contenido_sheet(spreadsheet_id, filas):
     sheets_service = get_sheets_service()
     drive_service = get_drive_service()
+
+    # Ordena antes de escribir en Google Sheets.
+    filas = ordenar_filas_por_fecha_ingreso(filas)
 
     titulo_hoja = obtener_titulo_primera_hoja(spreadsheet_id)
     rango = f"'{titulo_hoja}'!A:ZZ"
