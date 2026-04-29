@@ -10,8 +10,8 @@ class ContratacionBasicaService:
     def __init__(self) -> None:
         self.repo = ContratacionBasicaRepo()
 
-        # ✅ DEBUG TEMPORAL: muestra el archivo REAL del repo en ejecución
-        print("📌 REPO REAL EN USO:", inspect.getsourcefile(self.repo.__class__))
+        #  DEBUG TEMPORAL: muestra el archivo REAL del repo en ejecución
+        print(" REPO REAL EN USO:", inspect.getsourcefile(self.repo.__class__))
 
     def obtener(self, db: Session, id_registro_personal: int) -> Optional[Dict[str, Any]]:
         return self.repo.get_by_registro_personal(db, id_registro_personal)
@@ -52,9 +52,9 @@ class ContratacionBasicaService:
                     raise ValueError("Escalafon inválido. Valores permitidos: 200 o 220.")
                 data["Escalafon"] = esc
 
-        # ✅ Ejecutar UPSERT y mostrar qué devuelve realmente
+        #  Ejecutar UPSERT y mostrar qué devuelve realmente
         result = self.repo.upsert_by_registro_personal(db, data)
-        print("📌 RESULTADO UPSERT:", result)
+        print(" RESULTADO UPSERT:", result)
 
         # ✅ Si por alguna razón retorna None, explotamos con mensaje claro
         if result is None:

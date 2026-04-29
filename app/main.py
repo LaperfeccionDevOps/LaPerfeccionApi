@@ -30,6 +30,7 @@ from api.routers.descargar_documentos_routers import router as descargar_documen
 from api.routers.documentos_contratacion_routers import router as subir_documento_contratacion
 from api.routers.rechazo_contratacion_routers import router as rechazo_contratacion_router
 from api.routers.contratado_routers import router as contratado_router
+from api.routers.contratacion_copia_dotacion_router import router as contratacion_copia_dotacion_router
 from api.routers.configuracion_routers import router as configuracion_router
 from api.routers import retiro_laboral_routers
 from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
@@ -95,6 +96,7 @@ app.include_router(formacion_educacion_router)
 app.include_router(tratamiento_datos_router)
 app.include_router(descargar_documentos_router)
 app.include_router(contratado_router)
+app.include_router(contratacion_copia_dotacion_router)
 app.include_router(experiencia_laboral_router,prefix="/api",tags=["experiencia-laboral"])
 app.include_router(ref_pers_val_router)
 app.include_router(experiencia_laboral_validacion_router)

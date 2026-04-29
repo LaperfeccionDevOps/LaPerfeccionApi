@@ -12,7 +12,7 @@ router = APIRouter(
     tags=["asignacion cargo cliente"],
 )
 
-# 🔎 Cambia esta versión cada vez que modifiques el archivo, para validar en Postman
+#  Cambia esta versión cada vez que modifiques el archivo, para validar en Postman
 ROUTER_VERSION = "V6-POST-RETORNA-ASIGNACION-ACTUALIZADA"
 
 # ----------------------------
@@ -154,7 +154,7 @@ def _resolver_cargo_nombre(db: Session, id_cargo: Optional[int]) -> Optional[str
 
 
 # ----------------------------
-# 🔎 Endpoint para verificar que Postman pega a ESTE archivo
+#  Endpoint para verificar que Postman pega a ESTE archivo
 # ----------------------------
 @router.get("/__version")
 def version():
@@ -228,7 +228,7 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
         )
 
 # ----------------------------
-# POST (UPSERT) ✅ MODIFICADO: retorna el registro actualizado con nombres
+# POST (UPSERT)  MODIFICADO: retorna el registro actualizado con nombres
 # ----------------------------
 @router.post(
     "",
@@ -237,7 +237,7 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
     response_model_exclude_none=False,
 )
 def upsert_asignacion(payload: AsignacionUpsertIn, db: Session = Depends(get_db)):
-    print(f"✅ [asignacion-cargo-cliente] {ROUTER_VERSION} - POST UPSERT:", payload.IdRegistroPersonal)
+    print(f" [asignacion-cargo-cliente] {ROUTER_VERSION} - POST UPSERT:", payload.IdRegistroPersonal)
 
     # 1) Guardar/actualizar
     db.execute(text("""
