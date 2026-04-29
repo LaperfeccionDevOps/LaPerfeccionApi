@@ -139,13 +139,21 @@ def obtener_documento_ingreso(
 ):
     rows = db.execute(
         text("""
-            SELECT T."IdTipoDocumentacion", d."IdDocumento", d."DocumentoCargado", d."Nombre", d."Formato", T."Descripcion"
+            SELECT DISTINCT ON (T."IdTipoDocumentacion")
+                T."IdTipoDocumentacion",
+                d."IdDocumento",
+                d."DocumentoCargado",
+                d."Nombre",
+                d."Formato",
+                T."Descripcion"
             FROM "Documentos" d
-            JOIN "RelacionTipoDocumentacion" r ON r."IdDocumento" = d."IdDocumento"
-            JOIN "TipoDocumentacion" T ON T."IdTipoDocumentacion" = d."IdTipoDocumentacion"
+            JOIN "RelacionTipoDocumentacion" r 
+                ON r."IdDocumento" = d."IdDocumento"
+            JOIN "TipoDocumentacion" T 
+                ON T."IdTipoDocumentacion" = d."IdTipoDocumentacion"
             WHERE r."IdRegistroPersonal" = :id
               AND T."IdCategoria" = :id_categoria
-            ORDER BY d."IdDocumento" ASC
+            ORDER BY T."IdTipoDocumentacion", d."IdDocumento" DESC
         """),
         {"id": id_registro_personal, "id_categoria": id_categoria},
     ).fetchall()
@@ -154,6 +162,7 @@ def obtener_documento_ingreso(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     documentos = []
+
     for row in rows:
         id_tipo_doc = int(row[0])
         id_doc = int(row[1])
@@ -161,19 +170,24 @@ def obtener_documento_ingreso(
         nombre = row[3] or ""
         formato = row[4] or ""
         descripcion = row[5] or ""
+
         if raw is None:
             continue
+
         doc_b64 = base64.b64encode(raw).decode("utf-8")
-        documentos.append(DocIngresoDetalle(
-            IdTipoDocumentacion=id_tipo_doc,
-            IdDocumento=id_doc,
-            DocumentoBase64=doc_b64,
-            Nombre=nombre,
-            Formato=formato,
-            Descripcion=descripcion,
-        ))
+
+        documentos.append(
+            DocIngresoDetalle(
+                IdTipoDocumentacion=id_tipo_doc,
+                IdDocumento=id_doc,
+                DocumentoBase64=doc_b64,
+                Nombre=nombre,
+                Formato=formato,
+                Descripcion=descripcion,
+            )
+        )
 
     if not documentos:
-        return Response(status_code=status.HTTP_204_NO_CONTENT, detail="No hay documentos válidos para ese tipo")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    return documentos
+    return documentos 
