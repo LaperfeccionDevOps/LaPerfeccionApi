@@ -461,3 +461,102 @@ def generar_paquete_retiro_endpoint(
             status_code=500,
             detail=f"Error al generar y registrar el paquete de retiro: {str(e)}"
         )
+    
+@router.get("/carpeta-digital/{id_registro_personal}/documentos")
+def obtener_documentos_retiro_carpeta_digital(
+    id_registro_personal: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        query_retiro = text("""
+            SELECT "IdRetiroLaboral"
+            FROM public."RetiroLaboral"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+              AND COALESCE("Activo", true) = true
+            ORDER BY "IdRetiroLaboral" DESC
+            LIMIT 1;
+        """)
+
+        retiro = db.execute(
+            query_retiro,
+            {"id_registro_personal": id_registro_personal}
+        ).mappings().first()
+
+        if not retiro:
+            return {
+                "success": True,
+                "message": "El trabajador no tiene retiro laboral registrado.",
+                "data": []
+            }
+
+        id_retiro_laboral = retiro["IdRetiroLaboral"]
+
+        query_documentos = text("""
+            SELECT
+                tdr."IdTipoDocumentoRetiro",
+                tdr."Nombre" AS "NombreDocumento",
+                tdr."Descripcion",
+                COALESCE(tdr."Activo", true) AS "TipoActivo",
+                adj."IdRetiroLaboralAdjunto",
+                adj."IdRetiroLaboral",
+                adj."NombreArchivo",
+                COALESCE(adj."NombreArchivoOriginal", adj."NombreArchivo") AS "NombreArchivoOriginal",
+                adj."RutaArchivo",
+                adj."ExtensionArchivo",
+                adj."PesoArchivo",
+                adj."Observacion",
+                COALESCE(adj."OrigenArchivo", 'MANUAL') AS "OrigenArchivo",
+                adj."MimeType",
+                adj."FechaCreacion",
+                adj."FechaActualizacion"
+            FROM public."TipoDocumentoRetiro" tdr
+            LEFT JOIN LATERAL (
+                SELECT
+                    rla."IdRetiroLaboralAdjunto",
+                    rla."IdRetiroLaboral",
+                    rla."IdTipoDocumentoRetiro",
+                    rla."NombreArchivo",
+                    rla."NombreArchivoOriginal",
+                    rla."RutaArchivo",
+                    rla."ExtensionArchivo",
+                    rla."PesoArchivo",
+                    rla."Observacion",
+                    rla."OrigenArchivo",
+                    rla."MimeType",
+                    rla."FechaCreacion",
+                    rla."FechaActualizacion"
+                FROM public."RetiroLaboralAdjunto" rla
+                WHERE rla."IdRetiroLaboral" = :id_retiro_laboral
+                  AND rla."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
+                  AND COALESCE(rla."Eliminado", false) = false
+                  AND COALESCE(rla."Activo", true) = true
+                ORDER BY rla."IdRetiroLaboralAdjunto" DESC
+                LIMIT 1
+            ) adj ON true
+            WHERE COALESCE(tdr."Activo", true) = true
+              AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10)
+            ORDER BY tdr."IdTipoDocumentoRetiro";
+        """)
+
+        documentos = db.execute(
+            query_documentos,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().all()
+
+        data = []
+        for row in documentos:
+            item = dict(row)
+            item["Adjuntado"] = item.get("IdRetiroLaboralAdjunto") is not None
+            data.append(item)
+
+        return {
+            "success": True,
+            "message": "Documentos de retiro consultados correctamente.",
+            "data": data
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar documentos de retiro para carpeta digital: {str(e)}"
+        )
