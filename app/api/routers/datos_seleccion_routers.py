@@ -76,6 +76,158 @@ def _parse_bool(value: Any) -> Optional[bool]:
             return False
     return None
 
+@router.get("/dashboard-indicadores")
+def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
+    rows = db.execute(text("""
+        SELECT
+            rp."IdEstadoProceso",
+            rp."FechaCreacion" as fecha_registro,
+            mcp."MotivoCierre" as motivo_rechazo,
+            CASE rp."IdEstadoProceso"
+                WHEN 18 THEN 'NUEVO'
+                WHEN 19 THEN 'ENTREVISTA'
+                WHEN 20 THEN 'ENTREVISTA JEFE INMEDIATO'
+                WHEN 21 THEN 'EXÁMENES'
+                WHEN 22 THEN 'SEGURIDAD'
+                WHEN 24 THEN 'AVANZA A CONTRATACIÓN'
+                WHEN 25 THEN 'CONTRATADO'
+                WHEN 26 THEN 'REFERENCIACIÓN'
+                WHEN 27 THEN 'DESISTE DEL PROCESO'
+                WHEN 28 THEN 'RECHAZADO'
+                WHEN 34 THEN 'PENDIENTE DE CONTRATACIÓN'
+                ELSE CONCAT('ESTADO ', rp."IdEstadoProceso")
+            END as estado
+        FROM public."RegistroPersonal" rp
+        LEFT JOIN (
+            SELECT DISTINCT ON ("IdRegistroPersonal")
+                "IdRegistroPersonal",
+                "MotivoCierre",
+                "FechaCreacion"
+            FROM public."MotivoCierreProceso"
+            ORDER BY "IdRegistroPersonal", "FechaCreacion" DESC
+        ) mcp
+            ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
+    """)).mappings().all()
+
+    filas = [dict(r) for r in rows]
+
+    estados_base = [
+        "NUEVO",
+        "ENTREVISTA",
+        "ENTREVISTA JEFE INMEDIATO",
+        "EXÁMENES",
+        "SEGURIDAD",
+        "AVANZA A CONTRATACIÓN",
+        "REFERENCIACIÓN",
+        "DESISTE DEL PROCESO",
+        "RECHAZADO",
+        "PENDIENTE DE CONTRATACIÓN",
+        "CONTRATADO",
+    ]
+
+    conteo_estados = {estado: 0 for estado in estados_base}
+
+    for fila in filas:
+        estado = str(fila.get("estado") or "").strip().upper()
+        if estado not in conteo_estados:
+            conteo_estados[estado] = 0
+        conteo_estados[estado] += 1
+
+    total = len(filas)
+
+    estados = [
+        {
+            "estado": estado,
+            "cantidad": conteo_estados.get(estado, 0),
+            "porcentaje": round((conteo_estados.get(estado, 0) / total) * 100) if total else 0,
+        }
+        for estado in estados_base
+    ]
+
+    meses = {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+    }
+
+    registros_por_mes = {}
+
+    for fila in filas:
+        fecha = fila.get("fecha_registro")
+
+        if isinstance(fecha, datetime):
+            clave = fecha.strftime("%Y-%m")
+            etiqueta = f"{meses[fecha.month]}-{str(fecha.year)[-2:]}"
+        else:
+            clave = "9999-99"
+            etiqueta = "Sin fecha"
+
+        if clave not in registros_por_mes:
+            registros_por_mes[clave] = {
+                "mes": etiqueta,
+                "registros": 0,
+            }
+
+        registros_por_mes[clave]["registros"] += 1
+
+    motivos_base = [
+        "Desiste del Proceso",
+        "No Cumple Perfil",
+        "No asiste a Examenes Medicos",
+        "Examenes No Aptos",
+        "Documentacion Incompleta",
+        "No asiste a Contratacion",
+    ]
+
+    motivos_rechazo = {motivo: 0 for motivo in motivos_base}
+
+    equivalencias_motivos = {
+        "DESISTE DEL PROCESO": "Desiste del Proceso",
+        "NO CUMPLE PERFIL": "No Cumple Perfil",
+        "NO ASISTE A EXAMENES MEDICOS": "No asiste a Examenes Medicos",
+        "NO ASISTE A EXÁMENES MEDICOS": "No asiste a Examenes Medicos",
+        "NO ASISTE A EXÁMENES MÉDICOS": "No asiste a Examenes Medicos",
+        "EXAMENES NO APTOS": "Examenes No Aptos",
+        "EXÁMENES NO APTOS": "Examenes No Aptos",
+        "DOCUMENTACION INCOMPLETA": "Documentacion Incompleta",
+        "DOCUMENTACIÓN INCOMPLETA": "Documentacion Incompleta",
+        "NO ASISTE A CONTRATACION": "No asiste a Contratacion",
+        "NO ASISTE A CONTRATACIÓN": "No asiste a Contratacion",
+    }
+
+    for fila in filas:
+        estado = str(fila.get("estado") or "").strip().upper()
+        motivo = fila.get("motivo_rechazo")
+
+        if estado == "RECHAZADO" and motivo and str(motivo).strip().upper() != "SIN_MOTIVO":
+            clave = str(motivo).strip().upper()
+            motivo_final = equivalencias_motivos.get(clave, str(motivo).strip())
+
+            if motivo_final not in motivos_rechazo:
+                motivos_rechazo[motivo_final] = 0
+
+            motivos_rechazo[motivo_final] += 1
+
+    motivos = [
+        {
+            "motivo": motivo,
+            "cantidad": cantidad,
+            "porcentaje": round((cantidad / sum(motivos_rechazo.values())) * 100) if sum(motivos_rechazo.values()) else 0,
+        }
+        for motivo, cantidad in motivos_rechazo.items()
+    ]
+
+    return {
+        "total": total,
+        "contratados": conteo_estados.get("CONTRATADO", 0),
+        "rechazados": conteo_estados.get("RECHAZADO", 0),
+        "pendiente_contratacion": conteo_estados.get("PENDIENTE DE CONTRATACIÓN", 0),
+        "avanza_contratacion": conteo_estados.get("AVANZA A CONTRATACIÓN", 0),
+        "estados": estados,
+        "registros_por_mes": list(registros_por_mes.values()),
+        "motivos_rechazo": motivos,
+    }
+
 
 @router.get("/reporte-excel")
 def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
