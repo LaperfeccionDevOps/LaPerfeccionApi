@@ -536,7 +536,7 @@ def obtener_documentos_retiro_carpeta_digital(
                 LIMIT 1
             ) adj ON true
             WHERE COALESCE(tdr."Activo", true) = true
-              AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10)
+             AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10, 15, 16)
             ORDER BY tdr."IdTipoDocumentoRetiro";
         """)
 

@@ -23,7 +23,7 @@ TEMPLATE_PAQUETE_RETIRO_VOLUNTARIO = BASE_DIR / "templates" / "rrll" / "paquete"
 # ✅ RUTA CORRECTA:
 # cada documento generado debe quedar dentro de:
 # app/storage/rrll/retiros/{IdRetiroLaboral}/archivo.docx
-OUTPUT_BASE_DIR = BASE_DIR / "storage" / "rrll" / "retiros"
+OUTPUT_BASE_DIR = Path("C:/LaPerfeccionStorage/rrll/retiros")
 
 
 def _clean_text(value):

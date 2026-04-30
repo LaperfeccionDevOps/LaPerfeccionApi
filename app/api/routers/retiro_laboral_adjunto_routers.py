@@ -13,7 +13,7 @@ from infrastructure.db.deps import get_db
 router = APIRouter(prefix="/api/rrll", tags=["RRLL - Adjuntos"])
 
 APP_DIR = Path(__file__).resolve().parents[2]
-BASE_STORAGE = APP_DIR / "storage" / "rrll" / "retiros"
+BASE_STORAGE = Path("C:/LaPerfeccionStorage/rrll/retiros")
 
 
 class RetiroAdjuntoOut(BaseModel):
@@ -157,7 +157,7 @@ async def cargar_adjunto_retiro(
     nombre_sanitizado = f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{timestamp}{extension}"
     ruta_fisica = carpeta_retiro / nombre_sanitizado
 
-    ruta_relativa = Path("storage") / "rrll" / "retiros" / str(id_retiro_laboral) / nombre_sanitizado
+    ruta_relativa = ruta_fisica
 
     contenido = await file.read()
     if not contenido:
