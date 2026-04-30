@@ -254,3 +254,5 @@ app/credentials/
 !app/credentials/token.pickle
 app/templates/rrll/paquete/paquete_retiro_voluntario.docx
 app/credentials/token.pickle
+.env
+*.env
