@@ -5,6 +5,7 @@ from infrastructure.db.deps import get_db
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import traceback
+import logging
 
 from utilidades.reporte_synergy_excel import (
     consultar_datos_reporte_synergy,
@@ -18,9 +19,20 @@ from utilidades.drive_service import (
     sincronizar_registro_contratacion_dotacion,
 )
 
+LOG_FILE = r"C:\inetpub\wwwroot\API_LAPERFECCION\logs\contratado_debug.log"
+
+logger = logging.getLogger("contratado_debug")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 router = APIRouter(prefix="/api", tags=["Contratación - Contratado"])
 
-ESTADO_CONTRATADO = 25  # según tabla EstadoProceso
+ESTADO_CONTRATADO = 25
 
 
 class ContratadoUpdate(BaseModel):
@@ -29,7 +41,6 @@ class ContratadoUpdate(BaseModel):
 
 @router.put("/contratado")
 def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
-    # 1) Validar que exista el aspirante
     existe = db.execute(
         text('SELECT 1 FROM public."RegistroPersonal" WHERE "IdRegistroPersonal" = :id'),
         {"id": payload.IdRegistroPersonal},
@@ -42,11 +53,9 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         )
 
     try:
-        print("=== INICIO /api/contratado ===")
-        print("IdRegistroPersonal:", payload.IdRegistroPersonal)
+        logger.info("=== INICIO /api/contratado ===")
+        logger.info(f"IdRegistroPersonal: {payload.IdRegistroPersonal}")
 
-        # 2) Actualizar estado a CONTRATADO
-        print("1. Antes de UPDATE RegistroPersonal")
         updated = db.execute(
             text("""
                 UPDATE public."RegistroPersonal"
@@ -60,54 +69,63 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             },
         ).mappings().first()
 
-        print("2. Resultado UPDATE:", updated)
+        logger.info(f"Resultado UPDATE: {updated}")
 
         db.commit()
-        print("3. Commit BD exitoso")
+        logger.info("Commit BD exitoso")
 
         hoy = datetime.now().date()
         hace_800_dias = hoy - timedelta(days=800)
+        fecha_fin_reporte = hoy + timedelta(days=90)
 
-        print("4. Consultando datos reporte synergy")
-        print("   Fecha inicio:", hace_800_dias.strftime("%Y-%m-%d"))
-        print("   Fecha fin:", hoy.strftime("%Y-%m-%d"))
+        logger.info("Consultando datos reporte synergy")
+        logger.info(f"Fecha inicio: {hace_800_dias.strftime('%Y-%m-%d')}")
+        logger.info(f"Fecha fin: {fecha_fin_reporte.strftime('%Y-%m-%d')}")
 
         rows = consultar_datos_reporte_synergy(
             db,
             hace_800_dias.strftime("%Y-%m-%d"),
-            hoy.strftime("%Y-%m-%d")
+            fecha_fin_reporte.strftime("%Y-%m-%d")
         )
-        print("5. Rows obtenidas:", len(rows) if rows else 0)
+
+        logger.info(f"Rows obtenidas: {len(rows) if rows else 0}")
 
         filas = normalizar_filas_reporte(rows)
-        print("6. Filas normalizadas:", len(filas) if filas else 0)
+        logger.info(f"Filas normalizadas: {len(filas) if filas else 0}")
+
+        for fila in filas or []:
+            if "1014178009" in str(fila):
+                logger.info(f"ANDREA EN FILAS NORMALIZADAS: {fila}")
 
         filas_excel = filas if filas else [{"sin_datos": "No hay registros"}]
-        print("7. Filas para excel:", len(filas_excel) if filas_excel else 0)
+        logger.info(f"Filas para excel: {len(filas_excel) if filas_excel else 0}")
 
-        print("8. Enriqueciendo filas para sheet")
         filas_sheet = enriquecer_filas_para_sheet_con_cargo(db, filas_excel)
-        print("9. Filas para sheet:", len(filas_sheet) if filas_sheet else 0)
+        logger.info(f"Filas para sheet: {len(filas_sheet) if filas_sheet else 0}")
 
-        print("10. Generando excel")
+        for fila in filas_sheet or []:
+            if "1014178009" in str(fila):
+                logger.info(f"ANDREA EN FILAS SHEET: {fila}")
+
         ruta_archivo = generar_excel_reporte(filas_excel)
-        print("11. Ruta archivo:", ruta_archivo)
+        logger.info(f"Ruta archivo: {ruta_archivo}")
 
         archivo_drive = None
         nombre_archivo = None
         archivo_sheet = None
 
         if ruta_archivo:
-            print("12. Preparando subida a Drive")
             nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
-            print("13. Nombre archivo:", nombre_archivo)
+            logger.info(f"Nombre archivo: {nombre_archivo}")
 
             archivo_drive = subir_archivo_drive(ruta_archivo, nombre_archivo)
-            print("14. Respuesta Drive:", archivo_drive)
+            logger.info(f"Respuesta Drive: {archivo_drive}")
 
-        print("15. Sincronizando Google Sheet")
+        logger.info("Sincronizando Google Sheet")
         archivo_sheet = sincronizar_registro_contratacion_dotacion(filas_sheet)
-        print("16. Respuesta Sheet:", archivo_sheet)
+        logger.info(f"Respuesta Sheet: {archivo_sheet}")
+
+        logger.info("=== FIN /api/contratado OK ===")
 
         return {
             "message": "Aspirante marcado como CONTRATADO.",
@@ -126,11 +144,13 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        print("=== ERROR EN /api/contratado ===")
-        print("TIPO:", type(e).__name__)
-        print("MENSAJE:", str(e))
-        traceback.print_exc()
+        logger.error("=== ERROR EN /api/contratado ===")
+        logger.error(f"TIPO: {type(e).__name__}")
+        logger.error(f"MENSAJE: {str(e)}")
+        logger.error(traceback.format_exc())
+
         db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail=f"Error en /api/contratado: {str(e)}"
