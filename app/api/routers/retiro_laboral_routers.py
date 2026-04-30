@@ -14,6 +14,8 @@ from services.rrll_documentos_service import (
     generar_y_registrar_carta_finalizacion,
     generar_y_registrar_paquete_retiro,
 )
+from fastapi.responses import FileResponse
+from pathlib import Path
 
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
@@ -544,10 +546,57 @@ def obtener_documentos_retiro_carpeta_digital(
         ).mappings().all()
 
         data = []
+
         for row in documentos:
             item = dict(row)
             item["Adjuntado"] = item.get("IdRetiroLaboralAdjunto") is not None
             data.append(item)
+
+        query_entrevista = text("""
+            SELECT
+                "IdEntrevistaRetiro",
+                "IdRetiroLaboral",
+                "IdRegistroPersonal",
+                "RutaPdf",
+                "PdfGenerado",
+                "FechaEnvio"
+            FROM public."EntrevistaRetiro"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+              AND "IdRetiroLaboral" = :id_retiro_laboral
+              AND COALESCE("PdfGenerado", false) = true
+              AND "RutaPdf" IS NOT NULL
+            ORDER BY "IdEntrevistaRetiro" DESC
+            LIMIT 1;
+        """)
+
+        entrevista = db.execute(
+            query_entrevista,
+            {
+                "id_registro_personal": id_registro_personal,
+                "id_retiro_laboral": id_retiro_laboral
+            }
+        ).mappings().first()
+
+        data.append({
+            "IdTipoDocumentoRetiro": 999,
+            "NombreDocumento": "Entrevista de retiro",
+            "Descripcion": "Entrevista diligenciada por el trabajador.",
+            "TipoActivo": True,
+            "IdRetiroLaboralAdjunto": None,
+            "IdEntrevistaRetiro": entrevista["IdEntrevistaRetiro"] if entrevista else None,
+            "IdRetiroLaboral": entrevista["IdRetiroLaboral"] if entrevista else id_retiro_laboral,
+            "NombreArchivo": "entrevista_retiro.pdf" if entrevista else None,
+            "NombreArchivoOriginal": "entrevista_retiro.pdf" if entrevista else None,
+            "RutaArchivo": entrevista["RutaPdf"] if entrevista else None,
+            "ExtensionArchivo": ".pdf" if entrevista else None,
+            "PesoArchivo": None,
+            "Observacion": None,
+            "OrigenArchivo": "ENTREVISTA",
+            "MimeType": "application/pdf",
+            "FechaCreacion": entrevista["FechaEnvio"] if entrevista else None,
+            "FechaActualizacion": None,
+            "Adjuntado": entrevista is not None
+        })
 
         return {
             "success": True,
@@ -559,4 +608,46 @@ def obtener_documentos_retiro_carpeta_digital(
         raise HTTPException(
             status_code=500,
             detail=f"Error al consultar documentos de retiro para carpeta digital: {str(e)}"
+        )
+    
+@router.get("/carpeta-digital/entrevista-retiro/{id_entrevista_retiro}/descargar")
+def descargar_entrevista_retiro_carpeta_digital(
+    id_entrevista_retiro: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        query = text("""
+            SELECT "RutaPdf"
+            FROM public."EntrevistaRetiro"
+            WHERE "IdEntrevistaRetiro" = :id_entrevista_retiro
+              AND COALESCE("PdfGenerado", false) = true
+              AND "RutaPdf" IS NOT NULL
+            LIMIT 1;
+        """)
+
+        row = db.execute(
+            query,
+            {"id_entrevista_retiro": id_entrevista_retiro}
+        ).mappings().first()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Entrevista de retiro no encontrada.")
+
+        ruta_pdf = Path(row["RutaPdf"])
+
+        if not ruta_pdf.exists():
+            raise HTTPException(status_code=404, detail="El archivo PDF de entrevista no existe en el servidor.")
+
+        return FileResponse(
+            path=str(ruta_pdf),
+            media_type="application/pdf",
+            filename=f"entrevista_retiro_{id_entrevista_retiro}.pdf"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al descargar entrevista de retiro: {str(e)}"
         )
