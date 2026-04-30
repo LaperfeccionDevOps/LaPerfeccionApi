@@ -31,7 +31,7 @@ router = APIRouter(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-PDF_DIR = BASE_DIR / "entrevistas_pdf"
+PDF_DIR = Path("C:/LaPerfeccionStorage/rrll/retiros")
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_ENTREVISTAS_POR_RETIRO = 4
@@ -1142,7 +1142,11 @@ def generar_pdf_entrevista_retiro(
 
         # ✅ PDF por entrevista, no por retiro
         nombre_archivo = f'entrevista_retiro_{cabecera["IdEntrevistaRetiro"]}.pdf'
-        ruta_pdf = PDF_DIR / nombre_archivo
+
+        carpeta_retiro = PDF_DIR / str(id_retiro_laboral)
+        carpeta_retiro.mkdir(parents=True, exist_ok=True)
+
+        ruta_pdf = carpeta_retiro / nombre_archivo
 
         with open(ruta_pdf, "wb") as f:
             f.write(pdf_buffer.getvalue())
