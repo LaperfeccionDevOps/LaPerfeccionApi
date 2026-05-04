@@ -170,7 +170,7 @@ def version():
     response_model_exclude_none=False,
 )
 def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db)):
-    print(f"✅ [asignacion-cargo-cliente] {ROUTER_VERSION} - GET: {id_registro_personal}")
+    print(f"[asignacion-cargo-cliente] {ROUTER_VERSION} - GET: {id_registro_personal}")
 
     try:
         row = db.execute(text("""
@@ -188,7 +188,7 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
             LIMIT 1
         """), {"id": id_registro_personal}).mappings().first()
 
-        print(f"🔎 row crudo para {id_registro_personal}: {row}")
+        print(f" row crudo para {id_registro_personal}: {row}")
 
         if not row:
             raise HTTPException(
@@ -199,12 +199,12 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
         id_cargo = row.get("IdCargo")
         id_cliente = row.get("IdCliente")
 
-        print(f"🔎 id_cargo={id_cargo} | id_cliente={id_cliente}")
+        print(f" id_cargo={id_cargo} | id_cliente={id_cliente}")
 
         cargo_nombre = _resolver_cargo_nombre(db, id_cargo)
         cliente_nombre = _resolver_cliente_nombre(db, id_cliente)
 
-        print(f"🔎 cargo_nombre={cargo_nombre} | cliente_nombre={cliente_nombre}")
+        print(f" cargo_nombre={cargo_nombre} | cliente_nombre={cliente_nombre}")
 
         return AsignacionOut(
             IdRegistroPersonal=row["IdRegistroPersonal"],
@@ -221,7 +221,7 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ ERROR REAL en obtener_asignacion({id_registro_personal}): {repr(e)}")
+        print(f" ERROR REAL en obtener_asignacion({id_registro_personal}): {repr(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando asignación: {str(e)}"

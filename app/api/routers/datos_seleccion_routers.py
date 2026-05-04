@@ -101,6 +101,7 @@ def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
                 WHEN 27 THEN 'Desiste del proceso'
                 WHEN 28 THEN 'Rechazado'
                 WHEN 30 THEN 'Abierto'
+                WHEN 34 THEN 'Pendiente de Contratación'
                 ELSE CONCAT('Estado ', rp."IdEstadoProceso")
             END as estado
         FROM public."RegistroPersonal" rp
