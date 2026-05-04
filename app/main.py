@@ -1,6 +1,13 @@
+import os
+from dotenv import load_dotenv
+
+# Cargar variables del archivo .env ubicado en esta misma carpeta app
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from api.routers.auth import router as auth_router
 from api.routers.aspirante_routers import router as aspirante_router
 from api.routers.consultar_combos_routers import router as consultar_combos_router
@@ -97,7 +104,7 @@ app.include_router(tratamiento_datos_router)
 app.include_router(descargar_documentos_router)
 app.include_router(contratado_router)
 app.include_router(contratacion_copia_dotacion_router)
-app.include_router(experiencia_laboral_router,prefix="/api",tags=["experiencia-laboral"])
+app.include_router(experiencia_laboral_router, prefix="/api", tags=["experiencia-laboral"])
 app.include_router(ref_pers_val_router)
 app.include_router(experiencia_laboral_validacion_router)
 app.include_router(perfil_aspirante_router)
@@ -119,19 +126,12 @@ app.include_router(retiro_laboral_adjunto_router)
 app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
 
+
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
 # ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    """
-    Endpoint raíz de la API.
-    """
-    return {
-        "ok": True,
-        "message": "API operativa. Bienvenido a la API de La Perfeccion. Ve a /docs",
-    }
-
     """
     Endpoint raíz de la API.
     """
