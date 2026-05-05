@@ -77,12 +77,16 @@ def _parse_bool(value: Any) -> Optional[bool]:
     return None
 
 @router.get("/dashboard-indicadores")
-def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
+def obtener_dashboard_indicadores_contratacion(
+    anio: Optional[int] = None,
+    mes: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
     rows = db.execute(text("""
         SELECT
             rp."IdEstadoProceso",
-            rp."FechaCreacion" as fecha_registro,
-            mcp."MotivoCierre" as motivo_rechazo,
+            rp."FechaCreacion" AS fecha_registro,
+            mcp."MotivoCierre" AS motivo_rechazo,
             CASE rp."IdEstadoProceso"
                 WHEN 18 THEN 'NUEVO'
                 WHEN 19 THEN 'ENTREVISTA'
@@ -96,7 +100,7 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
                 WHEN 28 THEN 'RECHAZADO'
                 WHEN 34 THEN 'PENDIENTE DE CONTRATACIÓN'
                 ELSE CONCAT('ESTADO ', rp."IdEstadoProceso")
-            END as estado
+            END AS estado
         FROM public."RegistroPersonal" rp
         LEFT JOIN (
             SELECT DISTINCT ON ("IdRegistroPersonal")
@@ -107,7 +111,13 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
             ORDER BY "IdRegistroPersonal", "FechaCreacion" DESC
         ) mcp
             ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
-    """)).mappings().all()
+        WHERE
+            (:anio IS NULL OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio)
+            AND (:mes IS NULL OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes)
+    """), {
+        "anio": anio,
+        "mes": mes,
+    }).mappings().all()
 
     filas = [dict(r) for r in rows]
 
@@ -144,10 +154,19 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
         for estado in estados_base
     ]
 
-    meses = {
-        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"
+    meses_nombre = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
     }
 
     registros_por_mes = {}
@@ -157,7 +176,7 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
 
         if isinstance(fecha, datetime):
             clave = fecha.strftime("%Y-%m")
-            etiqueta = f"{meses[fecha.month]}-{str(fecha.year)[-2:]}"
+            etiqueta = f"{meses_nombre[fecha.month]}-{str(fecha.year)[-2:]}"
         else:
             clave = "9999-99"
             etiqueta = "Sin fecha"
@@ -169,6 +188,8 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
             }
 
         registros_por_mes[clave]["registros"] += 1
+
+    registros_por_mes = dict(sorted(registros_por_mes.items()))
 
     motivos_base = [
         "Desiste del Proceso",
@@ -208,26 +229,33 @@ def obtener_dashboard_indicadores_contratacion(db: Session = Depends(get_db)):
 
             motivos_rechazo[motivo_final] += 1
 
+    total_motivos = sum(motivos_rechazo.values())
+
     motivos = [
         {
             "motivo": motivo,
             "cantidad": cantidad,
-            "porcentaje": round((cantidad / sum(motivos_rechazo.values())) * 100) if sum(motivos_rechazo.values()) else 0,
+            "porcentaje": round((cantidad / total_motivos) * 100) if total_motivos else 0,
         }
         for motivo, cantidad in motivos_rechazo.items()
     ]
 
     return {
+        "filtros": {
+            "anio": anio,
+            "mes": mes,
+        },
         "total": total,
         "contratados": conteo_estados.get("CONTRATADO", 0),
         "rechazados": conteo_estados.get("RECHAZADO", 0),
         "pendiente_contratacion": conteo_estados.get("PENDIENTE DE CONTRATACIÓN", 0),
         "avanza_contratacion": conteo_estados.get("AVANZA A CONTRATACIÓN", 0),
         "estados": estados,
+        "estados_con_datos": [item for item in estados if item["cantidad"] > 0],
         "registros_por_mes": list(registros_por_mes.values()),
         "motivos_rechazo": motivos,
+        "motivos_rechazo_con_datos": [item for item in motivos if item["cantidad"] > 0],
     }
-
 
 @router.get("/reporte-excel")
 def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
