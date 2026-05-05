@@ -79,7 +79,6 @@ def _parse_bool(value: Any) -> Optional[bool]:
 
 def _normalizar_estado_dashboard(estado: Any) -> str:
     estado = str(estado or "").strip().upper()
-
     estado = estado.replace("CONTRATACION", "CONTRATACIÓN")
     estado = estado.replace("EXAMENES", "EXÁMENES")
     estado = estado.replace("REFERENCIACION", "REFERENCIACIÓN")
@@ -104,28 +103,24 @@ def _normalizar_estado_dashboard(estado: Any) -> str:
         return "REFERENCIACIÓN"
     if estado.startswith("EXÁMENES"):
         return "EXÁMENES"
+    if estado.startswith("ABIERTO"):
+        return "ABIERTO"
 
     return estado or "SIN ESTADO"
 
 
 def _normalizar_motivo_dashboard(motivo: Any) -> str:
     motivo = str(motivo or "").strip().upper()
-
     motivo = motivo.replace("CONTRATACION", "CONTRATACIÓN")
     motivo = motivo.replace("EXAMENES", "EXÁMENES")
     motivo = motivo.replace("DOCUMENTACION", "DOCUMENTACIÓN")
-
     return motivo
 
 
 def _es_rechazo_contratacion(motivo: Any) -> bool:
     motivo_normalizado = _normalizar_motivo_dashboard(motivo)
-
     if not motivo_normalizado or motivo_normalizado == "SIN_MOTIVO":
         return False
-
-    # Rechazos propios del módulo de contratación.
-    # Por ahora la tabla permite identificar claramente estos casos por el motivo.
     return "CONTRATACIÓN" in motivo_normalizado
 
 
@@ -151,6 +146,7 @@ def obtener_dashboard_indicadores_contratacion(
                 WHEN 26 THEN 'REFERENCIACIÓN'
                 WHEN 27 THEN 'DESISTE DEL PROCESO'
                 WHEN 28 THEN 'RECHAZADO'
+                WHEN 30 THEN 'ABIERTO'
                 WHEN 34 THEN 'PENDIENTE DE CONTRATACIÓN'
                 ELSE CONCAT('ESTADO ', rp."IdEstadoProceso")
             END AS estado
@@ -186,16 +182,15 @@ def obtener_dashboard_indicadores_contratacion(
         "RECHAZADO",
         "PENDIENTE DE CONTRATACIÓN",
         "CONTRATADO",
+        "ABIERTO",
     ]
 
     conteo_estados = {estado: 0 for estado in estados_base}
 
     for fila in filas:
         estado = _normalizar_estado_dashboard(fila.get("estado"))
-
         if estado not in conteo_estados:
             conteo_estados[estado] = 0
-
         conteo_estados[estado] += 1
 
     total = len(filas)
@@ -215,25 +210,15 @@ def obtener_dashboard_indicadores_contratacion(
     ]
 
     meses_nombre = {
-        1: "enero",
-        2: "febrero",
-        3: "marzo",
-        4: "abril",
-        5: "mayo",
-        6: "junio",
-        7: "julio",
-        8: "agosto",
-        9: "septiembre",
-        10: "octubre",
-        11: "noviembre",
-        12: "diciembre",
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
     }
 
     registros_por_mes = {}
 
     for fila in filas:
         fecha = fila.get("fecha_registro")
-
         if isinstance(fecha, datetime):
             clave = fecha.strftime("%Y-%m")
             etiqueta = f"{meses_nombre[fecha.month]}-{str(fecha.year)[-2:]}"
@@ -242,52 +227,79 @@ def obtener_dashboard_indicadores_contratacion(
             etiqueta = "Sin fecha"
 
         if clave not in registros_por_mes:
-            registros_por_mes[clave] = {
-                "mes": etiqueta,
-                "registros": 0,
-            }
+            registros_por_mes[clave] = {"mes": etiqueta, "registros": 0}
 
         registros_por_mes[clave]["registros"] += 1
 
     registros_por_mes = dict(sorted(registros_por_mes.items()))
 
-    motivos_contratacion_base = [
+    motivos_base = [
+        "Desiste del Proceso",
+        "No Cumple Perfil",
+        "No asiste a Examenes Medicos",
+        "Examenes No Aptos",
+        "Documentacion Incompleta",
         "No asiste a Contratacion",
     ]
 
-    motivos_rechazo_contratacion = {motivo: 0 for motivo in motivos_contratacion_base}
-
-    equivalencias_motivos_contratacion = {
+    equivalencias_motivos = {
+        "DESISTE DEL PROCESO": "Desiste del Proceso",
+        "NO CUMPLE PERFIL": "No Cumple Perfil",
+        "NO ASISTE A EXAMENES MEDICOS": "No asiste a Examenes Medicos",
+        "NO ASISTE A EXÁMENES MEDICOS": "No asiste a Examenes Medicos",
+        "NO ASISTE A EXÁMENES MÉDICOS": "No asiste a Examenes Medicos",
+        "EXAMENES NO APTOS": "Examenes No Aptos",
+        "EXÁMENES NO APTOS": "Examenes No Aptos",
+        "DOCUMENTACION INCOMPLETA": "Documentacion Incompleta",
+        "DOCUMENTACIÓN INCOMPLETA": "Documentacion Incompleta",
         "NO ASISTE A CONTRATACION": "No asiste a Contratacion",
         "NO ASISTE A CONTRATACIÓN": "No asiste a Contratacion",
     }
 
+    motivos_generales = {motivo: 0 for motivo in motivos_base}
+    motivos_contratacion = {"No asiste a Contratacion": 0}
     rechazados_contratacion = 0
 
     for fila in filas:
         estado = _normalizar_estado_dashboard(fila.get("estado"))
         motivo = fila.get("motivo_rechazo")
 
-        if estado == "RECHAZADO" and _es_rechazo_contratacion(motivo):
-            rechazados_contratacion += 1
-
+        if estado == "RECHAZADO" and motivo and str(motivo).strip().upper() != "SIN_MOTIVO":
             clave = _normalizar_motivo_dashboard(motivo)
-            motivo_final = equivalencias_motivos_contratacion.get(clave, str(motivo).strip())
+            motivo_final = equivalencias_motivos.get(clave, str(motivo).strip())
 
-            if motivo_final not in motivos_rechazo_contratacion:
-                motivos_rechazo_contratacion[motivo_final] = 0
+            if motivo_final not in motivos_generales:
+                motivos_generales[motivo_final] = 0
 
-            motivos_rechazo_contratacion[motivo_final] += 1
+            motivos_generales[motivo_final] += 1
 
-    total_motivos_contratacion = sum(motivos_rechazo_contratacion.values())
+            if _es_rechazo_contratacion(motivo):
+                rechazados_contratacion += 1
 
-    motivos_contratacion = [
+                if motivo_final not in motivos_contratacion:
+                    motivos_contratacion[motivo_final] = 0
+
+                motivos_contratacion[motivo_final] += 1
+
+    total_motivos_generales = sum(motivos_generales.values())
+    total_motivos_contratacion = sum(motivos_contratacion.values())
+
+    motivos_rechazo_generales = [
+        {
+            "motivo": motivo,
+            "cantidad": cantidad,
+            "porcentaje": round((cantidad / total_motivos_generales) * 100) if total_motivos_generales else 0,
+        }
+        for motivo, cantidad in motivos_generales.items()
+    ]
+
+    motivos_rechazo_contratacion = [
         {
             "motivo": motivo,
             "cantidad": cantidad,
             "porcentaje": round((cantidad / total_motivos_contratacion) * 100) if total_motivos_contratacion else 0,
         }
-        for motivo, cantidad in motivos_rechazo_contratacion.items()
+        for motivo, cantidad in motivos_contratacion.items()
     ]
 
     contratados = conteo_estados.get("CONTRATADO", 0)
@@ -296,19 +308,15 @@ def obtener_dashboard_indicadores_contratacion(
     pendiente_contratacion = conteo_estados.get("PENDIENTE DE CONTRATACIÓN", 0)
     avanza_contratacion = conteo_estados.get("AVANZA A CONTRATACIÓN", 0)
 
-    total_personas_avanzadas_contratacion = contratados + rechazados_contratacion
-
     en_proceso = total - contratados - rechazados_generales - desistidos
     if en_proceso < 0:
         en_proceso = 0
 
-    return {
-        "filtros": {
-            "anio": anio,
-            "mes": mes,
-        },
+    total_personas_avanzadas_contratacion = contratados + rechazados_contratacion
 
-        # Datos generales para Selección
+    return {
+        "filtros": {"anio": anio, "mes": mes},
+
         "total": total,
         "rechazados_generales": rechazados_generales,
         "desistidos": desistidos,
@@ -319,12 +327,18 @@ def obtener_dashboard_indicadores_contratacion(
         "estados_con_datos": [item for item in estados if item["cantidad"] > 0],
         "registros_por_mes": list(registros_por_mes.values()),
 
-        # Datos ejecutivos para Contratación
+        "motivos_rechazo_generales": motivos_rechazo_generales,
+        "motivos_rechazo_generales_con_datos": [
+            item for item in motivos_rechazo_generales if item["cantidad"] > 0
+        ],
+
         "total_personas_avanzadas_contratacion": total_personas_avanzadas_contratacion,
         "contratados": contratados,
         "rechazados": rechazados_contratacion,
-        "motivos_rechazo": motivos_contratacion,
-        "motivos_rechazo_con_datos": [item for item in motivos_contratacion if item["cantidad"] > 0],
+        "motivos_rechazo": motivos_rechazo_contratacion,
+        "motivos_rechazo_con_datos": [
+            item for item in motivos_rechazo_contratacion if item["cantidad"] > 0
+        ],
     }
 
 
