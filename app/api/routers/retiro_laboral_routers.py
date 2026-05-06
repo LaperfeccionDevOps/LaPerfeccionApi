@@ -17,6 +17,9 @@ from services.rrll_documentos_service import (
 from fastapi.responses import FileResponse
 from pathlib import Path
 
+from typing import Optional
+from fastapi import Query
+
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
 
@@ -149,7 +152,117 @@ def crear_retiro_laboral(payload: RetiroLaboralCreate, db: Session = Depends(get
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error al crear retiro laboral: {str(e)}")
+    
 
+
+@router.get("/dashboard-indicadores")
+def dashboard_indicadores_rrll(
+    anio: Optional[int] = Query(None),
+    mes: Optional[int] = Query(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        where_filtros = 'WHERE COALESCE(rl."Activo", true) = true'
+        params = {}
+
+        if anio:
+            where_filtros += ' AND EXTRACT(YEAR FROM rl."FechaRetiro") = :anio'
+            params["anio"] = anio
+
+        if mes:
+            where_filtros += ' AND EXTRACT(MONTH FROM rl."FechaRetiro") = :mes'
+            params["mes"] = mes
+
+        query_totales = text(f"""
+            SELECT
+                COUNT(*) AS total_retiros,
+                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ABIERTO') AS retiros_abiertos,
+                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'CERRADO') AS retiros_cerrados,
+                COUNT(*) FILTER (
+                    WHERE UPPER(COALESCE(rl."RetiroLegalizado", 'NO')) NOT IN ('SI', 'SÍ', 'TRUE', '1')
+                ) AS pendientes_documentacion
+            FROM public."RetiroLaboral" rl
+            {where_filtros};
+        """)
+
+        query_estados = text(f"""
+            SELECT COALESCE(rl."EstadoCasoRRLL", 'SIN ESTADO') AS estado, COUNT(*) AS cantidad
+            FROM public."RetiroLaboral" rl
+            {where_filtros}
+            GROUP BY rl."EstadoCasoRRLL"
+            ORDER BY cantidad DESC;
+        """)
+
+        query_motivos = text(f"""
+            SELECT COALESCE(mr."Nombre", 'SIN MOTIVO') AS motivo, COUNT(*) AS cantidad
+            FROM public."RetiroLaboral" rl
+            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
+            {where_filtros}
+            GROUP BY mr."Nombre"
+            ORDER BY cantidad DESC;
+        """)
+
+        query_tipificaciones = text(f"""
+            SELECT COALESCE(tr."Nombre", 'SIN TIPIFICACIÓN') AS tipificacion, COUNT(*) AS cantidad
+            FROM public."RetiroLaboral" rl
+            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
+            {where_filtros}
+            GROUP BY tr."Nombre"
+            ORDER BY cantidad DESC;
+        """)
+
+        query_documentos = text(f"""
+            SELECT 
+                tdr."Nombre" AS documento,
+                COUNT(rla."IdRetiroLaboralAdjunto") AS cantidad
+            FROM public."RetiroLaboral" rl
+            CROSS JOIN public."TipoDocumentoRetiro" tdr
+            LEFT JOIN public."RetiroLaboralAdjunto" rla
+                ON rla."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                AND rla."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
+                AND COALESCE(rla."Eliminado", false) = false
+                AND COALESCE(rla."Activo", true) = true
+            {where_filtros}
+            AND tdr."IdTipoDocumentoRetiro" IN (2, 4, 10)
+            GROUP BY tdr."Nombre"
+            ORDER BY cantidad DESC;
+        """)
+
+        query_recientes = text(f"""
+            SELECT
+                rl."IdRetiroLaboral",
+                rp."Nombres",
+                rp."Apellidos",
+                rp."NumeroIdentificacion",
+                mr."Nombre" AS motivo_retiro,
+                tr."Nombre" AS tipificacion_retiro,
+                rl."EstadoCasoRRLL",
+                rl."FechaRetiro"
+            FROM public."RetiroLaboral" rl
+            LEFT JOIN public."RegistroPersonal" rp ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
+            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
+            {where_filtros}
+            ORDER BY rl."FechaRetiro" DESC NULLS LAST
+            LIMIT 10;
+        """)
+
+        return {
+            "success": True,
+            "message": "Indicadores RRLL consultados correctamente.",
+            "data": {
+                "filtros": {"anio": anio, "mes": mes},
+                "totales": dict(db.execute(query_totales, params).mappings().first()),
+                "estados": [dict(r) for r in db.execute(query_estados, params).mappings().all()],
+                "motivos": [dict(r) for r in db.execute(query_motivos, params).mappings().all()],
+                "tipificaciones": [dict(r) for r in db.execute(query_tipificaciones, params).mappings().all()],
+                "documentos": [dict(r) for r in db.execute(query_documentos, params).mappings().all()],
+                "retiros_recientes": [dict(r) for r in db.execute(query_recientes, params).mappings().all()],
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error consultando dashboard RRLL: {str(e)}")
 
 @router.get("/{id_retiro_laboral}")
 def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_db)):
@@ -651,3 +764,4 @@ def descargar_entrevista_retiro_carpeta_digital(
             status_code=500,
             detail=f"Error al descargar entrevista de retiro: {str(e)}"
         )
+    
