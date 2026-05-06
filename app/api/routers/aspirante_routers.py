@@ -244,8 +244,8 @@ def listar_aspirantes(
 			rp."FechaNacimiento"
             FROM "RegistroPersonal" rp
             LEFT JOIN "EstadoProceso" esp ON rp."IdEstadoProceso" = esp."IdEstadoProceso"
-			JOIN "DatosAdicionales" DA ON DA."IdRegistroPersonal" = rp."IdRegistroPersonal"
-			JOIN "Localidad" L ON L."IdLocalidad" = DA."IdLocalidad"
+			LEFT JOIN "DatosAdicionales" DA ON DA."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            LEFT JOIN "Localidad" L ON L."IdLocalidad" = DA."IdLocalidad"
 			LEFT JOIN "AsignacionCargoCliente" ASCARGO ON ASCARGO."IdRegistroPersonal" = rp."IdRegistroPersonal"
 			LEFT JOIN "Cargo" CARG ON CARG."IdCargo" =  ASCARGO."IdCargo"
 			LEFT JOIN "ContratacionBasica" CB ON CB."IdRegistroPersonal" = rp."IdRegistroPersonal"
