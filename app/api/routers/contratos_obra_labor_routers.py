@@ -131,6 +131,30 @@ def descargar_contrato(id_registro_personal: int, db: Session = Depends(get_db))
     cargo = _to_str(acc.get("Cargo"))
     salario = _to_str(acc.get("Salario"))
 
+        # 4) Tipo de contrato desde ContratacionBasica
+    tipo_contrato = ""
+    try:
+        row = db.execute(
+            text("""
+                SELECT 
+                    cb."IdTipoContrato",
+                    tc."Descripcion" AS "TipoContrato"
+                FROM public."ContratacionBasica" cb
+                LEFT JOIN public."TipoContrato" tc
+                    ON tc."IdTipoContrato" = cb."IdTipoContrato"
+                WHERE cb."IdRegistroPersonal" = :id
+                ORDER BY cb."FechaActualizacion" DESC NULLS LAST,
+                         cb."FechaCreacion" DESC NULLS LAST,
+                         cb."IdContratacionBasica" DESC
+                LIMIT 1
+            """),
+            {"id": id_registro_personal},
+        ).mappings().first()
+
+        tipo_contrato = _to_str(row.get("TipoContrato")) if row else ""
+    except Exception:
+        tipo_contrato = ""
+
     mapping = {
         "{{NOMBRE_TRABAJADOR}}": nombre_trabajador,
         "{{CEDULA}}": cedula,
@@ -143,6 +167,7 @@ def descargar_contrato(id_registro_personal: int, db: Session = Depends(get_db))
         "{{FECHA_NACIMIENTO}}": fecha_nac_str,
         "{{CARGO}}": cargo,
         "{{SALARIO}}": salario,
+        "{{TIPO_CONTRATO}}": tipo_contrato,
         "{{INICIO_DIA}}": inicio_dia,
         "{{INICIO_MES}}": inicio_mes,
         "{{INICIO_ANO}}": inicio_ano,

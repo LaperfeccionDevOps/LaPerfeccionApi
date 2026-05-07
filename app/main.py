@@ -1,54 +1,20 @@
+import os
+from dotenv import load_dotenv
+
+# Cargar variables del archivo .env ubicado en esta misma carpeta app
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from infrastructure.db.deps import get_db
+
 from api.routers.auth import router as auth_router
-
-app = FastAPI(
-    title="La Perfeccion - Backend",
-    version="1.0.0",
-    description="API para gestión de colaboradores, procesos de selección y portal interno.",
-    debug=True,
-)
-
-origins = [
-    "http://127.0.0.1:5500",
-    "http://localhost:5500",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://192.168.10.104:3000",
-    "http://192.168.80.173:3000",
-    "http://192.168.20.33:3000/",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://192.168.10.231:3001",
-    "http://192.168.10.210:8302",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://laperfeccion.app",
-]
-
-app.add_middleware(
-    ProxyHeadersMiddleware,
-    trusted_hosts="*"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-from api.routers.aspirante_routers import (router as aspirante_router,crear_registro_personal)
-from api.routers.consultar_combos_routers import (router as consultar_combos_router,listar_tipos_identificacion)
+from api.routers.aspirante_routers import router as aspirante_router
+from api.routers.consultar_combos_routers import router as consultar_combos_router
 from api.routers.cita_routers import router as cita_router
 from api.routers.entrevista_routers import router as entrevista_router
 from api.routers import estado_proceso_routers
-from api.routers.experiencia_laboral_routers import (router as experiencia_laboral_router)
+from api.routers.experiencia_laboral_routers import router as experiencia_laboral_router
 from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
 from api.routers.documentos_ingreso_routers import router as documentos_ingreso_router
 from api.routers.contratacion_registro_routers import router as contratacion_registro_router
@@ -73,6 +39,51 @@ from api.routers.rechazo_contratacion_routers import router as rechazo_contratac
 from api.routers.contratado_routers import router as contratado_router
 from api.routers.contratacion_copia_dotacion_router import router as contratacion_copia_dotacion_router
 from api.routers.configuracion_routers import router as configuracion_router
+from api.routers import retiro_laboral_routers
+from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
+from api.routers.retiro_laboral_adjunto_routers import router as retiro_laboral_adjunto_router
+from api.routers.entrevista_retiro_routers import router as entrevista_retiro_router
+from api.routers.rrll_excel_routers import router as rrll_excel_router
+
+
+app = FastAPI(
+    title="La Perfeccion - Backend",
+    version="1.0.0",
+    description="API para gestión de colaboradores, procesos de selección y portal interno.",
+    debug=True,
+)
+
+origins = [
+    "http://127.0.0.1:5500",
+    "http://localhost:5500",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://192.168.10.104:3000",
+    "http://192.168.80.173:3000",
+    "http://192.168.20.33:3000/",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://192.168.10.231:3001",
+    "http://192.168.10.210:8302",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://laperfeccion.app",
+    "https://qa.laperfeccion.app",
+]
+
+app.add_middleware(
+    ProxyHeadersMiddleware,
+    trusted_hosts="*"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 
 # ─────────────────────────────────────────────
 # 📌 Routers
@@ -93,7 +104,7 @@ app.include_router(tratamiento_datos_router)
 app.include_router(descargar_documentos_router)
 app.include_router(contratado_router)
 app.include_router(contratacion_copia_dotacion_router)
-app.include_router(experiencia_laboral_router,prefix="/api",tags=["experiencia-laboral"])
+app.include_router(experiencia_laboral_router, prefix="/api", tags=["experiencia-laboral"])
 app.include_router(ref_pers_val_router)
 app.include_router(experiencia_laboral_validacion_router)
 app.include_router(perfil_aspirante_router)
@@ -109,20 +120,18 @@ app.include_router(obs_nf_router, prefix="/api")
 app.include_router(subir_documento_contratacion, prefix="/api")
 app.include_router(rechazo_contratacion_router)
 app.include_router(configuracion_router, prefix="/api")
+app.include_router(retiro_laboral_routers.router)
+app.include_router(rrll_busqueda_router)
+app.include_router(retiro_laboral_adjunto_router)
+app.include_router(entrevista_retiro_router)
+app.include_router(rrll_excel_router)
+
 
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
 # ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    """
-    Endpoint raíz de la API.
-    """
-    return {
-        "ok": True,
-        "message": "API operativa. Bienvenido a la API de La Perfeccion. Ve a /docs",
-    }
-
     """
     Endpoint raíz de la API.
     """
