@@ -257,3 +257,5 @@ app/credentials/token.pickle
 .env
 *.env
 app/logs/
+*.log
+logs/

@@ -4,7 +4,7 @@ from typing import Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm  # Swagger Authorize (form-data)
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -19,30 +19,24 @@ from infrastructure.security.auth_dependencies import get_current_user
 
 router = APIRouter()
 
-# ------------------ Roles (IDs de tu BD) ------------------
+# ------------------ Roles ------------------
 ROL_ADMIN = 1
 ROL_SELECCION = 2
 ROL_CONTRATACION = 3
 ROL_ASPIRANTE = 4
 ROL_SUPER_ADMIN = 5
+ROL_OPERACIONES = 6
 ROL_TALENTO_HUMANO = 13
 ROL_DESARROLLADOR = 15
 
-# Estos roles SIEMPRE pueden ver todo
 GLOBAL_ROLES = {ROL_ADMIN, ROL_SUPER_ADMIN, ROL_DESARROLLADOR}
 
 
 def require_roles_ids(*allowed_ids: int):
-    """
-    Dependency: permite acceso si el usuario tiene:
-    - Cualquier rol global (Admin/SuperAdmin/Desarrollador), o
-    - Alguno de los roles permitidos enviados por parámetro
-    """
     allowed_set = set(int(x) for x in allowed_ids)
 
     def _dep(current=Depends(get_current_user)):
         roles_ids_raw = current.get("roles_ids") or []
-        # ✅ Normalizar a int para evitar errores por tipos (str vs int)
         roles_ids = {int(x) for x in roles_ids_raw}
 
         if roles_ids & GLOBAL_ROLES:
@@ -59,24 +53,25 @@ def require_roles_ids(*allowed_ids: int):
     return _dep
 
 
-# ------------------ Endpoints de prueba (TEMPORALES) ------------------
+# ------------------ Endpoints de prueba ------------------
 @router.get("/auth/protegido-dev")
 def protegido_dev(current=Depends(require_roles_ids(ROL_DESARROLLADOR))):
-    return {"ok": True, "msg": "Entraste: rol Desarrollador o Global (Admin/SuperAdmin/Dev)"}
+    return {"ok": True, "msg": "Entraste: rol Desarrollador o Global"}
 
 
 @router.get("/auth/protegido-seleccion")
 def protegido_seleccion(current=Depends(require_roles_ids(ROL_SELECCION))):
-    return {"ok": True, "msg": "Entraste: rol Selección o Global (Admin/SuperAdmin/Dev)"}
+    return {"ok": True, "msg": "Entraste: rol Selección o Global"}
 
 
-# ✅ Config central
+# ------------------ Config ------------------
 ACCESS_TOKEN_EXPIRE_MINUTES = 360
 
 pwd_context = CryptContext(
     schemes=["pbkdf2_sha256"],
     deprecated="auto",
 )
+
 
 # ------------------ Schemas ------------------
 class LoginRequest(BaseModel):
@@ -93,6 +88,10 @@ class RegisterRequest(BaseModel):
 
 class AsignarRolRequest(BaseModel):
     id_rol: int
+
+
+class CambiarPasswordRequest(BaseModel):
+    nueva_contrasena: str
 
 
 # ------------------ Helpers ------------------
@@ -148,7 +147,6 @@ def _build_roles_and_token(usuario: Usuario, db: Session) -> dict:
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
 
-    # ✅ FIX: DEVOLVER access_token (tu front lo está esperando)
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -165,19 +163,12 @@ def token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
-    """
-    Para Swagger Authorize (OAuth2 password flow).
-    Swagger envía form-data: username, password.
-    """
     usuario = _authenticate_user(db, form_data.username, form_data.password)
     return _build_roles_and_token(usuario, db)
 
 
 @router.post("/auth/login")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    """
-    Para tu FRONT (JSON).
-    """
     usuario = _authenticate_user(db, payload.nombre_usuario, payload.contrasena)
     data = _build_roles_and_token(usuario, db)
     data["message"] = "Inicio de sesión exitoso"
@@ -186,10 +177,6 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 @router.get("/auth/me")
 def me(current=Depends(get_current_user)):
-    """
-    ✅ MODO PRODUCCIÓN:
-    /auth/me solo valida token (NO roles).
-    """
     u = current["usuario"]
     return {
         "usuario": u.NombreUsuario,
@@ -199,14 +186,8 @@ def me(current=Depends(get_current_user)):
     }
 
 
-# (Opcional) Si quieres mantener el "PUNTO 2" como prueba sin dañar /auth/me:
 @router.get("/auth/me-restringido")
 def me_restringido(current=Depends(require_roles_ids(ROL_SELECCION, ROL_TALENTO_HUMANO))):
-    """
-    ✅ ENDPOINT DE PRUEBA:
-    - Pasa si es Selección o Talento Humano
-    - O si es global (Admin/SuperAdmin/Desarrollador)
-    """
     u = current["usuario"]
     return {
         "usuario": u.NombreUsuario,
@@ -264,6 +245,7 @@ def registrar_usuario(payload: RegisterRequest, db: Session = Depends(get_db)):
         "usuario": nuevo_usuario.NombreUsuario,
         "id_usuario": str(nuevo_usuario.IdUsuario),
     }
+
     if rol is not None:
         response["id_rol"] = rol.IdRol
         response["nombre_rol"] = rol.NombreRol
@@ -318,6 +300,39 @@ def actualizar_rol_usuario(
         "usuario": usuario.NombreUsuario,
         "id_rol": rol.IdRol,
         "nombre_rol": rol.NombreRol,
+    }
+
+
+@router.put("/auth/usuario/{id_usuario}/password", status_code=status.HTTP_200_OK)
+def cambiar_password_usuario(
+    id_usuario: str,
+    payload: CambiarPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        id_usuario_uuid = uuid.UUID(id_usuario)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="id_usuario no es un UUID válido",
+        )
+
+    usuario = db.query(Usuario).filter(Usuario.IdUsuario == id_usuario_uuid).first()
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El usuario no existe",
+        )
+
+    usuario.Contrasena = hash_password(payload.nueva_contrasena)
+    usuario.UsuarioActualizacion = "juan diaz"
+
+    db.commit()
+
+    return {
+        "message": "Contraseña actualizada correctamente",
+        "usuario": usuario.NombreUsuario,
+        "id_usuario": str(usuario.IdUsuario),
     }
 
 

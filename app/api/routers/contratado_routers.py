@@ -18,8 +18,13 @@ from utilidades.drive_service import (
     subir_archivo_drive,
     sincronizar_registro_contratacion_dotacion,
 )
+from pathlib import Path
 
-LOG_FILE = r"C:\inetpub\wwwroot\API_LAPERFECCION\logs\contratado_debug.log"
+BASE_DIR = Path(__file__).resolve().parents[3]
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_FILE = LOG_DIR / "contratado_debug.log"
 
 logger = logging.getLogger("contratado_debug")
 logger.setLevel(logging.INFO)
