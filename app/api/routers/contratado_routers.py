@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 import traceback
 import logging
-import os
 
 from utilidades.reporte_synergy_excel import (
     consultar_datos_reporte_synergy,
@@ -20,11 +19,7 @@ from utilidades.drive_service import (
     sincronizar_registro_contratacion_dotacion,
 )
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
-LOG_FILE = os.path.join(LOG_DIR, "contratado_debug.log")
+LOG_FILE = r"C:\inetpub\wwwroot\API_LAPERFECCION\logs\contratado_debug.log"
 
 logger = logging.getLogger("contratado_debug")
 logger.setLevel(logging.INFO)
@@ -118,13 +113,14 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         archivo_drive = None
         nombre_archivo = None
         archivo_sheet = None
+    
 
         if ruta_archivo:
             nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
             logger.info(f"Nombre archivo: {nombre_archivo}")
 
-            archivo_drive = subir_archivo_drive(ruta_archivo, nombre_archivo)
-            logger.info(f"Respuesta Drive: {archivo_drive}")
+            logger.info("Saltando subida de Excel a Drive temporalmente para no bloquear Sheet")
+            archivo_drive = None
 
         logger.info("Sincronizando Google Sheet")
         archivo_sheet = sincronizar_registro_contratacion_dotacion(filas_sheet)
