@@ -10,8 +10,8 @@ COLOR_MORADO = (77, 45, 127)
 COLOR_VERDE = (74, 153, 70)
 COLOR_NEGRO = (30, 30, 30)
 
-RUTA_QR = "qr_qa_bueno.png"
-SALIDA = "poster_qr_entrevista_retiro_qa.png"
+RUTA_QR = "qr_produccion_entrevista_retiro.png"
+SALIDA = "poster_qr_entrevista_retiro_produccion.png"
 
 # =========================
 # FUNCIONES
