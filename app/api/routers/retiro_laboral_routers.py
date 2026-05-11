@@ -613,7 +613,7 @@ def obtener_documentos_retiro_carpeta_digital(
                 tdr."Descripcion",
                 COALESCE(tdr."Activo", true) AS "TipoActivo",
                 adj."IdRetiroLaboralAdjunto",
-                adj."IdRetiroLaboral",
+                :id_retiro_laboral AS "IdRetiroLaboral",
                 adj."NombreArchivo",
                 COALESCE(adj."NombreArchivoOriginal", adj."NombreArchivo") AS "NombreArchivoOriginal",
                 adj."RutaArchivo",
