@@ -2,7 +2,11 @@ import os
 from dotenv import load_dotenv
 
 # Cargar variables del archivo .env ubicado en esta misma carpeta app
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+# override=True obliga a usar el .env local y no variables viejas del sistema/IIS
+load_dotenv(
+    dotenv_path=os.path.join(os.path.dirname(__file__), ".env"),
+    override=True
+)
 
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi import FastAPI
@@ -53,6 +57,18 @@ app = FastAPI(
     debug=True,
 )
 
+
+@app.get("/api/debug-db")
+def debug_db():
+    db_url = os.getenv("DATABASE_URL", "")
+    return {
+        "archivo_main_en_uso": __file__,
+        "carpeta_main": os.path.dirname(__file__),
+        "env_esperado": os.path.join(os.path.dirname(__file__), ".env"),
+        "database_url_activa": db_url.split("@")[-1] if "@" in db_url else db_url
+    }
+
+
 origins = [
     "http://127.0.0.1:5500",
     "http://localhost:5500",
@@ -85,9 +101,6 @@ app.add_middleware(
 )
 
 
-# ─────────────────────────────────────────────
-# 📌 Routers
-# ─────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api", tags=["auth"])
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
 app.include_router(consultar_combos_router, prefix="/api", tags=["combos"])
@@ -127,14 +140,8 @@ app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
 
 
-# ─────────────────────────────────────────────
-# Endpoints básicos de salud
-# ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    """
-    Endpoint raíz de la API.
-    """
     return {
         "ok": True,
         "message": "API operativa. Bienvenido a la API de La Perfeccion. Ve a /docs",
