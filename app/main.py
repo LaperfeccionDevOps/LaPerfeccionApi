@@ -58,17 +58,6 @@ app = FastAPI(
 )
 
 
-@app.get("/api/debug-db")
-def debug_db():
-    db_url = os.getenv("DATABASE_URL", "")
-    return {
-        "archivo_main_en_uso": __file__,
-        "carpeta_main": os.path.dirname(__file__),
-        "env_esperado": os.path.join(os.path.dirname(__file__), ".env"),
-        "database_url_activa": db_url.split("@")[-1] if "@" in db_url else db_url
-    }
-
-
 origins = [
     "http://127.0.0.1:5500",
     "http://localhost:5500",
