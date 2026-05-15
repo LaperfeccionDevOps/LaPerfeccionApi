@@ -10,6 +10,9 @@ from sqlalchemy import text
 
 from infrastructure.db.deps import get_db
 
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+
 router = APIRouter(prefix="/api/documentos-ingreso", tags=["documentos-ingreso"])
 
 
@@ -174,7 +177,7 @@ def obtener_documento_ingreso(
         if raw is None:
             continue
 
-        doc_b64 = base64.b64encode(raw).decode("utf-8")
+        doc_b64 = base64.b64encode(bytes(raw)).decode("utf-8")
 
         documentos.append(
             DocIngresoDetalle(
@@ -191,3 +194,42 @@ def obtener_documento_ingreso(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return documentos 
+
+
+@router.get("/documento/{id_documento}/descargar")
+def descargar_documento_ingreso_por_id(
+    id_documento: int,
+    inline: bool = False,
+    db: Session = Depends(get_db),
+):
+    row = db.execute(
+        text("""
+            SELECT
+                "DocumentoCargado",
+                COALESCE("Nombre", 'documento.pdf') AS nombre,
+                COALESCE("Formato", 'pdf') AS formato
+            FROM public."Documentos"
+            WHERE "IdDocumento" = :id_documento
+        """),
+        {"id_documento": id_documento},
+    ).mappings().first()
+
+    if not row or row["DocumentoCargado"] is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    contenido = bytes(row["DocumentoCargado"])
+    nombre = row["nombre"] or "documento.pdf"
+    formato = (row["formato"] or "pdf").lower()
+
+    if not nombre.lower().endswith(".pdf") and formato in ("pdf", "application/pdf"):
+        nombre = f"{nombre}.pdf"
+
+    media_type = "application/pdf" if formato in ("pdf", "application/pdf") else "application/octet-stream"
+
+    return StreamingResponse(
+        BytesIO(contenido),
+        media_type=media_type,
+       headers={
+    "Content-Disposition": f'{"inline" if inline else "attachment"}; filename="{nombre}"'
+},
+    )
