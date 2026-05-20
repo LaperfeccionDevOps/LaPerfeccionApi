@@ -10,7 +10,7 @@ class ContratacionBasicaService:
     def __init__(self) -> None:
         self.repo = ContratacionBasicaRepo()
 
-        #  DEBUG TEMPORAL: muestra el archivo REAL del repo en ejecución
+        # DEBUG TEMPORAL: muestra el archivo REAL del repo en ejecución
         print(" REPO REAL EN USO:", inspect.getsourcefile(self.repo.__class__))
 
     def obtener(self, db: Session, id_registro_personal: int) -> Optional[Dict[str, Any]]:
@@ -26,8 +26,6 @@ class ContratacionBasicaService:
         if riesgo is not None:
             riesgo = str(riesgo).strip().upper()
             data["RiesgoLaboral"] = riesgo
-
-        # ✅ NUEVOS CAMPOS (normalización/validación suave)
 
         # Posicion: texto manual (código numérico, pero lo guardamos como string)
         pos = data.get("Posicion")
@@ -52,11 +50,43 @@ class ContratacionBasicaService:
                     raise ValueError("Escalafon inválido. Valores permitidos: 200 o 220.")
                 data["Escalafon"] = esc
 
-        #  Ejecutar UPSERT y mostrar qué devuelve realmente
+        # TetanosDosis: de 1 a 5
+        tetanos_dosis = data.get("TetanosDosis")
+        if tetanos_dosis is not None:
+            if str(tetanos_dosis).strip() == "":
+                data["TetanosDosis"] = None
+            else:
+                try:
+                    tetanos_dosis = int(tetanos_dosis)
+                except ValueError:
+                    raise ValueError("TetanosDosis debe ser un número entre 1 y 5.")
+
+                if tetanos_dosis < 1 or tetanos_dosis > 5:
+                    raise ValueError("TetanosDosis inválida. Valores permitidos: 1 a 5.")
+
+                data["TetanosDosis"] = tetanos_dosis
+
+        # HepatitisDosis: de 1 a 4
+        hepatitis_dosis = data.get("HepatitisDosis")
+        if hepatitis_dosis is not None:
+            if str(hepatitis_dosis).strip() == "":
+                data["HepatitisDosis"] = None
+            else:
+                try:
+                    hepatitis_dosis = int(hepatitis_dosis)
+                except ValueError:
+                    raise ValueError("HepatitisDosis debe ser un número entre 1 y 4.")
+
+                if hepatitis_dosis < 1 or hepatitis_dosis > 4:
+                    raise ValueError("HepatitisDosis inválida. Valores permitidos: 1 a 4.")
+
+                data["HepatitisDosis"] = hepatitis_dosis
+
+        # Ejecutar UPSERT y mostrar qué devuelve realmente
         result = self.repo.upsert_by_registro_personal(db, data)
         print(" RESULTADO UPSERT:", result)
 
-        # ✅ Si por alguna razón retorna None, explotamos con mensaje claro
+        # Si por alguna razón retorna None, explotamos con mensaje claro
         if result is None:
             raise ValueError(
                 "El repo upsert_by_registro_personal retornó None. "

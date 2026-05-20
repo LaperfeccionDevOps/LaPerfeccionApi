@@ -26,14 +26,19 @@ class ContratacionBasicaIn(BaseModel):
     FechaIngreso: Optional[datetime.date] = None
     RiesgoLaboral: Optional[str] = None
 
-    # ✅ NUEVOS CAMPOS (BD ya actualizada)
     Posicion: Optional[str] = Field(default=None, max_length=100)
 
-    # Escalafón: solo 200 o 220 (si viene)
     Escalafon: Optional[str] = Field(default=None, max_length=4, pattern=r"^(200|220)$")
 
-    # Número de cuenta: texto manual (no numérico)
     NumeroCuenta: Optional[str] = Field(default=None, max_length=40)
+
+    TetanosDosis: Optional[int] = Field(default=None, ge=1, le=5)
+    TetanosFechaUltimaDosis: Optional[datetime.date] = None
+    TetanosDescontable: Optional[bool] = None
+
+    HepatitisDosis: Optional[int] = Field(default=None, ge=1, le=4)
+    HepatitisFechaUltimaDosis: Optional[datetime.date] = None
+    HepatitisDescontable: Optional[bool] = None
 
 
 class ContratacionBasicaOut(ContratacionBasicaIn):

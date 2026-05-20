@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 class ContratacionBasicaRepo:
     TABLE = '"ContratacionBasica"'
 
-    # Campos que retornamos siempre (para no repetir tanto)
+    # Campos que retornamos siempre
     RETURN_FIELDS = """
       "IdContratacionBasica",
       "IdRegistroPersonal",
@@ -20,6 +20,12 @@ class ContratacionBasicaRepo:
       "Posicion",
       "Escalafon",
       "NumeroCuenta",
+      "TetanosDosis",
+      "TetanosFechaUltimaDosis",
+      "TetanosDescontable",
+      "HepatitisDosis",
+      "HepatitisFechaUltimaDosis",
+      "HepatitisDescontable",
       "FechaCreacion",
       "FechaActualizacion"
     """
@@ -32,7 +38,12 @@ class ContratacionBasicaRepo:
             WHERE "IdRegistroPersonal" = :id_registro_personal
             LIMIT 1
         """)
-        row = db.execute(sql, {"id_registro_personal": id_registro_personal}).mappings().first()
+
+        row = db.execute(
+            sql,
+            {"id_registro_personal": id_registro_personal}
+        ).mappings().first()
+
         return dict(row) if row else None
 
     def create(self, db: Session, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -46,6 +57,12 @@ class ContratacionBasicaRepo:
               "Posicion",
               "Escalafon",
               "NumeroCuenta",
+              "TetanosDosis",
+              "TetanosFechaUltimaDosis",
+              "TetanosDescontable",
+              "HepatitisDosis",
+              "HepatitisFechaUltimaDosis",
+              "HepatitisDescontable",
               "FechaCreacion",
               "FechaActualizacion"
             )
@@ -58,6 +75,12 @@ class ContratacionBasicaRepo:
               :Posicion,
               :Escalafon,
               :NumeroCuenta,
+              :TetanosDosis,
+              :TetanosFechaUltimaDosis,
+              :TetanosDescontable,
+              :HepatitisDosis,
+              :HepatitisFechaUltimaDosis,
+              :HepatitisDescontable,
               NOW(),
               NOW()
             )
@@ -65,7 +88,6 @@ class ContratacionBasicaRepo:
               {self.RETURN_FIELDS}
         """)
 
-        # ✅ Payload seguro (todas las keys, aunque sean None)
         payload = {
             "IdRegistroPersonal": data.get("IdRegistroPersonal"),
             "IdBanco": data.get("IdBanco"),
@@ -75,22 +97,36 @@ class ContratacionBasicaRepo:
             "Posicion": data.get("Posicion"),
             "Escalafon": data.get("Escalafon"),
             "NumeroCuenta": data.get("NumeroCuenta"),
+            "TetanosDosis": data.get("TetanosDosis"),
+            "TetanosFechaUltimaDosis": data.get("TetanosFechaUltimaDosis"),
+            "TetanosDescontable": data.get("TetanosDescontable"),
+            "HepatitisDosis": data.get("HepatitisDosis"),
+            "HepatitisFechaUltimaDosis": data.get("HepatitisFechaUltimaDosis"),
+            "HepatitisDescontable": data.get("HepatitisDescontable"),
         }
 
         try:
             row = db.execute(sql, payload).mappings().first()
             db.commit()
+
         except SQLAlchemyError as e:
             db.rollback()
             raise ValueError(f"Error SQL creando ContratacionBasica: {str(e)}")
 
         if not row:
-            raise ValueError("No se pudo crear ContratacionBasica (INSERT no retornó fila).")
+            raise ValueError(
+                "No se pudo crear ContratacionBasica (INSERT no retornó fila)."
+            )
 
         return dict(row)
 
-    def update_by_registro_personal(self, db: Session, id_registro_personal: int, data: Dict[str, Any]) -> Dict[str, Any]:
-        # Actualiza SOLO lo que venga (COALESCE conserva si llega null)
+    def update_by_registro_personal(
+        self,
+        db: Session,
+        id_registro_personal: int,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+
         sql = text(f"""
             UPDATE {self.TABLE}
             SET
@@ -101,6 +137,12 @@ class ContratacionBasicaRepo:
               "Posicion" = COALESCE(:Posicion, "Posicion"),
               "Escalafon" = COALESCE(:Escalafon, "Escalafon"),
               "NumeroCuenta" = COALESCE(:NumeroCuenta, "NumeroCuenta"),
+              "TetanosDosis" = COALESCE(:TetanosDosis, "TetanosDosis"),
+              "TetanosFechaUltimaDosis" = COALESCE(:TetanosFechaUltimaDosis, "TetanosFechaUltimaDosis"),
+              "TetanosDescontable" = COALESCE(:TetanosDescontable, "TetanosDescontable"),
+              "HepatitisDosis" = COALESCE(:HepatitisDosis, "HepatitisDosis"),
+              "HepatitisFechaUltimaDosis" = COALESCE(:HepatitisFechaUltimaDosis, "HepatitisFechaUltimaDosis"),
+              "HepatitisDescontable" = COALESCE(:HepatitisDescontable, "HepatitisDescontable"),
               "FechaActualizacion" = NOW()
             WHERE "IdRegistroPersonal" = :IdRegistroPersonal
             RETURNING
@@ -116,41 +158,62 @@ class ContratacionBasicaRepo:
             "Posicion": data.get("Posicion"),
             "Escalafon": data.get("Escalafon"),
             "NumeroCuenta": data.get("NumeroCuenta"),
+            "TetanosDosis": data.get("TetanosDosis"),
+            "TetanosFechaUltimaDosis": data.get("TetanosFechaUltimaDosis"),
+            "TetanosDescontable": data.get("TetanosDescontable"),
+            "HepatitisDosis": data.get("HepatitisDosis"),
+            "HepatitisFechaUltimaDosis": data.get("HepatitisFechaUltimaDosis"),
+            "HepatitisDescontable": data.get("HepatitisDescontable"),
         }
 
         try:
             row = db.execute(sql, payload).mappings().first()
             db.commit()
+
         except SQLAlchemyError as e:
             db.rollback()
             raise ValueError(f"Error SQL actualizando ContratacionBasica: {str(e)}")
 
         if not row:
             raise ValueError(
-                f"No se pudo actualizar ContratacionBasica (UPDATE no encontró fila) para IdRegistroPersonal={id_registro_personal}."
+                f"No se pudo actualizar ContratacionBasica "
+                f"(UPDATE no encontró fila) para "
+                f"IdRegistroPersonal={id_registro_personal}."
             )
 
         return dict(row)
 
-    def upsert_by_registro_personal(self, db: Session, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        ✅ UPSERT BLINDADO:
-        - Si existe: update
-        - Si no existe: create
-        - Nunca retorna None (si falla, lanza ValueError)
-        """
+    def upsert_by_registro_personal(
+        self,
+        db: Session,
+        data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+
         id_reg = data.get("IdRegistroPersonal")
+
         if not id_reg:
-            raise ValueError("IdRegistroPersonal es obligatorio para upsert.")
+            raise ValueError(
+                "IdRegistroPersonal es obligatorio para upsert."
+            )
 
         existing = self.get_by_registro_personal(db, id_reg)
 
         if existing:
-            result = self.update_by_registro_personal(db, id_reg, data)
+            result = self.update_by_registro_personal(
+                db,
+                id_reg,
+                data
+            )
         else:
-            result = self.create(db, data)
+            result = self.create(
+                db,
+                data
+            )
 
         if not result:
-            raise ValueError(f"upsert_by_registro_personal no retornó datos para IdRegistroPersonal={id_reg}")
+            raise ValueError(
+                f"upsert_by_registro_personal no retornó datos "
+                f"para IdRegistroPersonal={id_reg}"
+            )
 
         return result
