@@ -1,14 +1,17 @@
 from pathlib import Path
 import pickle
+import logging
 
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/spreadsheets"
 ]
+
+logger = logging.getLogger("contratado_debug")
 
 
 def _get_credentials():
@@ -23,23 +26,31 @@ def _get_credentials():
         with open(token_path, "rb") as token:
             creds = pickle.load(token)
 
-    # Refrescar token vencido automáticamente
+    if creds and creds.valid:
+        return creds
+
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(token_path, "wb") as token:
-            pickle.dump(creds, token)
+        try:
+            logger.info("Token Google vencido. Intentando refrescar automáticamente...")
+            creds.refresh(Request())
 
-    # Si no hay token válido, iniciar login manual
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file(
-            str(creds_path), SCOPES
-        )
-        creds = flow.run_local_server(port=0)
+            with open(token_path, "wb") as token:
+                pickle.dump(creds, token)
 
-        with open(token_path, "wb") as token:
-            pickle.dump(creds, token)
+            logger.info("Token Google refrescado correctamente.")
+            return creds
 
-    return creds
+        except RefreshError as e:
+            logger.error(f"No se pudo refrescar token Google: {str(e)}")
+            raise Exception(
+                "Token de Google vencido o revocado. "
+                "Regenerar token.pickle manualmente usando entorno_venv."
+            )
+
+    raise Exception(
+        "No existe token Google válido. "
+        "Generar token.pickle manualmente usando entorno_venv."
+    )
 
 
 def get_drive_service():
@@ -49,4 +60,4 @@ def get_drive_service():
 
 def get_sheets_service():
     creds = _get_credentials()
-    return build("sheets", "v4", credentials=creds)  
+    return build("sheets", "v4", credentials=creds)
