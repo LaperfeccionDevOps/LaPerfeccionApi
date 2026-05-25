@@ -51,17 +51,13 @@ def listar_documentos_activos_por_trabajador(
                 D."Formato",
                 D."FechaCreacion"
             FROM public."TipoDocumentacion" T
-            LEFT JOIN public."Documentos" D
-                ON D."IdTipoDocumentacion" = T."IdTipoDocumentacion"
             LEFT JOIN public."RelacionTipoDocumentacion" R
-                ON R."IdDocumento" = D."IdDocumento"
-               AND R."IdRegistroPersonal" = :id_registro_personal
+                ON R."IdRegistroPersonal" = :id_registro_personal
+            LEFT JOIN public."Documentos" D
+                ON D."IdDocumento" = R."IdDocumento"
+               AND D."IdTipoDocumentacion" = T."IdTipoDocumentacion"
             WHERE T."IdCategoria" = 2
               AND T."Estado" = true
-              AND (
-                    D."IdDocumento" IS NULL
-                    OR R."IdRegistroPersonal" = :id_registro_personal
-                  )
             ORDER BY
                 T."IdTipoDocumentacion",
                 D."FechaCreacion" DESC,
@@ -198,6 +194,7 @@ def descargar_documento_activo(
             "Content-Disposition": f'{"inline" if inline else "attachment"}; filename="{nombre}"'
         }
     )
+
 
 @router.delete("/documento/{id_documento}")
 def eliminar_documento_activo(
