@@ -133,7 +133,7 @@ def obtener_dashboard_indicadores_contratacion(
     rows = db.execute(text("""
         SELECT
             rp."IdEstadoProceso",
-            rp."FechaCreacion" AS fecha_registro,
+            COALESCE(rp."FechaActualizacion", rp."FechaCreacion") AS fecha_registro,
             mcp."MotivoCierre" AS motivo_rechazo,
             CASE rp."IdEstadoProceso"
                 WHEN 18 THEN 'NUEVO'
@@ -161,8 +161,8 @@ def obtener_dashboard_indicadores_contratacion(
         ) mcp
             ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
         WHERE
-            (:anio IS NULL OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio)
-            AND (:mes IS NULL OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes)
+            (:anio IS NULL OR EXTRACT(YEAR FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :anio)
+            AND (:mes IS NULL OR EXTRACT(MONTH FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :mes)
     """), {
         "anio": anio,
         "mes": mes,
@@ -316,7 +316,6 @@ def obtener_dashboard_indicadores_contratacion(
 
     return {
         "filtros": {"anio": anio, "mes": mes},
-
         "total": total,
         "rechazados_generales": rechazados_generales,
         "desistidos": desistidos,
@@ -326,12 +325,10 @@ def obtener_dashboard_indicadores_contratacion(
         "estados": estados,
         "estados_con_datos": [item for item in estados if item["cantidad"] > 0],
         "registros_por_mes": list(registros_por_mes.values()),
-
         "motivos_rechazo_generales": motivos_rechazo_generales,
         "motivos_rechazo_generales_con_datos": [
             item for item in motivos_rechazo_generales if item["cantidad"] > 0
         ],
-
         "total_personas_avanzadas_contratacion": total_personas_avanzadas_contratacion,
         "contratados": contratados,
         "rechazados": rechazados_contratacion,
@@ -340,7 +337,6 @@ def obtener_dashboard_indicadores_contratacion(
             item for item in motivos_rechazo_contratacion if item["cantidad"] > 0
         ],
     }
-
 
 @router.get("/reporte-excel")
 def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
