@@ -161,8 +161,10 @@ def obtener_dashboard_indicadores_contratacion(
         ) mcp
             ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
         WHERE
-            (:anio IS NULL OR EXTRACT(YEAR FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :anio)
-            AND (:mes IS NULL OR EXTRACT(MONTH FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :mes)
+            WHERE
+                COALESCE(rp."UsuarioActualizacion",'') <> 'ajuste_no_activos_maestro_2026_06_22'
+                AND (:anio IS NULL OR EXTRACT(YEAR FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :anio)
+                AND (:mes IS NULL OR EXTRACT(MONTH FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :mes)
     """), {
         "anio": anio,
         "mes": mes,
