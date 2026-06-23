@@ -81,7 +81,7 @@ def listar_documentos_activos(
         if id_tipo not in agrupado:
             agrupado[id_tipo] = {
                 "IdTipoDocumentacion": id_tipo,
-                "tipo_documento": row["tipo_documento"],
+                "tipo_documento": "Certificaciones" if id_tipo == 60 else row["tipo_documento"],
                 "documentos": [],
             }
 
