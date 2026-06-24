@@ -1,13 +1,182 @@
 import os
+from io import BytesIO
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from infrastructure.db.deps import get_db
 
 router = APIRouter(prefix="/api/nomina-retiros", tags=["Nómina Retiros"])
+
+
+def _consultar_retiros_nomina(db: Session):
+    query = text("""
+        SELECT
+            rl."IdRetiroLaboral",
+            rl."IdRegistroPersonal",
+            rp."NumeroIdentificacion",
+            rp."Nombres",
+            rp."Apellidos",
+            COALESCE(c."Nombre", 'SIN CLIENTE') AS "NombreCliente",
+            rl."FechaProceso",
+            rl."FechaRetiro",
+            rl."FechaCierre",
+            rl."FechaEnvioNomina",
+            rl."EstadoCasoRRLL",
+            rp."IdEstadoProceso",
+            ep."Nombre" AS "EstadoProceso",
+            mr."Nombre" AS "MotivoRetiro",
+            tr."Nombre" AS "TipificacionRetiro",
+            rl."ObservacionGeneral",
+            rl."ObservacionRetiro",
+            CASE
+                WHEN rp."IdEstadoProceso" = 32 THEN true
+                ELSE false
+            END AS "PuedeGestionarNomina"
+        FROM public."RetiroLaboral" rl
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+        LEFT JOIN public."Cliente" c
+            ON c."IdCliente" = rl."IdCliente"
+        LEFT JOIN public."EstadoProceso" ep
+            ON ep."IdEstadoProceso" = rp."IdEstadoProceso"
+        LEFT JOIN public."MotivoRetiro" mr
+            ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+        LEFT JOIN public."TipificacionRetiro" tr
+            ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
+        WHERE COALESCE(rl."Activo", true) = true
+          AND rp."IdEstadoProceso" IN (30, 32, 35)
+        ORDER BY
+            CASE WHEN rp."IdEstadoProceso" = 32 THEN 0 ELSE 1 END,
+            rl."FechaCreacion" DESC;
+    """)
+
+    return [dict(row) for row in db.execute(query).mappings().all()]
+
+
+def _valor_fecha_excel(fecha):
+    if not fecha:
+        return ""
+
+    if isinstance(fecha, datetime):
+        return fecha.date()
+
+    return fecha
+
+
+def _nombre_completo(row):
+    nombres = row.get("Nombres") or ""
+    apellidos = row.get("Apellidos") or ""
+    return f"{nombres} {apellidos}".strip()
+
+
+def _configurar_hoja_detalle(ws, titulo, registros):
+    verde = "008060"
+    verde_claro = "E8F7F0"
+    gris_texto = "374151"
+    blanco = "FFFFFF"
+    gris_fila = "F9FAFB"
+    borde_color = "D9E2EC"
+
+    header_fill = PatternFill("solid", fgColor=verde)
+    title_fill = PatternFill("solid", fgColor=verde_claro)
+    thin = Side(style="thin", color=borde_color)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells("A1:E1")
+    ws["A1"] = titulo
+    ws["A1"].font = Font(bold=True, size=16, color=verde)
+    ws["A1"].fill = title_fill
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells("A2:E2")
+    ws["A2"] = f"Generado: {datetime.now().strftime('%d/%m/%Y %I:%M %p')}"
+    ws["A2"].font = Font(italic=True, size=10, color="6B7280")
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+
+    encabezados = [
+        "Identificación",
+        "Nombre completo",
+        "Fecha de retiro",
+        "Cliente",
+        "Estado",
+    ]
+
+    for col, header in enumerate(encabezados, start=1):
+        cell = ws.cell(row=4, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color=blanco)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    ws.row_dimensions[4].height = 24
+
+    for row_idx, registro in enumerate(registros, start=5):
+        id_estado = int(registro.get("IdEstadoProceso") or 0)
+
+        if id_estado == 30:
+            estado_excel = "Abierto"
+        elif id_estado == 32:
+            estado_excel = "Cerrado"
+        elif id_estado == 35:
+            estado_excel = "Retirado"
+        else:
+            estado_excel = "Sin definir"
+
+        valores = [
+            registro.get("NumeroIdentificacion") or "",
+            _nombre_completo(registro),
+            _valor_fecha_excel(registro.get("FechaRetiro")),
+            registro.get("NombreCliente") or "SIN CLIENTE",
+            estado_excel,
+        ]
+
+        for col_idx, valor in enumerate(valores, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=valor)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.font = Font(color=gris_texto)
+
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=gris_fila)
+
+            if col_idx == 3 and valor:
+                cell.number_format = "DD/MM/YYYY"
+
+            if col_idx == 5:
+                estado = str(valor).upper()
+                if "RETIRADO" in estado:
+                    cell.fill = PatternFill("solid", fgColor="DCFCE7")
+                    cell.font = Font(color="166534", bold=True)
+                elif "CERRADO" in estado or "NÓMINA" in estado or "NOMINA" in estado:
+                    cell.fill = PatternFill("solid", fgColor="DBEAFE")
+                    cell.font = Font(color="1D4ED8", bold=True)
+                else:
+                    cell.fill = PatternFill("solid", fgColor="FEF3C7")
+                    cell.font = Font(color="92400E", bold=True)
+
+        ws.row_dimensions[row_idx].height = 30
+
+    widths = {
+        "A": 20,
+        "B": 42,
+        "C": 18,
+        "D": 60,
+        "E": 24,
+    }
+
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    ws.freeze_panes = "A5"
+    ws.auto_filter.ref = f"A4:E{max(4, len(registros) + 4)}"
 
 
 @router.get("")
@@ -67,6 +236,54 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
+
+
+@router.get("/reporte-excel")
+def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
+    try:
+        rows = _consultar_retiros_nomina(db)
+
+        # Orden para que quede claro: abiertos, cerrados y retirados.
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                1 if int(row.get("IdEstadoProceso") or 0) == 30 else
+                2 if int(row.get("IdEstadoProceso") or 0) == 32 else
+                3 if int(row.get("IdEstadoProceso") or 0) == 35 else
+                4,
+                str(row.get("FechaRetiro") or ""),
+                _nombre_completo(row).upper(),
+            )
+        )
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Nomina Retiros"
+
+        _configurar_hoja_detalle(ws, "Reporte Nómina Retiros", rows)
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        nombre_archivo = f"Reporte_Nomina_Retiros_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="{nombre_archivo}"'
+        }
+
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar reporte Excel de nómina retiros: {str(e)}"
+        )
+
 
 
 @router.put("/{id_retiro_laboral}/finalizar")
