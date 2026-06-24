@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+import os
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -56,7 +59,7 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
         return {
             "success": True,
             "message": "Retiros de nómina consultados correctamente.",
-            "data": [dict(row) for row in rows]
+            "data": [dict(row) for row in rows],
         }
 
     except Exception as e:
@@ -64,9 +67,13 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
-    
+
+
 @router.put("/{id_retiro_laboral}/finalizar")
-def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db)):
+def finalizar_retiro_nomina(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
     try:
         query_estado_retirado = text("""
             SELECT "IdEstadoProceso"
@@ -104,7 +111,10 @@ def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado."
+            )
 
         if int(retiro["IdEstadoProceso"]) != 32:
             raise HTTPException(
@@ -116,6 +126,8 @@ def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db
             UPDATE public."RetiroLaboral"
             SET
                 "EstadoCasoRRLL" = 'CERRADO',
+                "FechaCierre" = NOW(),
+                "FechaEnvioNomina" = NOW(),
                 "FechaActualizacion" = NOW(),
                 "UsuarioActualizacion" = 'nomina'
             WHERE "IdRetiroLaboral" = :id_retiro_laboral;
@@ -128,10 +140,14 @@ def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db
             WHERE "IdRegistroPersonal" = :id_registro_personal;
         """)
 
-        db.execute(query_update_retiro, {"id_retiro_laboral": id_retiro_laboral})
+        db.execute(
+            query_update_retiro,
+            {"id_retiro_laboral": id_retiro_laboral}
+        )
+
         db.execute(query_update_registro, {
             "id_estado_retirado": id_estado_retirado,
-            "id_registro_personal": retiro["IdRegistroPersonal"]
+            "id_registro_personal": retiro["IdRegistroPersonal"],
         })
 
         db.commit()
@@ -143,13 +159,14 @@ def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db
                 "IdRetiroLaboral": id_retiro_laboral,
                 "IdRegistroPersonal": retiro["IdRegistroPersonal"],
                 "IdEstadoProceso": id_estado_retirado,
-                "EstadoProceso": "Retirado"
-            }
+                "EstadoProceso": "Retirado",
+            },
         }
 
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -157,10 +174,13 @@ def finalizar_retiro_nomina(id_retiro_laboral: int, db: Session = Depends(get_db
             detail=f"Error al finalizar retiro desde nómina: {str(e)}"
         )
 
-@router.put("/{id_retiro_laboral}/devolver")
-def devolver_retiro_rrll(id_retiro_laboral: int, db: Session = Depends(get_db)):
-    try:
 
+@router.put("/{id_retiro_laboral}/devolver")
+def devolver_retiro_rrll(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
         query_retiro = text("""
             SELECT
                 rl."IdRetiroLaboral",
@@ -226,8 +246,8 @@ def devolver_retiro_rrll(id_retiro_laboral: int, db: Session = Depends(get_db)):
                 "IdRetiroLaboral": id_retiro_laboral,
                 "IdRegistroPersonal": retiro["IdRegistroPersonal"],
                 "IdEstadoProceso": 30,
-                "EstadoProceso": "Abierto"
-            }
+                "EstadoProceso": "Abierto",
+            },
         }
 
     except HTTPException:
@@ -239,4 +259,163 @@ def devolver_retiro_rrll(id_retiro_laboral: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500,
             detail=f"Error al devolver retiro a RRLL: {str(e)}"
+        )
+
+
+@router.post("/{id_retiro_laboral}/adjuntos")
+async def subir_adjunto_nomina_retiro(
+    id_retiro_laboral: int,
+    IdTipoDocumentoRetiro: int = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        documentos_permitidos = {
+            15: "Retiro ARL",
+            16: "Liquidación de contrato",
+        }
+
+        if IdTipoDocumentoRetiro not in documentos_permitidos:
+            raise HTTPException(
+                status_code=400,
+                detail="Nómina solo puede adjuntar Retiro ARL o Liquidación de contrato."
+            )
+
+        query_retiro = text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rp."IdEstadoProceso"
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+              AND COALESCE(rl."Activo", true) = true;
+        """)
+
+        retiro = db.execute(
+            query_retiro,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro:
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado."
+            )
+
+        if int(retiro["IdEstadoProceso"]) not in (32, 35):
+            raise HTTPException(
+                status_code=400,
+                detail="Solo se pueden adjuntar documentos de nómina a retiros enviados a nómina o retirados."
+            )
+
+        contenido = await file.read()
+
+        if not contenido:
+            raise HTTPException(
+                status_code=400,
+                detail="El archivo está vacío."
+            )
+
+        extension = os.path.splitext(file.filename or "")[1].lower() or ".pdf"
+        fecha_nombre = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        nombre_archivo = (
+            f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{fecha_nombre}{extension}"
+        )
+
+        carpeta_destino = os.path.join(
+            "storage",
+            "rrll",
+            "retiros",
+            str(id_retiro_laboral)
+        )
+
+        os.makedirs(carpeta_destino, exist_ok=True)
+
+        ruta_archivo = os.path.join(carpeta_destino, nombre_archivo)
+
+        with open(ruta_archivo, "wb") as f:
+            f.write(contenido)
+
+        ruta_bd = ruta_archivo.replace("\\", "/")
+
+        query_insert = text("""
+            INSERT INTO public."RetiroLaboralAdjunto"
+            (
+                "IdRetiroLaboral",
+                "IdTipoDocumentoRetiro",
+                "NombreArchivo",
+                "RutaArchivo",
+                "ExtensionArchivo",
+                "PesoArchivo",
+                "Observacion",
+                "Activo",
+                "FechaCreacion",
+                "FechaActualizacion",
+                "CreadoPor",
+                "UsuarioActualizacion",
+                "OrigenArchivo",
+                "MimeType",
+                "NombreArchivoOriginal",
+                "Eliminado"
+            )
+            VALUES
+            (
+                :id_retiro_laboral,
+                :id_tipo_documento_retiro,
+                :nombre_archivo,
+                :ruta_archivo,
+                :extension_archivo,
+                :peso_archivo,
+                :observacion,
+                true,
+                NOW(),
+                NOW(),
+                'nomina',
+                'nomina',
+                'NOMINA',
+                :mime_type,
+                :nombre_archivo_original,
+                false
+            )
+            RETURNING "IdRetiroLaboralAdjunto";
+        """)
+
+        nuevo = db.execute(query_insert, {
+            "id_retiro_laboral": id_retiro_laboral,
+            "id_tipo_documento_retiro": IdTipoDocumentoRetiro,
+            "nombre_archivo": nombre_archivo,
+            "ruta_archivo": ruta_bd,
+            "extension_archivo": extension,
+            "peso_archivo": len(contenido),
+            "observacion": "Carga desde módulo Nómina Retiros",
+            "mime_type": file.content_type or "application/pdf",
+            "nombre_archivo_original": file.filename or nombre_archivo,
+        }).mappings().first()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Documento de nómina adjuntado correctamente.",
+            "data": {
+                "IdRetiroLaboralAdjunto": nuevo["IdRetiroLaboralAdjunto"],
+                "IdRetiroLaboral": id_retiro_laboral,
+                "IdTipoDocumentoRetiro": IdTipoDocumentoRetiro,
+                "NombreDocumento": documentos_permitidos[IdTipoDocumentoRetiro],
+                "NombreArchivo": nombre_archivo,
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al adjuntar documento de nómina: {str(e)}"
         )
