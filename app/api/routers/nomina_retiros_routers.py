@@ -478,8 +478,6 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
             detail=f"Error al generar reporte Excel de nómina retiros: {str(e)}"
         )
 
-
-
 @router.put("/{id_retiro_laboral}/finalizar")
 def finalizar_retiro_nomina(
     id_retiro_laboral: int,
@@ -532,6 +530,50 @@ def finalizar_retiro_nomina(
             raise HTTPException(
                 status_code=400,
                 detail="Solo se pueden finalizar retiros enviados a nómina."
+            )
+
+        # Validación obligatoria documentos de nómina:
+        # 15 = Retiro ARL
+        # 16 = Liquidación de contrato
+        query_documentos_obligatorios = text("""
+            SELECT
+                tdr."IdTipoDocumentoRetiro",
+                tdr."Nombre" AS "NombreDocumento",
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM public."RetiroLaboralAdjunto" rla
+                        WHERE rla."IdRetiroLaboral" = :id_retiro_laboral
+                          AND rla."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
+                          AND COALESCE(rla."Activo", true) = true
+                          AND COALESCE(rla."Eliminado", false) = false
+                          AND rla."RutaArchivo" IS NOT NULL
+                    ) THEN true
+                    ELSE false
+                END AS "Adjuntado"
+            FROM public."TipoDocumentoRetiro" tdr
+            WHERE tdr."IdTipoDocumentoRetiro" IN (15, 16)
+            ORDER BY tdr."IdTipoDocumentoRetiro";
+        """)
+
+        documentos_estado = db.execute(
+            query_documentos_obligatorios,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().all()
+
+        documentos_faltantes = [
+            doc["NombreDocumento"]
+            for doc in documentos_estado
+            if not bool(doc["Adjuntado"])
+        ]
+
+        if documentos_faltantes:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "No se puede finalizar el retiro. Faltan documentos obligatorios de nómina.",
+                    "documentos_faltantes": documentos_faltantes,
+                }
             )
 
         query_update_retiro = text("""
@@ -590,7 +632,6 @@ def finalizar_retiro_nomina(
             status_code=500,
             detail=f"Error al finalizar retiro desde nómina: {str(e)}"
         )
-
 
 @router.put("/{id_retiro_laboral}/devolver")
 def devolver_retiro_rrll(
