@@ -236,6 +236,104 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
+    
+@router.get("/indicadores")
+def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
+    try:
+        query_totales = text("""
+            SELECT
+                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 30) AS abiertos,
+                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 32) AS cerrados,
+                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 35) AS retirados,
+                COUNT(*) AS total
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            WHERE COALESCE(rl."Activo", true) = true
+              AND rp."IdEstadoProceso" IN (30, 32, 35);
+        """)
+
+        totales_row = db.execute(query_totales).mappings().first()
+
+        abiertos = int(totales_row["abiertos"] or 0)
+        cerrados = int(totales_row["cerrados"] or 0)
+        retirados = int(totales_row["retirados"] or 0)
+        total = int(totales_row["total"] or 0)
+
+        query_retiros_mes = text("""
+            SELECT
+                EXTRACT(YEAR FROM fecha_base)::int AS anio,
+                EXTRACT(MONTH FROM fecha_base)::int AS mes_numero,
+                COUNT(*)::int AS cantidad
+            FROM (
+                SELECT
+                    COALESCE(
+                        rl."FechaRetiro",
+                        rl."FechaCierre",
+                        rl."FechaEnvioNomina",
+                        rl."FechaProceso",
+                        rl."FechaCreacion"
+                    ) AS fecha_base
+                FROM public."RetiroLaboral" rl
+                INNER JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                WHERE COALESCE(rl."Activo", true) = true
+                  AND rp."IdEstadoProceso" IN (30, 32, 35)
+            ) datos
+            WHERE fecha_base IS NOT NULL
+            GROUP BY anio, mes_numero
+            ORDER BY anio, mes_numero;
+        """)
+
+        meses_nombre = {
+            1: "enero",
+            2: "febrero",
+            3: "marzo",
+            4: "abril",
+            5: "mayo",
+            6: "junio",
+            7: "julio",
+            8: "agosto",
+            9: "septiembre",
+            10: "octubre",
+            11: "noviembre",
+            12: "diciembre",
+        }
+
+        retiros_por_mes_rows = db.execute(query_retiros_mes).mappings().all()
+
+        retiros_por_mes = [
+            {
+                "mes": f"{meses_nombre.get(int(row['mes_numero']), 'sin-mes')}-{int(row['anio'])}",
+                "cantidad": int(row["cantidad"] or 0),
+            }
+            for row in retiros_por_mes_rows
+        ]
+
+        return {
+            "success": True,
+            "message": "Indicadores de nómina retiros consultados correctamente.",
+            "data": {
+                "totales": {
+                    "abiertos": abiertos,
+                    "cerrados": cerrados,
+                    "retirados": retirados,
+                    "total": total,
+                },
+                "distribucionEstados": [
+                    {"estado": "Abierto", "cantidad": abiertos},
+                    {"estado": "Cerrado", "cantidad": cerrados},
+                    {"estado": "Retirado", "cantidad": retirados},
+                ],
+                "retirosPorMes": retiros_por_mes,
+            },
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar indicadores de nómina retiros: {str(e)}"
+        )
 
 
 @router.get("/reporte-excel")
