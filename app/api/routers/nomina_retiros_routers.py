@@ -1,8 +1,9 @@
 import os
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, date
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -13,6 +14,13 @@ from openpyxl.utils import get_column_letter
 from infrastructure.db.deps import get_db
 
 router = APIRouter(prefix="/api/nomina-retiros", tags=["Nómina Retiros"])
+
+
+class ObservacionNominaRequest(BaseModel):
+    observacion_nomina: str | None = None
+
+class FinalizarRetiroNominaRequest(BaseModel):
+    fecha_pago_liquidacion: date
 
 
 def _consultar_retiros_nomina(db: Session):
@@ -28,6 +36,7 @@ def _consultar_retiros_nomina(db: Session):
             rl."FechaRetiro",
             rl."FechaCierre",
             rl."FechaEnvioNomina",
+            rl."FechaPagoLiquidacion",
             rl."EstadoCasoRRLL",
             rp."IdEstadoProceso",
             ep."Nombre" AS "EstadoProceso",
@@ -35,6 +44,9 @@ def _consultar_retiros_nomina(db: Session):
             tr."Nombre" AS "TipificacionRetiro",
             rl."ObservacionGeneral",
             rl."ObservacionRetiro",
+            rl."ObservacionNomina",
+            rl."UsuarioObservacionNomina",
+            rl."FechaObservacionNomina",
             CASE
                 WHEN rp."IdEstadoProceso" = 32 THEN true
                 ELSE false
@@ -89,14 +101,14 @@ def _configurar_hoja_detalle(ws, titulo, registros):
     thin = Side(style="thin", color=borde_color)
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells("A1:E1")
+    ws.merge_cells("A1:F1")
     ws["A1"] = titulo
     ws["A1"].font = Font(bold=True, size=16, color=verde)
     ws["A1"].fill = title_fill
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
 
-    ws.merge_cells("A2:E2")
+    ws.merge_cells("A2:F2")
     ws["A2"] = f"Generado: {datetime.now().strftime('%d/%m/%Y %I:%M %p')}"
     ws["A2"].font = Font(italic=True, size=10, color="6B7280")
     ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
@@ -105,6 +117,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
         "Identificación",
         "Nombre completo",
         "Fecha de retiro",
+        "Fecha pago liquidación",
         "Cliente",
         "Estado",
     ]
@@ -134,6 +147,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
             registro.get("NumeroIdentificacion") or "",
             _nombre_completo(registro),
             _valor_fecha_excel(registro.get("FechaRetiro")),
+            _valor_fecha_excel(registro.get("FechaPagoLiquidacion")),
             registro.get("NombreCliente") or "SIN CLIENTE",
             estado_excel,
         ]
@@ -147,10 +161,10 @@ def _configurar_hoja_detalle(ws, titulo, registros):
             if row_idx % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=gris_fila)
 
-            if col_idx == 3 and valor:
+            if col_idx in (3, 4) and valor:
                 cell.number_format = "DD/MM/YYYY"
 
-            if col_idx == 5:
+            if col_idx == 6:
                 estado = str(valor).upper()
                 if "RETIRADO" in estado:
                     cell.fill = PatternFill("solid", fgColor="DCFCE7")
@@ -168,15 +182,16 @@ def _configurar_hoja_detalle(ws, titulo, registros):
         "A": 20,
         "B": 42,
         "C": 18,
-        "D": 60,
-        "E": 24,
+        "D": 24,
+        "E": 60,
+        "F": 24,
     }
 
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
 
     ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A4:E{max(4, len(registros) + 4)}"
+    ws.auto_filter.ref = f"A4:F{max(4, len(registros) + 4)}"
 
 
 @router.get("")
@@ -194,6 +209,7 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 rl."FechaRetiro",
                 rl."FechaCierre",
                 rl."FechaEnvioNomina",
+                rl."FechaPagoLiquidacion",
                 rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso",
                 ep."Nombre" AS "EstadoProceso",
@@ -201,6 +217,9 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 tr."Nombre" AS "TipificacionRetiro",
                 rl."ObservacionGeneral",
                 rl."ObservacionRetiro",
+                rl."ObservacionNomina",
+                rl."UsuarioObservacionNomina",
+                rl."FechaObservacionNomina",
                 CASE
                     WHEN rp."IdEstadoProceso" = 32 THEN true
                     ELSE false
@@ -236,7 +255,83 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
-    
+
+
+@router.put("/{id_retiro_laboral}/observacion-nomina")
+def guardar_observacion_nomina(
+    id_retiro_laboral: int,
+    payload: ObservacionNominaRequest,
+    db: Session = Depends(get_db)
+):
+    try:
+        query_retiro = text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rp."IdEstadoProceso"
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+              AND COALESCE(rl."Activo", true) = true;
+        """)
+
+        retiro = db.execute(
+            query_retiro,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro:
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado."
+            )
+
+        if int(retiro["IdEstadoProceso"]) not in (32, 35):
+            raise HTTPException(
+                status_code=400,
+                detail="Solo se puede registrar observación de nómina en retiros enviados a nómina o retirados."
+            )
+
+        query_update = text("""
+            UPDATE public."RetiroLaboral"
+            SET
+                "ObservacionNomina" = :observacion_nomina,
+                "UsuarioObservacionNomina" = 'nomina',
+                "FechaObservacionNomina" = NOW(),
+                "FechaActualizacion" = NOW(),
+                "UsuarioActualizacion" = 'nomina'
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral
+            RETURNING
+                "IdRetiroLaboral",
+                "ObservacionNomina",
+                "UsuarioObservacionNomina",
+                "FechaObservacionNomina";
+        """)
+
+        actualizado = db.execute(query_update, {
+            "id_retiro_laboral": id_retiro_laboral,
+            "observacion_nomina": payload.observacion_nomina,
+        }).mappings().first()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Observación de nómina guardada correctamente.",
+            "data": dict(actualizado),
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error guardando observación de nómina: {str(e)}"
+        )
+
 @router.get("/indicadores")
 def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     try:
@@ -271,6 +366,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                         rl."FechaRetiro",
                         rl."FechaCierre",
                         rl."FechaEnvioNomina",
+                        rl."FechaPagoLiquidacion",
                         rl."FechaProceso",
                         rl."FechaCreacion"
                     ) AS fecha_base
@@ -387,6 +483,7 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
 @router.put("/{id_retiro_laboral}/finalizar")
 def finalizar_retiro_nomina(
     id_retiro_laboral: int,
+    payload: FinalizarRetiroNominaRequest,
     db: Session = Depends(get_db)
 ):
     try:
@@ -443,6 +540,7 @@ def finalizar_retiro_nomina(
                 "EstadoCasoRRLL" = 'CERRADO',
                 "FechaCierre" = NOW(),
                 "FechaEnvioNomina" = NOW(),
+                "FechaPagoLiquidacion" = :fecha_pago_liquidacion,
                 "FechaActualizacion" = NOW(),
                 "UsuarioActualizacion" = 'nomina'
             WHERE "IdRetiroLaboral" = :id_retiro_laboral;
@@ -457,7 +555,10 @@ def finalizar_retiro_nomina(
 
         db.execute(
             query_update_retiro,
-            {"id_retiro_laboral": id_retiro_laboral}
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "fecha_pago_liquidacion": payload.fecha_pago_liquidacion,
+            }
         )
 
         db.execute(query_update_registro, {
@@ -475,6 +576,7 @@ def finalizar_retiro_nomina(
                 "IdRegistroPersonal": retiro["IdRegistroPersonal"],
                 "IdEstadoProceso": id_estado_retirado,
                 "EstadoProceso": "Retirado",
+                "FechaPagoLiquidacion": payload.fecha_pago_liquidacion.isoformat(),
             },
         }
 
