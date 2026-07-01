@@ -469,32 +469,42 @@ def validar_retiro_activo(
             "FechaProceso",
             "FechaRetiro",
             "Activo",
-            "FechaEnvioOperaciones"
+            "FechaEnvioOperaciones",
             "FechaEnvioNomina",
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-          AND "Activo" = true
+          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'CERRADO')
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)
+
     active = db.execute(q, {"id_registro_personal": id_registro_personal}).mappings().first()
 
     fecha_ultimo_dia = _obtener_fecha_ultimo_dia_laborado(db, id_registro_personal)
 
     if active:
         retiro = dict(active)
+        estado = str(retiro.get("EstadoCasoRRLL") or "").upper()
+
         retiro["FechaUltimoDiaLaborado"] = fecha_ultimo_dia
-        return {"tieneRetiroActivo": True, "retiro": retiro}
+        retiro["BloqueadoRRLL"] = estado in ("ENVIADO_NOMINA", "CERRADO")
+        retiro["Owner"] = "NOMINA" if estado == "ENVIADO_NOMINA" else "RRLL"
+
+        return {
+            "tieneRetiroActivo": True,
+            "retiro": retiro
+        }
 
     return {
         "tieneRetiroActivo": False,
         "retiro": {
             "IdRegistroPersonal": id_registro_personal,
-            "FechaUltimoDiaLaborado": fecha_ultimo_dia
+            "FechaUltimoDiaLaborado": fecha_ultimo_dia,
+            "BloqueadoRRLL": False,
+            "Owner": "RRLL"
         }
     }
-
 
 # =========================
 # POST: crear retiro
@@ -624,20 +634,17 @@ def actualizar_retiro_laboral(
         WHERE "IdRetiroLaboral" = :id_retiro_laboral
         LIMIT 1;
     """)
+
     current = db.execute(q_get, {"id_retiro_laboral": id_retiro_laboral}).mappings().first()
+
     if not current:
         raise HTTPException(status_code=404, detail="No existe el retiro a actualizar.")
 
     nuevo_estado_caso = None
+
     if payload and payload.EstadoCasoRRLL is not None:
         nuevo_estado_caso = _validar_estado_caso(payload.EstadoCasoRRLL)
 
-    # =========================
-    # ✅ AJUSTE DE REGLAS:
-    # - ABIERTO  => Activo = true
-    # - CERRADO  => Activo = false (+ FechaCierre si no viene)
-    # - ENVIADO_NOMINA => Activo = false (+ FechaEnvioNomina si no viene)
-    # =========================
     activo_forzado = payload.Activo if payload else None
     fecha_cierre_forzada = payload.FechaCierre if payload else None
     fecha_envio_nomina_forzada = payload.FechaEnvioNomina if payload else None
@@ -649,13 +656,12 @@ def actualizar_retiro_laboral(
 
     elif nuevo_estado_caso == "ENVIADO_NOMINA":
         activo_forzado = False
-        if fecha_envio_nomina_forzada is None:
-            fecha_envio_nomina_forzada = datetime.utcnow()
+        if fecha_cierre_forzada is None:
+            fecha_cierre_forzada = datetime.utcnow()
 
     elif nuevo_estado_caso == "ABIERTO":
         activo_forzado = True
 
-    # ✅ SI VA A QUEDAR Activo=true, validar que no exista otro Activo=true
     if activo_forzado is True:
         q_other = text("""
             SELECT "IdRetiroLaboral"
@@ -666,10 +672,12 @@ def actualizar_retiro_laboral(
             ORDER BY "IdRetiroLaboral" DESC
             LIMIT 1;
         """)
+
         other = db.execute(q_other, {
             "id_registro_personal": current["IdRegistroPersonal"],
             "id_retiro_laboral": id_retiro_laboral
         }).mappings().first()
+
         if other:
             raise HTTPException(
                 status_code=409,
@@ -681,13 +689,25 @@ def actualizar_retiro_laboral(
             return
 
         if nuevo_estado_caso == "ABIERTO":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ABIERTO)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ABIERTO
+            )
 
         elif nuevo_estado_caso == "ENVIADO_NOMINA":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ENVIADO_NOMINA
+            )
 
         elif nuevo_estado_caso == "CERRADO":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ENVIADO_NOMINA
+            )
 
     q_update = text("""
         UPDATE public."RetiroLaboral"
@@ -739,6 +759,75 @@ def actualizar_retiro_laboral(
                 id_registro_personal=row["IdRegistroPersonal"],
                 id_retiro_laboral=row["IdRetiroLaboral"]
             )
+
+            if row["FechaRetiro"]:
+                paz_existente = db.execute(
+                    text("""
+                        SELECT "IdPazYSalvo"
+                        FROM public."PazYSalvoOperaciones"
+                        WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                           OR "IdRegistroPersonal" = :id_registro_personal
+                        ORDER BY "IdPazYSalvo" DESC
+                        LIMIT 1;
+                    """),
+                    {
+                        "id_retiro_laboral": row["IdRetiroLaboral"],
+                        "id_registro_personal": row["IdRegistroPersonal"],
+                    }
+                ).mappings().first()
+
+                if paz_existente:
+                    db.execute(
+                        text("""
+                            UPDATE public."PazYSalvoOperaciones"
+                            SET
+                                "IdRegistroPersonal" = :id_registro_personal,
+                                "IdRetiroLaboral" = :id_retiro_laboral,
+                                "FechaUltimoDiaLaborado" = :fecha_retiro,
+                                "FechaCarga" = CURRENT_TIMESTAMP,
+                                "UsuarioCreacion" = :usuario
+                            WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                        """),
+                        {
+                            "id_registro_personal": row["IdRegistroPersonal"],
+                            "id_retiro_laboral": row["IdRetiroLaboral"],
+                            "fecha_retiro": row["FechaRetiro"],
+                            "usuario": payload.UsuarioActualizacion or "RRLL",
+                            "id_paz_y_salvo": paz_existente["IdPazYSalvo"],
+                        }
+                    )
+                else:
+                    db.execute(
+                        text("""
+                            INSERT INTO public."PazYSalvoOperaciones"
+                            (
+                                "IdRegistroPersonal",
+                                "FechaUltimoDiaLaborado",
+                                "Observacion",
+                                "UsuarioCreacion",
+                                "FechaCreacion",
+                                "IdRetiroLaboral",
+                                "FechaCarga"
+                            )
+                            VALUES
+                            (
+                                :id_registro_personal,
+                                :fecha_retiro,
+                                :observacion,
+                                :usuario,
+                                CURRENT_TIMESTAMP,
+                                :id_retiro_laboral,
+                                CURRENT_TIMESTAMP
+                            );
+                        """),
+                        {
+                            "id_registro_personal": row["IdRegistroPersonal"],
+                            "fecha_retiro": row["FechaRetiro"],
+                            "observacion": payload.ObservacionGeneral,
+                            "usuario": payload.UsuarioActualizacion or "RRLL",
+                            "id_retiro_laboral": row["IdRetiroLaboral"],
+                        }
+                    )
 
         _aplicar_estado_global_si_corresponde()
         db.commit()
