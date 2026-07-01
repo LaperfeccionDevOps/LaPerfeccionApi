@@ -767,11 +767,10 @@ def obtener_documentos_retiro_carpeta_digital(
     try:
         query_retiro = text("""
             SELECT "IdRetiroLaboral"
-            FROM public."RetiroLaboral"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-              AND COALESCE("Activo", true) = true
-            ORDER BY "IdRetiroLaboral" DESC
-            LIMIT 1;
+FROM public."RetiroLaboral"
+WHERE "IdRegistroPersonal" = :id_registro_personal
+ORDER BY "IdRetiroLaboral" DESC
+LIMIT 1;
         """)
 
         retiro = db.execute(

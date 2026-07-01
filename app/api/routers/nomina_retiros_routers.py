@@ -19,12 +19,21 @@ router = APIRouter(prefix="/api/nomina-retiros", tags=["Nómina Retiros"])
 class ObservacionNominaRequest(BaseModel):
     observacion_nomina: str | None = None
 
+
 class FinalizarRetiroNominaRequest(BaseModel):
     fecha_pago_liquidacion: date
 
 
+FILTRO_NOMINA_SQL = """
+(
+    rp."IdEstadoProceso" IN (32, 35)
+    OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) IN ('ENVIADO_NOMINA', 'CERRADO')
+)
+"""
+
+
 def _consultar_retiros_nomina(db: Session):
-    query = text("""
+    query = text(f"""
         SELECT
             rl."IdRetiroLaboral",
             rl."IdRegistroPersonal",
@@ -48,7 +57,9 @@ def _consultar_retiros_nomina(db: Session):
             rl."UsuarioObservacionNomina",
             rl."FechaObservacionNomina",
             CASE
-                WHEN rp."IdEstadoProceso" = 32 THEN true
+                WHEN rp."IdEstadoProceso" = 32
+                  OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                THEN true
                 ELSE false
             END AS "PuedeGestionarNomina"
         FROM public."RetiroLaboral" rl
@@ -62,10 +73,15 @@ def _consultar_retiros_nomina(db: Session):
             ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
         LEFT JOIN public."TipificacionRetiro" tr
             ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
-        WHERE COALESCE(rl."Activo", true) = true
-          AND rp."IdEstadoProceso" IN (30, 32, 35)
+        WHERE {FILTRO_NOMINA_SQL}
         ORDER BY
-            CASE WHEN rp."IdEstadoProceso" = 32 THEN 0 ELSE 1 END,
+            CASE
+                WHEN rp."IdEstadoProceso" = 32
+                  OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                THEN 0
+                WHEN rp."IdEstadoProceso" = 35 THEN 1
+                ELSE 2
+            END,
             rl."FechaCreacion" DESC;
     """)
 
@@ -132,14 +148,15 @@ def _configurar_hoja_detalle(ws, titulo, registros):
     ws.row_dimensions[4].height = 24
 
     for row_idx, registro in enumerate(registros, start=5):
+        estado_caso = str(registro.get("EstadoCasoRRLL") or "").upper()
         id_estado = int(registro.get("IdEstadoProceso") or 0)
 
-        if id_estado == 30:
-            estado_excel = "Abierto"
-        elif id_estado == 32:
-            estado_excel = "Cerrado"
-        elif id_estado == 35:
+        if id_estado == 35:
             estado_excel = "Retirado"
+        elif id_estado == 32 or estado_caso == "ENVIADO_NOMINA":
+            estado_excel = "Cerrado"
+        elif estado_caso == "CERRADO":
+            estado_excel = "Cerrado"
         else:
             estado_excel = "Sin definir"
 
@@ -197,7 +214,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
 @router.get("")
 def listar_retiros_nomina(db: Session = Depends(get_db)):
     try:
-        query = text("""
+        query = text(f"""
             SELECT
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
@@ -245,7 +262,9 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 rl."FechaObservacionNomina",
 
                 CASE
-                    WHEN rp."IdEstadoProceso" = 32 THEN true
+                    WHEN rp."IdEstadoProceso" = 32
+                      OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                    THEN true
                     ELSE false
                 END AS "PuedeGestionarNomina"
 
@@ -262,10 +281,15 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
             LEFT JOIN public."TipificacionRetiro" tr
                 ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
-            WHERE COALESCE(rl."Activo", true) = true
-              AND rp."IdEstadoProceso" IN (30, 32, 35)
+            WHERE {FILTRO_NOMINA_SQL}
             ORDER BY
-                CASE WHEN rp."IdEstadoProceso" = 32 THEN 0 ELSE 1 END,
+                CASE
+                    WHEN rp."IdEstadoProceso" = 32
+                      OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                    THEN 0
+                    WHEN rp."IdEstadoProceso" = 35 THEN 1
+                    ELSE 2
+                END,
                 rl."FechaCreacion" DESC;
         """)
 
@@ -283,6 +307,7 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
 
+
 @router.put("/{id_retiro_laboral}/observacion-nomina")
 def guardar_observacion_nomina(
     id_retiro_laboral: int,
@@ -293,12 +318,12 @@ def guardar_observacion_nomina(
         query_retiro = text("""
             SELECT
                 rl."IdRetiroLaboral",
+                rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso"
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
-              AND COALESCE(rl."Activo", true) = true;
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
         retiro = db.execute(
@@ -307,12 +332,11 @@ def guardar_observacion_nomina(
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(
-                status_code=404,
-                detail="Retiro laboral no encontrado."
-            )
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-        if int(retiro["IdEstadoProceso"]) not in (32, 35):
+        estado_caso = str(retiro["EstadoCasoRRLL"] or "").upper()
+
+        if int(retiro["IdEstadoProceso"] or 0) not in (32, 35) and estado_caso not in ("ENVIADO_NOMINA", "CERRADO"):
             raise HTTPException(
                 status_code=400,
                 detail="Solo se puede registrar observación de nómina en retiros enviados a nómina o retirados."
@@ -358,20 +382,28 @@ def guardar_observacion_nomina(
             detail=f"Error guardando observación de nómina: {str(e)}"
         )
 
+
 @router.get("/indicadores")
 def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     try:
-        query_totales = text("""
+        query_totales = text(f"""
             SELECT
-                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 30) AS abiertos,
-                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 32) AS cerrados,
-                COUNT(*) FILTER (WHERE rp."IdEstadoProceso" = 35) AS retirados,
+                COUNT(*) FILTER (
+                    WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                       OR rp."IdEstadoProceso" = 32
+                ) AS cerrados,
+                COUNT(*) FILTER (
+                    WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ABIERTO'
+                       AND rp."IdEstadoProceso" = 30
+                ) AS abiertos,
+                COUNT(*) FILTER (
+                    WHERE rp."IdEstadoProceso" = 35
+                ) AS retirados,
                 COUNT(*) AS total
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE COALESCE(rl."Activo", true) = true
-              AND rp."IdEstadoProceso" IN (30, 32, 35);
+            WHERE {FILTRO_NOMINA_SQL};
         """)
 
         totales_row = db.execute(query_totales).mappings().first()
@@ -381,7 +413,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
         retirados = int(totales_row["retirados"] or 0)
         total = int(totales_row["total"] or 0)
 
-        query_retiros_mes = text("""
+        query_retiros_mes = text(f"""
             SELECT
                 EXTRACT(YEAR FROM fecha_base)::int AS anio,
                 EXTRACT(MONTH FROM fecha_base)::int AS mes_numero,
@@ -402,8 +434,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
                 LEFT JOIN public."PazYSalvoOperaciones" pso
                     ON pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
-                WHERE COALESCE(rl."Activo", true) = true
-                  AND rp."IdEstadoProceso" IN (30, 32, 35)
+                WHERE {FILTRO_NOMINA_SQL}
             ) datos
             WHERE fecha_base IS NOT NULL
             GROUP BY anio, mes_numero
@@ -435,7 +466,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
             for row in retiros_por_mes_rows
         ]
 
-        query_promedios = text("""
+        query_promedios = text(f"""
             SELECT
                 ROUND(AVG(
                     CASE
@@ -465,8 +496,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
             LEFT JOIN public."PazYSalvoOperaciones" pso
                 ON pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
-            WHERE COALESCE(rl."Activo", true) = true
-              AND rp."IdEstadoProceso" IN (30, 32, 35);
+            WHERE {FILTRO_NOMINA_SQL};
         """)
 
         promedios_row = db.execute(query_promedios).mappings().first()
@@ -489,8 +519,6 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                     "pazYSalvo": promedio_paz_y_salvo,
                     "rrll": promedio_rrll,
                     "nomina": promedio_nomina,
-
-                    # Compatibilidad temporal con el front actual
                     "operaciones": promedio_paz_y_salvo,
                 },
                 "distribucionEstados": [
@@ -507,20 +535,19 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar indicadores de nómina retiros: {str(e)}"
         )
-    
+
+
 @router.get("/reporte-excel")
 def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
     try:
         rows = _consultar_retiros_nomina(db)
 
-        # Orden para que quede claro: abiertos, cerrados y retirados.
         rows = sorted(
             rows,
             key=lambda row: (
-                1 if int(row.get("IdEstadoProceso") or 0) == 30 else
-                2 if int(row.get("IdEstadoProceso") or 0) == 32 else
-                3 if int(row.get("IdEstadoProceso") or 0) == 35 else
-                4,
+                1 if int(row.get("IdEstadoProceso") or 0) == 32 else
+                2 if int(row.get("IdEstadoProceso") or 0) == 35 else
+                3,
                 str(row.get("FechaRetiro") or ""),
                 _nombre_completo(row).upper(),
             )
@@ -554,6 +581,7 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
             detail=f"Error al generar reporte Excel de nómina retiros: {str(e)}"
         )
 
+
 @router.put("/{id_retiro_laboral}/finalizar")
 def finalizar_retiro_nomina(
     id_retiro_laboral: int,
@@ -583,12 +611,12 @@ def finalizar_retiro_nomina(
             SELECT
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
+                rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso"
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
-              AND COALESCE(rl."Activo", true) = true;
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
         retiro = db.execute(
@@ -597,20 +625,16 @@ def finalizar_retiro_nomina(
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(
-                status_code=404,
-                detail="Retiro laboral no encontrado."
-            )
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-        if int(retiro["IdEstadoProceso"]) != 32:
+        estado_caso = str(retiro["EstadoCasoRRLL"] or "").upper()
+
+        if int(retiro["IdEstadoProceso"] or 0) != 32 and estado_caso != "ENVIADO_NOMINA":
             raise HTTPException(
                 status_code=400,
                 detail="Solo se pueden finalizar retiros enviados a nómina."
             )
 
-        # Validación obligatoria documentos de nómina:
-        # 15 = Retiro ARL
-        # 16 = Liquidación de contrato
         query_documentos_obligatorios = text("""
             SELECT
                 tdr."IdTipoDocumentoRetiro",
@@ -656,7 +680,8 @@ def finalizar_retiro_nomina(
             UPDATE public."RetiroLaboral"
             SET
                 "EstadoCasoRRLL" = 'CERRADO',
-                "FechaEnvioNomina" = NOW(),                
+                "Activo" = false,
+                "FechaEnvioNomina" = NOW(),
                 "FechaPagoLiquidacion" = :fecha_pago_liquidacion,
                 "FechaActualizacion" = NOW(),
                 "UsuarioActualizacion" = 'nomina'
@@ -708,6 +733,7 @@ def finalizar_retiro_nomina(
             detail=f"Error al finalizar retiro desde nómina: {str(e)}"
         )
 
+
 @router.put("/{id_retiro_laboral}/devolver")
 def devolver_retiro_rrll(
     id_retiro_laboral: int,
@@ -718,12 +744,12 @@ def devolver_retiro_rrll(
             SELECT
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
+                rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso"
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
-              AND COALESCE(rl."Activo", true) = true;
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
         retiro = db.execute(
@@ -732,12 +758,11 @@ def devolver_retiro_rrll(
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(
-                status_code=404,
-                detail="Retiro laboral no encontrado."
-            )
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-        if int(retiro["IdEstadoProceso"]) != 32:
+        estado_caso = str(retiro["EstadoCasoRRLL"] or "").upper()
+
+        if int(retiro["IdEstadoProceso"] or 0) != 32 and estado_caso != "ENVIADO_NOMINA":
             raise HTTPException(
                 status_code=400,
                 detail="Solo se pueden devolver retiros enviados a nómina."
@@ -747,7 +772,9 @@ def devolver_retiro_rrll(
             UPDATE public."RetiroLaboral"
             SET
                 "EstadoCasoRRLL" = 'ABIERTO',
+                "Activo" = true,
                 "FechaEnvioNomina" = NULL,
+                "FechaCierre" = NULL,
                 "FechaActualizacion" = NOW(),
                 "UsuarioActualizacion" = 'nomina'
             WHERE "IdRetiroLaboral" = :id_retiro_laboral;
@@ -793,7 +820,76 @@ def devolver_retiro_rrll(
             status_code=500,
             detail=f"Error al devolver retiro a RRLL: {str(e)}"
         )
+    
+@router.get("/{id_retiro_laboral}/adjuntos")
+def listar_adjuntos_nomina_retiro(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        query = text("""
+            WITH ultimo_adjunto AS (
+                SELECT DISTINCT ON (rla."IdTipoDocumentoRetiro")
+                    rla."IdRetiroLaboralAdjunto",
+                    rla."IdRetiroLaboral",
+                    rla."IdTipoDocumentoRetiro",
+                    rla."NombreArchivo",
+                    rla."NombreArchivoOriginal",
+                    rla."RutaArchivo",
+                    rla."ExtensionArchivo",
+                    rla."PesoArchivo",
+                    rla."OrigenArchivo",
+                    rla."FechaCreacion",
+                    rla."CreadoPor"
+                FROM public."RetiroLaboralAdjunto" rla
+                WHERE rla."IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE(rla."Activo", true) = true
+                  AND COALESCE(rla."Eliminado", false) = false
+                ORDER BY
+                    rla."IdTipoDocumentoRetiro",
+                    rla."FechaCreacion" DESC,
+                    rla."IdRetiroLaboralAdjunto" DESC
+            )
+            SELECT
+                tdr."IdTipoDocumentoRetiro",
+                tdr."Nombre" AS "NombreDocumento",
+                ua."IdRetiroLaboralAdjunto",
+                ua."IdRetiroLaboral",
+                ua."NombreArchivo",
+                ua."NombreArchivoOriginal",
+                ua."RutaArchivo",
+                ua."ExtensionArchivo",
+                ua."PesoArchivo",
+                ua."OrigenArchivo",
+                ua."FechaCreacion",
+                ua."CreadoPor",
+                CASE
+                    WHEN ua."IdRetiroLaboralAdjunto" IS NOT NULL THEN true
+                    ELSE false
+                END AS "Adjuntado"
+            FROM public."TipoDocumentoRetiro" tdr
+            LEFT JOIN ultimo_adjunto ua
+                ON ua."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
+            WHERE tdr."IdTipoDocumentoRetiro" IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
+            ORDER BY tdr."IdTipoDocumentoRetiro";
+        """)
 
+        rows = db.execute(
+            query,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().all()
+
+        return {
+            "success": True,
+            "message": "Adjuntos del retiro consultados correctamente.",
+            "data": [dict(row) for row in rows],
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error consultando adjuntos del retiro: {str(e)}"
+        )
 
 @router.post("/{id_retiro_laboral}/adjuntos")
 async def subir_adjunto_nomina_retiro(
@@ -818,12 +914,12 @@ async def subir_adjunto_nomina_retiro(
             SELECT
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
+                rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso"
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
-              AND COALESCE(rl."Activo", true) = true;
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
         """)
 
         retiro = db.execute(
@@ -832,12 +928,11 @@ async def subir_adjunto_nomina_retiro(
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(
-                status_code=404,
-                detail="Retiro laboral no encontrado."
-            )
+            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
-        if int(retiro["IdEstadoProceso"]) not in (32, 35):
+        estado_caso = str(retiro["EstadoCasoRRLL"] or "").upper()
+
+        if int(retiro["IdEstadoProceso"] or 0) not in (32, 35) and estado_caso not in ("ENVIADO_NOMINA", "CERRADO"):
             raise HTTPException(
                 status_code=400,
                 detail="Solo se pueden adjuntar documentos de nómina a retiros enviados a nómina o retirados."
@@ -846,10 +941,7 @@ async def subir_adjunto_nomina_retiro(
         contenido = await file.read()
 
         if not contenido:
-            raise HTTPException(
-                status_code=400,
-                detail="El archivo está vacío."
-            )
+            raise HTTPException(status_code=400, detail="El archivo está vacío.")
 
         extension = os.path.splitext(file.filename or "")[1].lower() or ".pdf"
         fecha_nombre = datetime.now().strftime("%Y%m%d_%H%M%S")
