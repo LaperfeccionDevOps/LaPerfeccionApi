@@ -184,7 +184,7 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
                     new_exp = ExperienciaLaboralORM(**{**el_data, "IdRegistroPersonal": id_registro})
                     db.add(new_exp)
 
-        # Actualizar Documentacion SOLO documentos de ingreso (IdCategoria == 6)
+       # Actualizar Documentacion documentos de aspirante/contratación (IdCategoria 6 y 7)
         from domain.models.aspirante import RelacionTipoDocumentacionORM, TipoDocumentacion
         if payload.Documentacion:
             # Buscar relaciones de documentos de ingreso
@@ -198,7 +198,7 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
             )
             relaciones_ingreso = relaciones_ingreso.filter(
                 RelacionTipoDocumentacionORM.IdRegistroPersonal == id_registro,
-                TipoDocumentacion.IdCategoria == 6
+                TipoDocumentacion.IdCategoria.in_([6, 7])
             ).all()
 
             # Eliminar relaciones y documentos de ingreso
@@ -224,7 +224,7 @@ def actualizar_registro(db: Session, id_registro: int, payload: RegistroPersonal
                         TipoDocumentacion.IdTipoDocumentacion == doc_data["IdTipoDocumentacion"]
                     ).first()
 
-                    if tipo_doc and tipo_doc.IdCategoria == 6:
+                    if tipo_doc and tipo_doc.IdCategoria in [6, 7]:
                         base64_str = doc_data["DocumentoCargado"]
                         try:
                             base64_str = limpiar_base64(base64_str)

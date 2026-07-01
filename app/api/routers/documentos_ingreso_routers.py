@@ -152,8 +152,15 @@ def obtener_documento_ingreso(
             JOIN "TipoDocumentacion" T 
                 ON T."IdTipoDocumentacion" = d."IdTipoDocumentacion"
             WHERE r."IdRegistroPersonal" = :id
-              AND T."IdCategoria" = :id_categoria
-            ORDER BY T."IdTipoDocumentacion", d."IdDocumento" DESC
+                AND (
+                    T."IdCategoria" = :id_categoria
+                    OR (
+                    :id_categoria = 6
+                    AND T."IdCategoria" = 7
+                    AND T."IdTipoDocumentacion" IN (32, 76)
+                    )
+                )
+                ORDER BY T."IdTipoDocumentacion", d."IdDocumento" DESC
         """),
         {"id": id_registro_personal, "id_categoria": id_categoria},
     ).fetchall()
@@ -190,4 +197,4 @@ def obtener_documento_ingreso(
     if not documentos:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    return documentos 
+    return
