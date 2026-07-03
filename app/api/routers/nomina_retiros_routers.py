@@ -26,8 +26,8 @@ class FinalizarRetiroNominaRequest(BaseModel):
 
 FILTRO_NOMINA_SQL = """
 (
-    rp."IdEstadoProceso" IN (32, 35)
-    OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) IN ('ENVIADO_NOMINA', 'CERRADO')
+    rp."IdEstadoProceso" IN (30, 32, 35)
+    OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'CERRADO')
 )
 """
 
@@ -101,7 +101,7 @@ def _valor_fecha_excel(fecha):
 def _nombre_completo(row):
     nombres = row.get("Nombres") or ""
     apellidos = row.get("Apellidos") or ""
-    return f"{nombres} {apellidos}".strip()
+    return " ".join(f"{nombres} {apellidos}".split()).upper()
 
 
 def _configurar_hoja_detalle(ws, titulo, registros):
@@ -158,15 +158,20 @@ def _configurar_hoja_detalle(ws, titulo, registros):
         elif estado_caso == "CERRADO":
             estado_excel = "Cerrado"
         else:
-            estado_excel = "Sin definir"
+           estado_excel = "Abierto"
 
         valores = [
             registro.get("NumeroIdentificacion") or "",
             _nombre_completo(registro),
             _valor_fecha_excel(registro.get("FechaRetiro")),
             _valor_fecha_excel(registro.get("FechaPagoLiquidacion")),
-            registro.get("NombreCliente") or "SIN CLIENTE",
-            estado_excel,
+            " ".join(
+                str(registro.get("NombreCliente") or "SIN CLIENTE")
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .split()
+            ).upper(),
+            estado_excel.upper(),
         ]
 
         for col_idx, valor in enumerate(valores, start=1):
@@ -388,18 +393,24 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     try:
         query_totales = text(f"""
             SELECT
-                COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
-                       OR rp."IdEstadoProceso" = 32
-                ) AS cerrados,
-                COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ABIERTO'
-                       AND rp."IdEstadoProceso" = 30
-                ) AS abiertos,
-                COUNT(*) FILTER (
-                    WHERE rp."IdEstadoProceso" = 35
-                ) AS retirados,
-                COUNT(*) AS total
+               COUNT(*) FILTER (
+    WHERE rp."IdEstadoProceso" = 32
+       OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+            ) AS cerrados,
+
+            COUNT(*) FILTER (
+                WHERE rp."IdEstadoProceso" <> 35
+                AND NOT (
+                    rp."IdEstadoProceso" = 32
+                    OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                )
+            ) AS abiertos,
+
+            COUNT(*) FILTER (
+                WHERE rp."IdEstadoProceso" = 35
+            ) AS retirados,
+
+            COUNT(*) AS total
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
@@ -542,14 +553,25 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
     try:
         rows = _consultar_retiros_nomina(db)
 
+        def prioridad_excel(row):
+            estado_caso = str(row.get("EstadoCasoRRLL") or "").upper()
+            id_estado = int(row.get("IdEstadoProceso") or 0)
+
+            if id_estado == 32 or estado_caso == "ENVIADO_NOMINA":
+                return 1  # CERRADO
+
+            if id_estado == 35:
+                return 3  # RETIRADO
+
+            return 2  # ABIERTO
+
+
         rows = sorted(
             rows,
             key=lambda row: (
-                1 if int(row.get("IdEstadoProceso") or 0) == 32 else
-                2 if int(row.get("IdEstadoProceso") or 0) == 35 else
-                3,
+                prioridad_excel(row),
                 str(row.get("FechaRetiro") or ""),
-                _nombre_completo(row).upper(),
+                _nombre_completo(row),
             )
         )
 
@@ -691,7 +713,9 @@ def finalizar_retiro_nomina(
         query_update_registro = text("""
             UPDATE public."RegistroPersonal"
             SET
-                "IdEstadoProceso" = :id_estado_retirado
+                "IdEstadoProceso" = :id_estado_retirado,
+                "FechaActualizacion" = NOW(),
+                "UsuarioActualizacion" = 'nomina_contratacion'
             WHERE "IdRegistroPersonal" = :id_registro_personal;
         """)
 
@@ -703,10 +727,13 @@ def finalizar_retiro_nomina(
             }
         )
 
-        db.execute(query_update_registro, {
-            "id_estado_retirado": id_estado_retirado,
-            "id_registro_personal": retiro["IdRegistroPersonal"],
-        })
+        db.execute(
+            query_update_registro,
+            {
+                "id_estado_retirado": id_estado_retirado,
+                "id_registro_personal": retiro["IdRegistroPersonal"],
+            }
+        )
 
         db.commit()
 
@@ -732,7 +759,6 @@ def finalizar_retiro_nomina(
             status_code=500,
             detail=f"Error al finalizar retiro desde nómina: {str(e)}"
         )
-
 
 @router.put("/{id_retiro_laboral}/devolver")
 def devolver_retiro_rrll(

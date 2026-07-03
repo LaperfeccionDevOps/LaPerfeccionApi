@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 from services.pdfs.certificado_laboral_pdf import generar_certificado_laboral
+from services.pdfs.carta_cesantias_pdf import generar_carta_cesantias
+from services.email_service import enviar_correo_con_adjunto
 
 router = APIRouter(
     prefix="/api/nomina-comunicaciones",
@@ -309,6 +311,102 @@ def descargar_certificado_laboral(
         filename=f"certificado_laboral_{datos['NumeroIdentificacion']}.pdf"
     )
 
+@router.post("/{id_retiro_laboral}/certificado-laboral/enviar-correo")
+def enviar_certificado_laboral_correo(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        datos = obtener_datos_trabajador(db, id_retiro_laboral)
+
+        if not datos.get("Email"):
+            raise HTTPException(
+                status_code=400,
+                detail="El trabajador no tiene correo registrado."
+            )
+
+        ruta_pdf = generar_certificado_laboral(datos)
+
+        enviar_correo_con_adjunto(
+            destinatario=datos["Email"],
+            asunto="Certificación laboral - Aseos La Perfección",
+            cuerpo=(
+                f"Hola {datos.get('Nombres', '')},\n\n"
+                "Adjuntamos tu certificación laboral.\n\n"
+                "Cordialmente,\n"
+                "Aseos La Perfección"
+            ),
+            ruta_adjunto=ruta_pdf,
+        )
+
+        guardar_trazabilidad(db, datos, "CERTIFICADO_LABORAL_CORREO", ruta_pdf)
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Certificación laboral enviada correctamente al correo del trabajador.",
+            "correo": datos["Email"],
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error enviando certificación laboral por correo: {str(e)}"
+        )
+    
+@router.post("/{id_retiro_laboral}/carta-cesantias/enviar-correo")
+def enviar_carta_cesantias_correo(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        datos = obtener_datos_trabajador(db, id_retiro_laboral)
+
+        if not datos.get("Email"):
+            raise HTTPException(
+                status_code=400,
+                detail="El trabajador no tiene correo registrado."
+            )
+
+        ruta_pdf = generar_carta_cesantias(datos)
+
+        enviar_correo_con_adjunto(
+            destinatario=datos["Email"],
+            asunto="Carta de cesantías - Aseos La Perfección",
+            cuerpo=(
+                f"Hola {datos.get('Nombres', '')},\n\n"
+                "Adjuntamos tu carta de cesantías.\n\n"
+                "Cordialmente,\n"
+                "Aseos La Perfección"
+            ),
+            ruta_adjunto=ruta_pdf,
+        )
+
+        guardar_trazabilidad(db, datos, "CARTA_CESANTIAS_CORREO", ruta_pdf)
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Carta de cesantías enviada correctamente al correo del trabajador.",
+            "correo": datos["Email"],
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error enviando carta de cesantías por correo: {str(e)}"
+        )    
+
 
 @router.get("/{id_retiro_laboral}/carta-cesantias/descargar")
 def descargar_carta_cesantias(
@@ -316,7 +414,7 @@ def descargar_carta_cesantias(
     db: Session = Depends(get_db)
 ):
     datos = obtener_datos_trabajador(db, id_retiro_laboral)
-    ruta_pdf = generar_pdf_simple(datos, "CARTA_CESANTIAS")
+    ruta_pdf = generar_carta_cesantias(datos)
     guardar_trazabilidad(db, datos, "CARTA_CESANTIAS", ruta_pdf)
     db.commit()
 
