@@ -33,6 +33,7 @@ ROL_CONTRATACION = 3
 ROL_ASPIRANTE = 4
 ROL_SUPER_ADMIN = 5
 ROL_OPERACIONES = 6
+ROL_HSE = 10
 ROL_BIENESTAR = 18
 ROL_TALENTO_HUMANO = 13
 ROL_DESARROLLADOR = 15
@@ -171,6 +172,7 @@ def listar_aspirantes(
             ROL_TALENTO_HUMANO,
             ROL_CONTRATACION,
             ROL_OPERACIONES,
+            ROL_HSE,
             ROL_BIENESTAR,
         )
     ),
@@ -381,6 +383,7 @@ def obtener_aspirante(
             ROL_TALENTO_HUMANO,
             ROL_CONTRATACION,
             ROL_OPERACIONES,
+            ROL_HSE,
             ROL_BIENESTAR,
         )
     ),
