@@ -1,6 +1,8 @@
 from pathlib import Path
 from datetime import datetime, date
 
+from PIL import Image
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
@@ -20,6 +22,33 @@ FIRMA = ASSETS / "FIRMA_EMPLEADOR.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
 OUTPUT.mkdir(parents=True, exist_ok=True)
+
+ASSETS_LIMPIOS = OUTPUT / "_assets_limpios"
+ASSETS_LIMPIOS.mkdir(parents=True, exist_ok=True)
+
+
+def limpiar_fondo_imagen(ruta_original: Path, tolerancia: int = 45) -> Path:
+    if not ruta_original.exists():
+        return ruta_original
+
+    ruta_limpia = ASSETS_LIMPIOS / f"{ruta_original.stem}_limpio.png"
+
+    imagen = Image.open(ruta_original).convert("RGBA")
+    pixeles = imagen.load()
+    ancho, alto = imagen.size
+
+    fondo = pixeles[0, 0][:3]
+
+    for y in range(alto):
+        for x in range(ancho):
+            r, g, b, a = pixeles[x, y]
+            distancia = abs(r - fondo[0]) + abs(g - fondo[1]) + abs(b - fondo[2])
+
+            if distancia <= tolerancia or (r > 235 and g > 235 and b > 235):
+                pixeles[x, y] = (255, 255, 255, 0)
+
+    imagen.save(ruta_limpia)
+    return ruta_limpia
 
 
 class CertificadoLaboralPDF:
@@ -62,7 +91,16 @@ class CertificadoLaboralPDF:
 
     def encabezado(self):
         if LOGO_EMPRESA.exists():
-            self.pdf.drawImage(ImageReader(str(LOGO_EMPRESA)), 45, self.height - 95, width=160, height=60, preserveAspectRatio=True, mask="auto")
+            logo_empresa_limpio = limpiar_fondo_imagen(LOGO_EMPRESA, tolerancia=55)
+            self.pdf.drawImage(
+                ImageReader(str(logo_empresa_limpio)),
+                45,
+                self.height - 95,
+                width=160,
+                height=60,
+                preserveAspectRatio=True,
+                mask="auto"
+            )
 
         if LOGO_CERTIFICACIONES.exists():
             self.pdf.drawImage(ImageReader(str(LOGO_CERTIFICACIONES)), 215, self.height - 96, width=95, height=55, preserveAspectRatio=True, mask="auto")
@@ -81,8 +119,9 @@ class CertificadoLaboralPDF:
 
     def firma(self):
         if FIRMA.exists():
+            firma_limpia = limpiar_fondo_imagen(FIRMA, tolerancia=70)
             self.pdf.drawImage(
-                ImageReader(str(FIRMA)),
+                ImageReader(str(firma_limpia)),
                 120,
                 178,
                 width=130,
@@ -128,14 +167,7 @@ class CertificadoLaboralPDF:
             f"desde el {fecha_ingreso} hasta el {fecha_retiro}; desempeñando el cargo de {cargo}"
         )
 
-        self.parrafo_justificado(
-            texto_principal,
-            x=x,
-            y=self.height - 285,
-            ancho=ancho,
-            alto=80,
-            size=8.5
-        )
+        self.parrafo_justificado(texto_principal, x=x, y=self.height - 285, ancho=ancho, alto=80, size=8.5)
 
         self.pdf.setFont("Helvetica", 8.5)
         self.pdf.drawString(170, self.height - 325, "Salario Básico mensual")
@@ -149,31 +181,17 @@ class CertificadoLaboralPDF:
             "electronico contratacion@aseoslaperfeccion.com ."
         )
 
-        self.parrafo_justificado(
-            texto_info,
-            x=x,
-            y=self.height - 425,
-            ancho=ancho,
-            alto=70,
-            size=8.5
-        )
+        self.parrafo_justificado(texto_info, x=x, y=self.height - 425, ancho=ancho, alto=70, size=8.5)
 
         texto_fecha = (
             f"La presente certificación se expide a solicitud del interesado, dado el "
             f"{self.fecha_texto()} en la ciudad de BOGOTA"
         )
 
-        self.parrafo_justificado(
-            texto_fecha,
-            x=x,
-            y=self.height - 510,
-            ancho=ancho,
-            alto=45,
-            size=8.5
-        )
+        self.parrafo_justificado(texto_fecha, x=x, y=self.height - 510, ancho=ancho, alto=45, size=8.5)
 
         self.pdf.setFont("Helvetica", 8.5)
-        self.pdf.drawString(120, self.height - 585, "Cordialmente,")
+        self.pdf.drawString(120, self.height - 560, "Cordialmente,")
 
         self.firma()
 
