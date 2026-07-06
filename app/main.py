@@ -133,6 +133,7 @@ app.include_router(nomina_retiros_router)
 app.include_router(nomina_comunicaciones_routers.router)
 
 
+
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
 # ─────────────────────────────────────────────
