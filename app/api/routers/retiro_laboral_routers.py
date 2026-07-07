@@ -16,6 +16,7 @@ from services.rrll_documentos_service import (
 )
 from fastapi.responses import FileResponse
 from pathlib import Path
+from datetime import datetime
 
 from typing import Optional
 from fastapi import Query
@@ -322,16 +323,15 @@ def actualizar_estado_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
-        query_retiro = text("""
-            SELECT
-                "IdRetiroLaboral",
-                "IdRegistroPersonal"
-            FROM public."RetiroLaboral"
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
-        """)
-
         retiro_row = db.execute(
-            query_retiro,
+            text("""
+                SELECT
+                    "IdRetiroLaboral",
+                    "IdRegistroPersonal",
+                    "FechaRetiro"
+                FROM public."RetiroLaboral"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+            """),
             {"id_retiro_laboral": id_retiro_laboral}
         ).mappings().first()
 
@@ -341,43 +341,128 @@ def actualizar_estado_retiro_laboral(
 
         id_registro_personal = retiro_row["IdRegistroPersonal"]
 
-        query_update_retiro = text("""
-            UPDATE public."RetiroLaboral"
-            SET
-                "EstadoCasoRRLL" = :EstadoCasoRRLL,
-                "FechaCierre" = :FechaCierre,
-                "FechaEnvioNomina" = :FechaEnvioNomina,
-                "FechaActualizacion" = CURRENT_TIMESTAMP,
-                "UsuarioActualizacion" = :UsuarioActualizacion
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral
-            RETURNING "IdRetiroLaboral";
-        """)
+        fecha_cierre = payload.FechaCierre
+        fecha_envio_nomina = payload.FechaEnvioNomina
 
-        result_retiro = db.execute(query_update_retiro, {
-            "EstadoCasoRRLL": payload.EstadoCasoRRLL,
-            "FechaCierre": payload.FechaCierre,
-            "FechaEnvioNomina": payload.FechaEnvioNomina,
-            "UsuarioActualizacion": payload.UsuarioActualizacion,
-            "id_retiro_laboral": id_retiro_laboral
-        })
+        if payload.EstadoCasoRRLL == "ENVIADO_NOMINA":
+            fecha_cierre = payload.FechaCierre or datetime.utcnow()
+            fecha_envio_nomina = None
 
-        retiro_actualizado = result_retiro.scalar()
+        result_retiro = db.execute(
+            text("""
+               UPDATE public."RetiroLaboral"
+                    SET
+                        "EstadoCasoRRLL" = :EstadoCasoRRLL,
+                        "FechaCierre" = :FechaCierre,
+                        "FechaEnvioNomina" = :FechaEnvioNomina,
+                        "Activo" = CASE
+                            WHEN :EstadoCasoRRLL = 'ABIERTO' THEN true
+                            WHEN :EstadoCasoRRLL IN ('ENVIADO_NOMINA', 'CERRADO') THEN false
+                            ELSE "Activo"
+                        END,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :UsuarioActualizacion
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                RETURNING
+                    "IdRetiroLaboral",
+                    "IdRegistroPersonal",
+                    "FechaRetiro";
+            """),
+            {
+                "EstadoCasoRRLL": payload.EstadoCasoRRLL,
+                "FechaCierre": fecha_cierre,
+                "FechaEnvioNomina": fecha_envio_nomina,
+                "UsuarioActualizacion": payload.UsuarioActualizacion,
+                "id_retiro_laboral": id_retiro_laboral
+            }
+        )
+
+        retiro_actualizado = result_retiro.mappings().first()
 
         if not retiro_actualizado:
             db.rollback()
             raise HTTPException(status_code=404, detail="No se pudo actualizar el retiro laboral.")
 
-        query_update_registro = text("""
-            UPDATE public."RegistroPersonal"
-            SET
-                "IdEstadoProceso" = :IdEstadoProceso
-            WHERE "IdRegistroPersonal" = :IdRegistroPersonal;
-        """)
+        if retiro_actualizado["FechaRetiro"]:
+            paz_existente = db.execute(
+                text("""
+                    SELECT "IdPazYSalvo"
+                    FROM public."PazYSalvoOperaciones"
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                       OR "IdRegistroPersonal" = :id_registro_personal
+                    ORDER BY "IdPazYSalvo" DESC
+                    LIMIT 1;
+                """),
+                {
+                    "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                    "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                }
+            ).mappings().first()
 
-        db.execute(query_update_registro, {
-            "IdEstadoProceso": payload.IdEstadoProceso,
-            "IdRegistroPersonal": id_registro_personal
-        })
+            if paz_existente:
+                db.execute(
+                    text("""
+                        UPDATE public."PazYSalvoOperaciones"
+                        SET
+                            "IdRegistroPersonal" = :id_registro_personal,
+                            "IdRetiroLaboral" = :id_retiro_laboral,
+                            "FechaUltimoDiaLaborado" = :fecha_retiro,
+                            "FechaCarga" = CURRENT_TIMESTAMP,
+                            "UsuarioCreacion" = :usuario
+                        WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                    """),
+                    {
+                        "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                        "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                        "fecha_retiro": retiro_actualizado["FechaRetiro"],
+                        "usuario": payload.UsuarioActualizacion or "RRLL",
+                        "id_paz_y_salvo": paz_existente["IdPazYSalvo"],
+                    }
+                )
+            else:
+                db.execute(
+                    text("""
+                        INSERT INTO public."PazYSalvoOperaciones"
+                        (
+                            "IdRegistroPersonal",
+                            "FechaUltimoDiaLaborado",
+                            "Observacion",
+                            "UsuarioCreacion",
+                            "FechaCreacion",
+                            "IdRetiroLaboral",
+                            "FechaCarga"
+                        )
+                        VALUES
+                        (
+                            :id_registro_personal,
+                            :fecha_retiro,
+                            :observacion,
+                            :usuario,
+                            CURRENT_TIMESTAMP,
+                            :id_retiro_laboral,
+                            CURRENT_TIMESTAMP
+                        );
+                    """),
+                    {
+                        "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                        "fecha_retiro": retiro_actualizado["FechaRetiro"],
+                        "observacion": "Sincronizado desde cierre RRLL",
+                        "usuario": payload.UsuarioActualizacion or "RRLL",
+                        "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                    }
+                )
+
+        db.execute(
+            text("""
+                UPDATE public."RegistroPersonal"
+                SET "IdEstadoProceso" = :IdEstadoProceso
+                WHERE "IdRegistroPersonal" = :IdRegistroPersonal;
+            """),
+            {
+                "IdEstadoProceso": payload.IdEstadoProceso,
+                "IdRegistroPersonal": id_registro_personal
+            }
+        )
 
         db.commit()
 
@@ -385,22 +470,25 @@ def actualizar_estado_retiro_laboral(
             "success": True,
             "message": "Estado del retiro laboral actualizado correctamente.",
             "data": {
-                "IdRetiroLaboral": retiro_actualizado,
+                "IdRetiroLaboral": retiro_actualizado["IdRetiroLaboral"],
                 "IdRegistroPersonal": id_registro_personal,
                 "EstadoCasoRRLL": payload.EstadoCasoRRLL,
-                "IdEstadoProceso": payload.IdEstadoProceso
+                "IdEstadoProceso": payload.IdEstadoProceso,
+                "FechaCierre": fecha_cierre,
+                "FechaEnvioNomina": fecha_envio_nomina
             }
         }
 
     except HTTPException:
+        db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Error al actualizar estado del retiro laboral: {str(e)}"
         )
-
 
 @router.put("/{id_retiro_laboral}/detalle")
 def actualizar_detalle_retiro_laboral(
@@ -409,6 +497,26 @@ def actualizar_detalle_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
+        query_retiro_actual = text("""
+            SELECT
+                "IdRetiroLaboral",
+                "IdRegistroPersonal",
+                "FechaRetiro"
+            FROM public."RetiroLaboral"
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+        """)
+
+        retiro_actual = db.execute(
+            query_retiro_actual,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro_actual:
+            raise HTTPException(
+                status_code=404,
+                detail="No se encontró el retiro laboral para actualizar."
+            )
+
         query = text("""
             UPDATE public."RetiroLaboral"
             SET
@@ -422,6 +530,7 @@ def actualizar_detalle_retiro_laboral(
             WHERE "IdRetiroLaboral" = :id_retiro_laboral
             RETURNING
                 "IdRetiroLaboral",
+                "IdRegistroPersonal",
                 "FechaRetiro",
                 "IdTipificacionRetiro",
                 "ObservacionRetiro",
@@ -441,8 +550,7 @@ def actualizar_detalle_retiro_laboral(
             "id_retiro_laboral": id_retiro_laboral
         })
 
-        row = result.fetchone()
-        db.commit()
+        row = result.mappings().first()
 
         if not row:
             raise HTTPException(
@@ -450,22 +558,96 @@ def actualizar_detalle_retiro_laboral(
                 detail="No se encontró el retiro laboral para actualizar."
             )
 
+        fecha_ultimo_dia_laborado = row["FechaRetiro"]
+
+        if fecha_ultimo_dia_laborado:
+            query_paz_salvo_existente = text("""
+                SELECT "IdPazYSalvo"
+                FROM public."PazYSalvoOperaciones"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                   OR "IdRegistroPersonal" = :id_registro_personal
+                ORDER BY "IdPazYSalvo" DESC
+                LIMIT 1;
+            """)
+
+            paz_salvo_existente = db.execute(
+                query_paz_salvo_existente,
+                {
+                    "id_retiro_laboral": id_retiro_laboral,
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                }
+            ).mappings().first()
+
+            if paz_salvo_existente:
+                query_update_paz_salvo = text("""
+                    UPDATE public."PazYSalvoOperaciones"
+                    SET
+                        "IdRegistroPersonal" = :id_registro_personal,
+                        "IdRetiroLaboral" = :id_retiro_laboral,
+                        "FechaUltimoDiaLaborado" = :fecha_ultimo_dia_laborado,
+                        "UsuarioCreacion" = :usuario_actualizacion,
+                        "FechaCarga" = CURRENT_TIMESTAMP
+                    WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                """)
+
+                db.execute(query_update_paz_salvo, {
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                    "id_retiro_laboral": id_retiro_laboral,
+                    "fecha_ultimo_dia_laborado": fecha_ultimo_dia_laborado,
+                    "usuario_actualizacion": payload.UsuarioActualizacion or "RRLL",
+                    "id_paz_y_salvo": paz_salvo_existente["IdPazYSalvo"],
+                })
+
+            else:
+                query_insert_paz_salvo = text("""
+                    INSERT INTO public."PazYSalvoOperaciones"
+                    (
+                        "IdRegistroPersonal",
+                        "FechaUltimoDiaLaborado",
+                        "Observacion",
+                        "UsuarioCreacion",
+                        "FechaCreacion",
+                        "IdRetiroLaboral",
+                        "FechaCarga"
+                    )
+                    VALUES
+                    (
+                        :id_registro_personal,
+                        :fecha_ultimo_dia_laborado,
+                        :observacion,
+                        :usuario_creacion,
+                        CURRENT_TIMESTAMP,
+                        :id_retiro_laboral,
+                        CURRENT_TIMESTAMP
+                    );
+                """)
+
+                db.execute(query_insert_paz_salvo, {
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                    "fecha_ultimo_dia_laborado": fecha_ultimo_dia_laborado,
+                    "observacion": payload.ObservacionRetiro,
+                    "usuario_creacion": payload.UsuarioActualizacion or "RRLL",
+                    "id_retiro_laboral": id_retiro_laboral,
+                })
+
+        db.commit()
+
         return {
             "success": True,
             "message": "Detalle del retiro actualizado correctamente.",
-            "data": dict(row._mapping)
+            "data": dict(row)
         }
 
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Error actualizando detalle del retiro: {str(e)}"
-        )
-        
+        )        
 @router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
 def generar_primer_llamado_endpoint(
     id_retiro_laboral: int,
@@ -585,11 +767,10 @@ def obtener_documentos_retiro_carpeta_digital(
     try:
         query_retiro = text("""
             SELECT "IdRetiroLaboral"
-            FROM public."RetiroLaboral"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-              AND COALESCE("Activo", true) = true
-            ORDER BY "IdRetiroLaboral" DESC
-            LIMIT 1;
+FROM public."RetiroLaboral"
+WHERE "IdRegistroPersonal" = :id_registro_personal
+ORDER BY "IdRetiroLaboral" DESC
+LIMIT 1;
         """)
 
         retiro = db.execute(
