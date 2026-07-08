@@ -37,6 +37,7 @@ ROL_HSE = 10
 ROL_BIENESTAR = 16
 ROL_TALENTO_HUMANO = 13
 ROL_DESARROLLADOR = 15
+ROL_NOMINA = 17
 
 
 def _exists_registro_personal(db: Session, id_registro: int) -> bool:
@@ -167,14 +168,15 @@ def listar_aspirantes(
     id_estado: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
     current=Depends(
-        require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-            ROL_HSE,
-            ROL_BIENESTAR,
-        )
+       require_roles_ids(
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_HSE,
+        ROL_BIENESTAR,
+        ROL_NOMINA,
+    )
     ),
 ):
     try:
@@ -333,11 +335,12 @@ def buscar_aspirantes_por_fecha_y_estado(
     db: Session = Depends(get_db),
     current=Depends(
         require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-        )
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_NOMINA,
+    )
     ),
 ):
     try:
@@ -378,14 +381,15 @@ def obtener_aspirante(
     id_registro: int,
     db: Session = Depends(get_db),
     current=Depends(
-        require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-            ROL_HSE,
-            ROL_BIENESTAR,
-        )
+      require_roles_ids(
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_HSE,
+        ROL_BIENESTAR,
+        ROL_NOMINA,
+    )
     ),
 ):
     aspirante = _get_registro_personal_by_id(db, id_registro)
