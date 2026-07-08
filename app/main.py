@@ -45,6 +45,11 @@ from api.routers.retiro_laboral_adjunto_routers import router as retiro_laboral_
 from api.routers.entrevista_retiro_routers import router as entrevista_retiro_router
 from api.routers.rrll_excel_routers import router as rrll_excel_router
 from api.routers import documentos_activos_routers
+from api.routers.proceso_disciplinario_router import router as proceso_disciplinario_router
+from api.routers.citacion_proceso_disciplinario_router import router as citacion_proceso_disciplinario_router
+from api.routers.descargo_proceso_disciplinario_router import router as descargo_proceso_disciplinario_router
+from api.routers.documento_proceso_disciplinario_router import router as documento_proceso_disciplinario_router
+from api.routers.cierre_proceso_disciplinario_router import router as cierre_proceso_disciplinario_router
 
 
 app = FastAPI(
@@ -127,6 +132,11 @@ app.include_router(retiro_laboral_adjunto_router)
 app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
 app.include_router(documentos_activos_routers.router)
+app.include_router(proceso_disciplinario_router)
+app.include_router(citacion_proceso_disciplinario_router)
+app.include_router(descargo_proceso_disciplinario_router)
+app.include_router(documento_proceso_disciplinario_router)
+app.include_router(cierre_proceso_disciplinario_router)
 
 
 # ─────────────────────────────────────────────
