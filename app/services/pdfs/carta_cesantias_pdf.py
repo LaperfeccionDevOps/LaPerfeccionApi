@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime, date
 
+from PIL import Image
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
@@ -20,6 +21,42 @@ FIRMA = ASSETS / "FIRMA_EMPLEADOR.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
 OUTPUT.mkdir(parents=True, exist_ok=True)
+
+ASSETS_LIMPIOS = OUTPUT / "_assets_limpios"
+ASSETS_LIMPIOS.mkdir(parents=True, exist_ok=True)
+
+
+def limpiar_fondo_imagen(ruta_original: Path, nombre_salida: str) -> Path:
+    ruta_salida = ASSETS_LIMPIOS / nombre_salida
+
+    if not ruta_original.exists():
+        return ruta_original
+
+    img = Image.open(ruta_original).convert("RGBA")
+    pixeles = img.getdata()
+    nuevos_pixeles = []
+
+    for r, g, b, a in pixeles:
+        promedio = (r + g + b) / 3
+        diferencia = max(r, g, b) - min(r, g, b)
+
+        es_blanco = r > 235 and g > 235 and b > 235
+        es_gris_claro = promedio > 205 and diferencia < 28
+        es_azul_claro = r > 175 and g > 215 and b > 220
+        es_fondo_suave = promedio > 220
+
+        if es_blanco or es_gris_claro or es_azul_claro or es_fondo_suave:
+            nuevos_pixeles.append((255, 255, 255, 0))
+        else:
+            nuevos_pixeles.append((r, g, b, a))
+
+    img.putdata(nuevos_pixeles)
+    img.save(ruta_salida, "PNG")
+    return ruta_salida
+
+
+LOGO_EMPRESA_LIMPIO = limpiar_fondo_imagen(LOGO_EMPRESA, "LOGO_EMPRESA_limpio.png")
+FIRMA_LIMPIA = limpiar_fondo_imagen(FIRMA, "FIRMA_EMPLEADOR_limpia.png")
 
 
 class CartaCesantiasPDF:
@@ -61,8 +98,8 @@ class CartaCesantiasPDF:
         return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
 
     def encabezado(self):
-        if LOGO_EMPRESA.exists():
-            self.pdf.drawImage(ImageReader(str(LOGO_EMPRESA)), 35, self.height - 75, width=155, height=55, preserveAspectRatio=True, mask="auto")
+        if LOGO_EMPRESA_LIMPIO.exists():
+            self.pdf.drawImage(ImageReader(str(LOGO_EMPRESA_LIMPIO)), 35, self.height - 75, width=155, height=55, preserveAspectRatio=True, mask="auto")
 
         if LOGO_CERTIFICACIONES.exists():
             self.pdf.drawImage(ImageReader(str(LOGO_CERTIFICACIONES)), 190, self.height - 73, width=85, height=45, preserveAspectRatio=True, mask="auto")
@@ -89,9 +126,9 @@ class CartaCesantiasPDF:
         p.drawOn(self.pdf, x, y)
 
     def firma(self):
-        if FIRMA.exists():
+        if FIRMA_LIMPIA.exists():
             self.pdf.drawImage(
-                ImageReader(str(FIRMA)),
+                ImageReader(str(FIRMA_LIMPIA)),
                 65,
                 175,
                 width=130,
@@ -149,7 +186,7 @@ class CartaCesantiasPDF:
         )
 
         self.pdf.setFont("Helvetica", 9)
-        self.pdf.drawString(x, self.height - 430, "Atentamente,")
+        self.pdf.drawString(x, self.height - 420, "Atentamente,")
 
         self.firma()
 
