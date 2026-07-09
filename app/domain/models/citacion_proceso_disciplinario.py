@@ -27,16 +27,6 @@ class CitacionProcesoDisciplinario(Base):
 
     MotivoCitacion = Column(Text, nullable=False)
 
-    FechaActualizacion = Column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
-    UsuarioActualizacion = Column(
-        String(100),
-        nullable=True
-    )
-
     FechaCreacion = Column(
         DateTime(timezone=True),
         server_default=func.now()

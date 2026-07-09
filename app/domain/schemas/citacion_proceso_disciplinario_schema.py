@@ -10,7 +10,6 @@ class CitacionProcesoDisciplinarioBase(BaseModel):
     HoraCitacion: time
     LugarCitacion: str
     MotivoCitacion: str
-    UsuarioActualizacion: Optional[str] = None
 
 
 class CitacionProcesoDisciplinarioCreate(CitacionProcesoDisciplinarioBase):
@@ -22,13 +21,11 @@ class CitacionProcesoDisciplinarioUpdate(BaseModel):
     HoraCitacion: Optional[time] = None
     LugarCitacion: Optional[str] = None
     MotivoCitacion: Optional[str] = None
-    UsuarioActualizacion: Optional[str] = None
 
 
 class CitacionProcesoDisciplinarioResponse(CitacionProcesoDisciplinarioBase):
     IdCitacionProcesoDisciplinario: int
     FechaCreacion: Optional[datetime] = None
-    FechaActualizacion: Optional[datetime] = None
 
     class Config:
         from_attributes = True
