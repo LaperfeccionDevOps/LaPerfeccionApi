@@ -41,26 +41,45 @@ def subir_documento_proceso_disciplinario(
     archivo: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    carpeta_destino = os.path.join(
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+    carpeta_destino_absoluta = os.path.join(
+        base_dir,
         "storage",
         "rrll",
         "procesos_disciplinarios",
         str(IdProcesoDisciplinario),
     )
 
-    os.makedirs(carpeta_destino, exist_ok=True)
+    carpeta_destino_relativa = os.path.join(
+        "storage",
+        "rrll",
+        "procesos_disciplinarios",
+        str(IdProcesoDisciplinario),
+    )
+
+    os.makedirs(carpeta_destino_absoluta, exist_ok=True)
 
     nombre_archivo = archivo.filename
-    ruta_archivo = os.path.join(carpeta_destino, nombre_archivo)
 
-    with open(ruta_archivo, "wb") as buffer:
+    ruta_archivo_absoluta = os.path.join(
+        carpeta_destino_absoluta,
+        nombre_archivo,
+    )
+
+    ruta_archivo_relativa = os.path.join(
+        carpeta_destino_relativa,
+        nombre_archivo,
+    )
+
+    with open(ruta_archivo_absoluta, "wb") as buffer:
         shutil.copyfileobj(archivo.file, buffer)
 
     nuevo = DocumentoProcesoDisciplinario(
         IdProcesoDisciplinario=IdProcesoDisciplinario,
         TipoDocumento=TipoDocumento,
         NombreArchivo=nombre_archivo,
-        RutaArchivo=ruta_archivo,
+        RutaArchivo=ruta_archivo_relativa,
         Observacion=Observacion,
     )
 

@@ -60,7 +60,10 @@ app = FastAPI(
     debug=True,
 )
 
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
+BASE_DIR = os.path.dirname(__file__)
+STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+
+app.mount("/storage", StaticFiles(directory=STORAGE_DIR), name="storage")
 
 origins = [
     "http://127.0.0.1:5500",
