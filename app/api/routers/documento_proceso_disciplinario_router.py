@@ -1,6 +1,8 @@
+import os
+import shutil
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
@@ -31,6 +33,59 @@ def crear_documento(
     return nuevo
 
 
+@router.post("/upload", response_model=DocumentoProcesoDisciplinarioResponse)
+def subir_documento_proceso_disciplinario(
+    IdProcesoDisciplinario: int = Form(...),
+    TipoDocumento: str = Form(...),
+    Observacion: str = Form(None),
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    carpeta_destino = os.path.join(
+        "storage",
+        "rrll",
+        "procesos_disciplinarios",
+        str(IdProcesoDisciplinario),
+    )
+
+    os.makedirs(carpeta_destino, exist_ok=True)
+
+    nombre_archivo = archivo.filename
+    ruta_archivo = os.path.join(carpeta_destino, nombre_archivo)
+
+    with open(ruta_archivo, "wb") as buffer:
+        shutil.copyfileobj(archivo.file, buffer)
+
+    nuevo = DocumentoProcesoDisciplinario(
+        IdProcesoDisciplinario=IdProcesoDisciplinario,
+        TipoDocumento=TipoDocumento,
+        NombreArchivo=nombre_archivo,
+        RutaArchivo=ruta_archivo,
+        Observacion=Observacion,
+    )
+
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+
+    return nuevo
+
+
+@router.get("/proceso/{id_proceso}")
+def obtener_documentos_por_proceso(
+    id_proceso: int,
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(DocumentoProcesoDisciplinario)
+        .filter(
+            DocumentoProcesoDisciplinario.IdProcesoDisciplinario == id_proceso
+        )
+        .order_by(DocumentoProcesoDisciplinario.FechaCreacion.desc())
+        .all()
+    )
+
+
 @router.get("/{id_documento}", response_model=DocumentoProcesoDisciplinarioResponse)
 def obtener_documento(
     id_documento: int,
@@ -49,20 +104,6 @@ def obtener_documento(
         raise HTTPException(status_code=404, detail="Documento no encontrado")
 
     return documento
-
-
-@router.get("/proceso/{id_proceso}")
-def obtener_documentos_por_proceso(
-    id_proceso: int,
-    db: Session = Depends(get_db),
-):
-    return (
-        db.query(DocumentoProcesoDisciplinario)
-        .filter(
-            DocumentoProcesoDisciplinario.IdProcesoDisciplinario == id_proceso
-        )
-        .all()
-    )
 
 
 @router.put("/{id_documento}", response_model=DocumentoProcesoDisciplinarioResponse)

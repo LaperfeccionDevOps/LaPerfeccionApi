@@ -6,6 +6,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers.auth import router as auth_router
@@ -58,6 +59,8 @@ app = FastAPI(
     description="API para gestión de colaboradores, procesos de selección y portal interno.",
     debug=True,
 )
+
+app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
 origins = [
     "http://127.0.0.1:5500",
