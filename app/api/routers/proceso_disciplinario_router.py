@@ -3,6 +3,7 @@ from io import BytesIO
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from reportlab.lib import colors
@@ -33,6 +34,54 @@ router = APIRouter(
     prefix="/api/procesos-disciplinarios",
     tags=["Procesos Disciplinarios"],
 )
+
+
+def obtener_proceso_o_error(
+    db: Session,
+    id_proceso: int,
+) -> ProcesoDisciplinario:
+    proceso = (
+        db.query(ProcesoDisciplinario)
+        .filter(
+            ProcesoDisciplinario.IdProcesoDisciplinario
+            == id_proceso
+        )
+        .first()
+    )
+
+    if not proceso:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": "Proceso disciplinario no encontrado.",
+                "IdProcesoDisciplinario": id_proceso,
+            },
+        )
+
+    return proceso
+
+
+def validar_proceso_modificable(
+    proceso: ProcesoDisciplinario,
+) -> None:
+    estado_actual = str(
+        proceso.EstadoProceso or ""
+    ).strip().upper()
+
+    if estado_actual == "CERRADO":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso disciplinario ya fue cerrado "
+                    "y no admite modificaciones."
+                ),
+                "IdProcesoDisciplinario": (
+                    proceso.IdProcesoDisciplinario
+                ),
+                "EstadoProceso": proceso.EstadoProceso,
+            },
+        )
 
 
 def _texto(valor):
@@ -449,33 +498,86 @@ def obtener_proceso_disciplinario(
     return proceso
 
 
-@router.put("/{id_proceso}", response_model=ProcesoDisciplinarioResponse)
+@router.put(
+    "/{id_proceso}",
+    response_model=ProcesoDisciplinarioResponse,
+)
 def actualizar_proceso_disciplinario(
     id_proceso: int,
     data: ProcesoDisciplinarioUpdate,
     db: Session = Depends(get_db),
 ):
-    proceso = (
-        db.query(ProcesoDisciplinario)
-        .filter(ProcesoDisciplinario.IdProcesoDisciplinario == id_proceso)
-        .first()
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=id_proceso,
     )
 
-    if not proceso:
-        raise HTTPException(status_code=404, detail="Proceso disciplinario no encontrado")
+    # Si ya estaba cerrado antes de esta petición,
+    # no se permite modificar ni reabrir el expediente.
+    validar_proceso_modificable(proceso)
 
-    if data.EstadoProceso is not None:
-        proceso.EstadoProceso = data.EstadoProceso
+    datos_actualizados = data.model_dump(
+        exclude_unset=True
+    )
 
-    if data.OrigenProceso is not None:
-        proceso.OrigenProceso = data.OrigenProceso
+    if "EstadoProceso" in datos_actualizados:
+        estado_nuevo = datos_actualizados.get(
+            "EstadoProceso"
+        )
 
-    if data.UsuarioActualizacion is not None:
-        proceso.UsuarioActualizacion = data.UsuarioActualizacion
+        if estado_nuevo is not None:
+            estado_nuevo = str(
+                estado_nuevo
+            ).strip().upper()
+
+            if not estado_nuevo:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "El estado del proceso "
+                        "no puede quedar vacío."
+                    ),
+                )
+
+            proceso.EstadoProceso = estado_nuevo
+
+    if "OrigenProceso" in datos_actualizados:
+        origen_nuevo = datos_actualizados.get(
+            "OrigenProceso"
+        )
+
+        proceso.OrigenProceso = (
+            str(origen_nuevo).strip()
+            if origen_nuevo is not None
+            else None
+        )
+
+    if "UsuarioActualizacion" in datos_actualizados:
+        usuario_actualizacion = datos_actualizados.get(
+            "UsuarioActualizacion"
+        )
+
+        proceso.UsuarioActualizacion = (
+            str(usuario_actualizacion).strip()
+            if usuario_actualizacion is not None
+            else None
+        )
 
     proceso.FechaActualizacion = datetime.now()
 
-    db.commit()
-    db.refresh(proceso)
+    try:
+        db.commit()
+        db.refresh(proceso)
 
-    return proceso
+        return proceso
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo actualizar "
+                "el proceso disciplinario."
+            ),
+        ) from error

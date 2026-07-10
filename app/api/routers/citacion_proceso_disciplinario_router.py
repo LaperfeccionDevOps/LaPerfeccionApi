@@ -1,8 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 
+from domain.models.proceso_disciplinario import (
+    ProcesoDisciplinario,
+)
 from domain.models.citacion_proceso_disciplinario import (
     CitacionProcesoDisciplinario,
 )
@@ -20,6 +24,62 @@ router = APIRouter(
 )
 
 
+def obtener_proceso_o_error(
+    db: Session,
+    id_proceso: int,
+) -> ProcesoDisciplinario:
+    proceso = (
+        db.query(ProcesoDisciplinario)
+        .filter(
+            ProcesoDisciplinario.IdProcesoDisciplinario
+            == id_proceso
+        )
+        .first()
+    )
+
+    if not proceso:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "Proceso disciplinario no encontrado."
+                ),
+                "IdProcesoDisciplinario": id_proceso,
+            },
+        )
+
+    return proceso
+
+
+def validar_proceso_abierto(
+    db: Session,
+    id_proceso: int,
+) -> ProcesoDisciplinario:
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=id_proceso,
+    )
+
+    estado_proceso = str(
+        proceso.EstadoProceso or ""
+    ).strip().upper()
+
+    if estado_proceso == "CERRADO":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso disciplinario ya fue cerrado "
+                    "y no admite modificaciones."
+                ),
+                "IdProcesoDisciplinario": id_proceso,
+                "EstadoProceso": proceso.EstadoProceso,
+            },
+        )
+
+    return proceso
+
+
 @router.post(
     "/",
     response_model=CitacionProcesoDisciplinarioResponse,
@@ -28,6 +88,11 @@ def crear_citacion(
     data: CitacionProcesoDisciplinarioCreate,
     db: Session = Depends(get_db),
 ):
+    validar_proceso_abierto(
+        db=db,
+        id_proceso=data.IdProcesoDisciplinario,
+    )
+
     nueva = CitacionProcesoDisciplinario(
         **data.model_dump()
     )
@@ -39,9 +104,16 @@ def crear_citacion(
 
         return nueva
 
-    except Exception:
+    except SQLAlchemyError as error:
         db.rollback()
-        raise
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo crear la citación "
+                "del proceso disciplinario."
+            ),
+        ) from error
 
 
 @router.get(
@@ -51,14 +123,21 @@ def obtener_citacion_por_proceso(
     id_proceso: int,
     db: Session = Depends(get_db),
 ):
-    return (
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=id_proceso,
+    )
+
+    citacion = (
         db.query(CitacionProcesoDisciplinario)
         .filter(
             CitacionProcesoDisciplinario.IdProcesoDisciplinario
-            == id_proceso
+            == proceso.IdProcesoDisciplinario
         )
         .first()
     )
+
+    return citacion
 
 
 @router.get(
@@ -72,7 +151,8 @@ def obtener_citacion(
     citacion = (
         db.query(CitacionProcesoDisciplinario)
         .filter(
-            CitacionProcesoDisciplinario.IdCitacionProcesoDisciplinario
+            CitacionProcesoDisciplinario
+            .IdCitacionProcesoDisciplinario
             == id_citacion
         )
         .first()
@@ -99,7 +179,8 @@ def actualizar_citacion(
     citacion = (
         db.query(CitacionProcesoDisciplinario)
         .filter(
-            CitacionProcesoDisciplinario.IdCitacionProcesoDisciplinario
+            CitacionProcesoDisciplinario
+            .IdCitacionProcesoDisciplinario
             == id_citacion
         )
         .first()
@@ -110,6 +191,11 @@ def actualizar_citacion(
             status_code=404,
             detail="Citación no encontrada",
         )
+
+    validar_proceso_abierto(
+        db=db,
+        id_proceso=citacion.IdProcesoDisciplinario,
+    )
 
     datos_actualizados = data.model_dump(
         exclude_unset=True
@@ -128,6 +214,13 @@ def actualizar_citacion(
 
         return citacion
 
-    except Exception:
+    except SQLAlchemyError as error:
         db.rollback()
-        raise
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo actualizar la citación "
+                "del proceso disciplinario."
+            ),
+        ) from error
