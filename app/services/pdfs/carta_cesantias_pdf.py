@@ -194,7 +194,7 @@ class CartaCesantiasPDF:
 
         self.pdf.setFont("Helvetica-Bold", 9)
         self.pdf.drawString(65, 148, "YINA CUMBE BUESAQUILLO")
-        self.pdf.drawString(65, 135, "Coordinadora de Compensación y Beneficios")
+        self.pdf.drawString(65, 135, "Coordinadora de Nómina y Contratación")
 
         self.pdf.setFont("Helvetica", 8)
         self.pdf.drawString(65, 105, "Copia: Hoja de vida")
