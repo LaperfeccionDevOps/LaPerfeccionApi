@@ -39,15 +39,19 @@ class ContratacionBasicaService:
             num_cuenta = str(num_cuenta).strip()
             data["NumeroCuenta"] = num_cuenta if num_cuenta != "" else None
 
-        # Escalafon: solo 200 o 220 (si viene)
+        # Escalafon: permite 200, 210 y 220
         esc = data.get("Escalafon")
         if esc is not None:
             esc = str(esc).strip()
+
             if esc == "":
                 data["Escalafon"] = None
             else:
-                if esc not in ("200", "220"):
-                    raise ValueError("Escalafon inválido. Valores permitidos: 200 o 220.")
+                if esc not in ("200", "210", "220"):
+                    raise ValueError(
+                        "Escalafon inválido. Valores permitidos: 200, 210 o 220."
+                    )
+
                 data["Escalafon"] = esc
 
         # TetanosDosis: de 1 a 5
