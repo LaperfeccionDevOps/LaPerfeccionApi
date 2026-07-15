@@ -1,6 +1,10 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -12,11 +16,10 @@ from domain.models.proceso_disciplinario import (
 from domain.models.descargo_proceso_disciplinario import (
     DescargoProcesoDisciplinario,
 )
-
 from domain.schemas.descargo_proceso_disciplinario_schema import (
     DescargoProcesoDisciplinarioCreate,
-    DescargoProcesoDisciplinarioUpdate,
     DescargoProcesoDisciplinarioResponse,
+    DescargoProcesoDisciplinarioUpdate,
 )
 
 
@@ -43,7 +46,9 @@ def obtener_proceso_o_error(
         raise HTTPException(
             status_code=404,
             detail={
-                "mensaje": "Proceso disciplinario no encontrado.",
+                "mensaje": (
+                    "Proceso disciplinario no encontrado."
+                ),
                 "IdProcesoDisciplinario": id_proceso,
             },
         )
@@ -80,6 +85,54 @@ def validar_proceso_abierto(
     return proceso
 
 
+def obtener_descargo_por_id_o_error(
+    db: Session,
+    id_descargo: int,
+) -> DescargoProcesoDisciplinario:
+    descargo = (
+        db.query(DescargoProcesoDisciplinario)
+        .filter(
+            DescargoProcesoDisciplinario
+            .IdDescargoProcesoDisciplinario
+            == id_descargo
+        )
+        .first()
+    )
+
+    if not descargo:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": "Descargo no encontrado.",
+                "IdDescargoProcesoDisciplinario": (
+                    id_descargo
+                ),
+            },
+        )
+
+    return descargo
+
+
+def obtener_descargo_por_proceso_interno(
+    db: Session,
+    id_proceso: int,
+) -> DescargoProcesoDisciplinario | None:
+    return (
+        db.query(DescargoProcesoDisciplinario)
+        .filter(
+            DescargoProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso
+        )
+        .order_by(
+            DescargoProcesoDisciplinario
+            .IdDescargoProcesoDisciplinario
+            .desc()
+        )
+        .first()
+    )
+
+
 @router.post(
     "/",
     response_model=DescargoProcesoDisciplinarioResponse,
@@ -92,6 +145,32 @@ def crear_descargo(
         db=db,
         id_proceso=data.IdProcesoDisciplinario,
     )
+
+    descargo_existente = (
+        obtener_descargo_por_proceso_interno(
+            db=db,
+            id_proceso=data.IdProcesoDisciplinario,
+        )
+    )
+
+    if descargo_existente:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso ya tiene un descargo "
+                    "registrado. Debe actualizar el registro "
+                    "existente o usar guardar-borrador."
+                ),
+                "IdProcesoDisciplinario": (
+                    data.IdProcesoDisciplinario
+                ),
+                "IdDescargoProcesoDisciplinario": (
+                    descargo_existente
+                    .IdDescargoProcesoDisciplinario
+                ),
+            },
+        )
 
     nuevo = DescargoProcesoDisciplinario(
         **data.model_dump()
@@ -116,25 +195,93 @@ def crear_descargo(
         ) from error
 
 
+@router.post(
+    "/guardar-borrador",
+    response_model=DescargoProcesoDisciplinarioResponse,
+)
+def guardar_borrador_descargo(
+    data: DescargoProcesoDisciplinarioCreate,
+    db: Session = Depends(get_db),
+):
+    validar_proceso_abierto(
+        db=db,
+        id_proceso=data.IdProcesoDisciplinario,
+    )
+
+    descargo = obtener_descargo_por_proceso_interno(
+        db=db,
+        id_proceso=data.IdProcesoDisciplinario,
+    )
+
+    datos = data.model_dump()
+
+    # Este endpoint siempre guarda el registro como borrador.
+    datos["EstadoBorrador"] = True
+
+    try:
+        if descargo:
+            for campo, valor in datos.items():
+                if campo == "IdProcesoDisciplinario":
+                    continue
+
+                setattr(
+                    descargo,
+                    campo,
+                    valor,
+                )
+
+            descargo.FechaActualizacion = datetime.now()
+
+            if (
+                datos.get("UsuarioActualizacion")
+                is not None
+            ):
+                descargo.UsuarioActualizacion = (
+                    datos["UsuarioActualizacion"]
+                )
+
+        else:
+            descargo = DescargoProcesoDisciplinario(
+                **datos
+            )
+
+            db.add(descargo)
+
+        db.commit()
+        db.refresh(descargo)
+
+        return descargo
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo guardar el borrador "
+                "del descargo disciplinario."
+            ),
+        ) from error
+
+
 @router.get(
     "/proceso/{id_proceso}",
+    response_model=(
+        DescargoProcesoDisciplinarioResponse | None
+    ),
 )
 def obtener_descargo_por_proceso(
     id_proceso: int,
     db: Session = Depends(get_db),
 ):
-    proceso = obtener_proceso_o_error(
+    obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
     )
 
-    return (
-        db.query(DescargoProcesoDisciplinario)
-        .filter(
-            DescargoProcesoDisciplinario.IdProcesoDisciplinario
-            == proceso.IdProcesoDisciplinario
-        )
-        .first()
+    return obtener_descargo_por_proceso_interno(
+        db=db,
+        id_proceso=id_proceso,
     )
 
 
@@ -146,23 +293,10 @@ def obtener_descargo(
     id_descargo: int,
     db: Session = Depends(get_db),
 ):
-    descargo = (
-        db.query(DescargoProcesoDisciplinario)
-        .filter(
-            DescargoProcesoDisciplinario
-            .IdDescargoProcesoDisciplinario
-            == id_descargo
-        )
-        .first()
+    return obtener_descargo_por_id_o_error(
+        db=db,
+        id_descargo=id_descargo,
     )
-
-    if not descargo:
-        raise HTTPException(
-            status_code=404,
-            detail="Descargo no encontrado",
-        )
-
-    return descargo
 
 
 @router.put(
@@ -174,21 +308,10 @@ def actualizar_descargo(
     data: DescargoProcesoDisciplinarioUpdate,
     db: Session = Depends(get_db),
 ):
-    descargo = (
-        db.query(DescargoProcesoDisciplinario)
-        .filter(
-            DescargoProcesoDisciplinario
-            .IdDescargoProcesoDisciplinario
-            == id_descargo
-        )
-        .first()
+    descargo = obtener_descargo_por_id_o_error(
+        db=db,
+        id_descargo=id_descargo,
     )
-
-    if not descargo:
-        raise HTTPException(
-            status_code=404,
-            detail="Descargo no encontrado",
-        )
 
     validar_proceso_abierto(
         db=db,

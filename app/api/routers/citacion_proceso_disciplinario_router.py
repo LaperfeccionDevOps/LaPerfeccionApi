@@ -1,4 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -10,11 +16,10 @@ from domain.models.proceso_disciplinario import (
 from domain.models.citacion_proceso_disciplinario import (
     CitacionProcesoDisciplinario,
 )
-
 from domain.schemas.citacion_proceso_disciplinario_schema import (
     CitacionProcesoDisciplinarioCreate,
-    CitacionProcesoDisciplinarioUpdate,
     CitacionProcesoDisciplinarioResponse,
+    CitacionProcesoDisciplinarioUpdate,
 )
 
 
@@ -80,6 +85,54 @@ def validar_proceso_abierto(
     return proceso
 
 
+def obtener_citacion_o_error(
+    db: Session,
+    id_citacion: int,
+) -> CitacionProcesoDisciplinario:
+    citacion = (
+        db.query(CitacionProcesoDisciplinario)
+        .filter(
+            CitacionProcesoDisciplinario
+            .IdCitacionProcesoDisciplinario
+            == id_citacion
+        )
+        .first()
+    )
+
+    if not citacion:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": "Citación no encontrada.",
+                "IdCitacionProcesoDisciplinario": (
+                    id_citacion
+                ),
+            },
+        )
+
+    return citacion
+
+
+def obtener_ultima_citacion_por_proceso(
+    db: Session,
+    id_proceso: int,
+) -> CitacionProcesoDisciplinario | None:
+    return (
+        db.query(CitacionProcesoDisciplinario)
+        .filter(
+            CitacionProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso
+        )
+        .order_by(
+            CitacionProcesoDisciplinario
+            .IdCitacionProcesoDisciplinario
+            .desc()
+        )
+        .first()
+    )
+
+
 @router.post(
     "/",
     response_model=CitacionProcesoDisciplinarioResponse,
@@ -92,6 +145,31 @@ def crear_citacion(
         db=db,
         id_proceso=data.IdProcesoDisciplinario,
     )
+
+    citacion_existente = (
+        obtener_ultima_citacion_por_proceso(
+            db=db,
+            id_proceso=data.IdProcesoDisciplinario,
+        )
+    )
+
+    if citacion_existente:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso ya tiene una citación "
+                    "registrada. Debe actualizarla."
+                ),
+                "IdProcesoDisciplinario": (
+                    data.IdProcesoDisciplinario
+                ),
+                "IdCitacionProcesoDisciplinario": (
+                    citacion_existente
+                    .IdCitacionProcesoDisciplinario
+                ),
+            },
+        )
 
     nueva = CitacionProcesoDisciplinario(
         **data.model_dump()
@@ -118,26 +196,23 @@ def crear_citacion(
 
 @router.get(
     "/proceso/{id_proceso}",
+    response_model=(
+        CitacionProcesoDisciplinarioResponse | None
+    ),
 )
 def obtener_citacion_por_proceso(
     id_proceso: int,
     db: Session = Depends(get_db),
 ):
-    proceso = obtener_proceso_o_error(
+    obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
     )
 
-    citacion = (
-        db.query(CitacionProcesoDisciplinario)
-        .filter(
-            CitacionProcesoDisciplinario.IdProcesoDisciplinario
-            == proceso.IdProcesoDisciplinario
-        )
-        .first()
+    return obtener_ultima_citacion_por_proceso(
+        db=db,
+        id_proceso=id_proceso,
     )
-
-    return citacion
 
 
 @router.get(
@@ -148,23 +223,10 @@ def obtener_citacion(
     id_citacion: int,
     db: Session = Depends(get_db),
 ):
-    citacion = (
-        db.query(CitacionProcesoDisciplinario)
-        .filter(
-            CitacionProcesoDisciplinario
-            .IdCitacionProcesoDisciplinario
-            == id_citacion
-        )
-        .first()
+    return obtener_citacion_o_error(
+        db=db,
+        id_citacion=id_citacion,
     )
-
-    if not citacion:
-        raise HTTPException(
-            status_code=404,
-            detail="Citación no encontrada",
-        )
-
-    return citacion
 
 
 @router.put(
@@ -176,21 +238,10 @@ def actualizar_citacion(
     data: CitacionProcesoDisciplinarioUpdate,
     db: Session = Depends(get_db),
 ):
-    citacion = (
-        db.query(CitacionProcesoDisciplinario)
-        .filter(
-            CitacionProcesoDisciplinario
-            .IdCitacionProcesoDisciplinario
-            == id_citacion
-        )
-        .first()
+    citacion = obtener_citacion_o_error(
+        db=db,
+        id_citacion=id_citacion,
     )
-
-    if not citacion:
-        raise HTTPException(
-            status_code=404,
-            detail="Citación no encontrada",
-        )
 
     validar_proceso_abierto(
         db=db,
@@ -207,6 +258,8 @@ def actualizar_citacion(
             campo,
             valor,
         )
+
+    citacion.FechaActualizacion = datetime.now()
 
     try:
         db.commit()

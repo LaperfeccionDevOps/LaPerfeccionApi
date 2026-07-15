@@ -52,6 +52,9 @@ from api.routers.descargo_proceso_disciplinario_router import router as descargo
 from api.routers.documento_proceso_disciplinario_router import router as documento_proceso_disciplinario_router
 from api.routers.cierre_proceso_disciplinario_router import router as cierre_proceso_disciplinario_router
 from api.routers.agenda_proceso_disciplinario_router import router as agenda_proceso_disciplinario_router
+from api.routers.asistente_descargo_proceso_disciplinario_router import (
+    router as asistente_descargo_proceso_disciplinario_router,
+)
 
 
 app = FastAPI(
@@ -145,6 +148,9 @@ app.include_router(descargo_proceso_disciplinario_router)
 app.include_router(documento_proceso_disciplinario_router)
 app.include_router(cierre_proceso_disciplinario_router)
 app.include_router(agenda_proceso_disciplinario_router)
+app.include_router(
+    asistente_descargo_proceso_disciplinario_router
+)
 
 
 # ─────────────────────────────────────────────
