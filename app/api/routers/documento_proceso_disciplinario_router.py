@@ -21,6 +21,9 @@ from infrastructure.db.deps import get_db
 from domain.models.documento_proceso_disciplinario import (
     DocumentoProcesoDisciplinario,
 )
+from domain.models.proceso_disciplinario import (
+    ProcesoDisciplinario,
+)
 from domain.schemas.documento_proceso_disciplinario_schema import (
     DocumentoProcesoDisciplinarioCreate,
     DocumentoProcesoDisciplinarioResponse,
@@ -181,6 +184,108 @@ def documento_tiene_archivo_fisico(
         )
         is not None
     )
+
+
+
+def obtener_proceso_documento_o_error(
+    db: Session,
+    documento: DocumentoProcesoDisciplinario,
+) -> ProcesoDisciplinario:
+    """
+    Obtiene el proceso relacionado con el documento.
+    """
+
+    proceso = (
+        db.query(ProcesoDisciplinario)
+        .filter(
+            ProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == documento.IdProcesoDisciplinario
+        )
+        .first()
+    )
+
+    if not proceso:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "No se encontró el proceso disciplinario "
+                    "relacionado con el documento."
+                ),
+                "IdProcesoDisciplinario": (
+                    documento.IdProcesoDisciplinario
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    documento.IdDocumentoProcesoDisciplinario
+                ),
+            },
+        )
+
+    return proceso
+
+
+def validar_eliminacion_documento_operaciones(
+    proceso: ProcesoDisciplinario,
+    documento: DocumentoProcesoDisciplinario,
+) -> None:
+    """
+    Permite eliminar evidencias únicamente mientras el
+    expediente siga bajo control de Operaciones y todavía
+    no haya sido enviado a Relaciones Laborales.
+    """
+
+    origen_proceso = str(
+        proceso.OrigenProceso or ""
+    ).strip().upper()
+
+    estado_proceso = str(
+        proceso.EstadoProceso or ""
+    ).strip().upper()
+
+    estados_editables = {
+        "BORRADOR_OPERACIONES",
+        "PASO_1_COMPLETADO",
+        "PASO_2_COMPLETADO",
+        "PASO_3_COMPLETADO",
+    }
+
+    if origen_proceso != "OPERACIONES":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El documento no pertenece a un proceso "
+                    "gestionado por Operaciones."
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    documento.IdDocumentoProcesoDisciplinario
+                ),
+                "OrigenProceso": proceso.OrigenProceso,
+            },
+        )
+
+    if estado_proceso not in estados_editables:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "La evidencia ya no puede eliminarse porque "
+                    "el proceso fue enviado a Relaciones Laborales "
+                    "o dejó de estar en una etapa editable."
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    documento.IdDocumentoProcesoDisciplinario
+                ),
+                "IdProcesoDisciplinario": (
+                    proceso.IdProcesoDisciplinario
+                ),
+                "EstadoProceso": proceso.EstadoProceso,
+                "EstadosEditables": sorted(
+                    estados_editables
+                ),
+            },
+        )
 
 
 @router.post(
@@ -395,6 +500,26 @@ def obtener_documentos_por_proceso(
                     if archivo_disponible
                     else None
                 ),
+                "UrlVisualizar": (
+                    (
+                        f"{url_base}"
+                        f"/api/documento-proceso-disciplinario/"
+                        f"{documento.IdDocumentoProcesoDisciplinario}"
+                        f"/archivo"
+                    )
+                    if archivo_disponible
+                    else None
+                ),
+                "UrlDescargar": (
+                    (
+                        f"{url_base}"
+                        f"/api/documento-proceso-disciplinario/"
+                        f"{documento.IdDocumentoProcesoDisciplinario}"
+                        f"/descargar"
+                    )
+                    if archivo_disponible
+                    else None
+                ),
             }
         )
 
@@ -435,6 +560,208 @@ def visualizar_archivo_documento(
         ),
         content_disposition_type="inline",
     )
+
+
+@router.get(
+    "/{id_documento}/descargar",
+)
+def descargar_archivo_documento(
+    id_documento: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Descarga el archivo como adjunto.
+
+    Este endpoint se mantiene separado del endpoint
+    de visualización para no mezclar los comportamientos
+    de Ver y Descargar.
+    """
+
+    documento = obtener_documento_o_error(
+        db=db,
+        id_documento=id_documento,
+    )
+
+    ruta_absoluta = (
+        obtener_ruta_absoluta_documento(
+            documento
+        )
+    )
+
+    tipo_contenido, _ = mimetypes.guess_type(
+        ruta_absoluta.name
+    )
+
+    return FileResponse(
+        path=str(ruta_absoluta),
+        media_type=(
+            tipo_contenido
+            or "application/octet-stream"
+        ),
+        filename=(
+            documento.NombreArchivo
+            or ruta_absoluta.name
+        ),
+        content_disposition_type="attachment",
+    )
+
+
+
+@router.delete(
+    "/{id_documento}",
+)
+def eliminar_documento(
+    id_documento: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Elimina una evidencia registrada desde Operaciones.
+
+    Reglas:
+    - Solo permite procesos cuyo origen sea OPERACIONES.
+    - Solo permite etapas anteriores al envío a RRLL.
+    - Elimina el registro de base de datos.
+    - Elimina el archivo físico cuando exista.
+    """
+
+    documento = obtener_documento_o_error(
+        db=db,
+        id_documento=id_documento,
+    )
+
+    proceso = obtener_proceso_documento_o_error(
+        db=db,
+        documento=documento,
+    )
+
+    validar_eliminacion_documento_operaciones(
+        proceso=proceso,
+        documento=documento,
+    )
+
+    ruta_original = (
+        construir_ruta_absoluta_documento(
+            documento
+        )
+    )
+
+    ruta_temporal = None
+
+    if ruta_original:
+        marca_tiempo = datetime.now().strftime(
+            "%Y%m%d%H%M%S%f"
+        )
+
+        ruta_temporal = ruta_original.with_name(
+            (
+                f".eliminando_"
+                f"{documento.IdDocumentoProcesoDisciplinario}_"
+                f"{marca_tiempo}_"
+                f"{ruta_original.name}"
+            )
+        )
+
+        try:
+            ruta_original.rename(
+                ruta_temporal
+            )
+        except OSError as error:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "mensaje": (
+                        "No se pudo preparar el archivo físico "
+                        "para su eliminación."
+                    ),
+                    "IdDocumentoProcesoDisciplinario": (
+                        documento
+                        .IdDocumentoProcesoDisciplinario
+                    ),
+                },
+            ) from error
+
+    nombre_archivo = (
+        documento.NombreArchivo
+        or (
+            ruta_original.name
+            if ruta_original
+            else None
+        )
+    )
+
+    id_proceso = (
+        documento.IdProcesoDisciplinario
+    )
+
+    try:
+        db.delete(documento)
+        db.commit()
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        if (
+            ruta_temporal
+            and ruta_temporal.exists()
+            and ruta_original
+            and not ruta_original.exists()
+        ):
+            try:
+                ruta_temporal.rename(
+                    ruta_original
+                )
+            except OSError:
+                pass
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No se pudo eliminar el registro "
+                    "del documento."
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    id_documento
+                ),
+            },
+        ) from error
+
+    archivo_fisico_eliminado = (
+        ruta_temporal is None
+    )
+
+    advertencia = None
+
+    if ruta_temporal:
+        try:
+            ruta_temporal.unlink(
+                missing_ok=True
+            )
+            archivo_fisico_eliminado = True
+        except OSError:
+            archivo_fisico_eliminado = False
+            advertencia = (
+                "El registro fue eliminado, pero quedó "
+                "un archivo temporal pendiente de limpieza."
+            )
+
+    return {
+        "ok": True,
+        "mensaje": (
+            "La evidencia fue eliminada correctamente."
+        ),
+        "IdDocumentoProcesoDisciplinario": (
+            id_documento
+        ),
+        "IdProcesoDisciplinario": (
+            id_proceso
+        ),
+        "NombreArchivo": nombre_archivo,
+        "ArchivoFisicoEliminado": (
+            archivo_fisico_eliminado
+        ),
+        "Advertencia": advertencia,
+    }
 
 
 @router.get(

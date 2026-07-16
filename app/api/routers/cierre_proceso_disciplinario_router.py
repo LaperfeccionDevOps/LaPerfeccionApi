@@ -1,6 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -18,8 +22,8 @@ from domain.models.proceso_disciplinario import (
 
 from domain.schemas.cierre_proceso_disciplinario_schema import (
     CierreProcesoDisciplinarioCreate,
-    CierreProcesoDisciplinarioUpdate,
     CierreProcesoDisciplinarioResponse,
+    CierreProcesoDisciplinarioUpdate,
 )
 
 
@@ -29,20 +33,28 @@ router = APIRouter(
 )
 
 
+ZONA_COLOMBIA = timezone(
+    timedelta(hours=-5)
+)
+
+
+def ahora_colombia() -> datetime:
+    return datetime.now(
+        ZONA_COLOMBIA
+    )
+
+
 def obtener_proceso_o_error(
     db: Session,
     id_proceso: int,
 ) -> ProcesoDisciplinario:
-    """
-    Busca un proceso disciplinario.
-
-    Genera error 404 cuando el proceso no existe.
-    """
-
     proceso = (
-        db.query(ProcesoDisciplinario)
+        db.query(
+            ProcesoDisciplinario
+        )
         .filter(
-            ProcesoDisciplinario.IdProcesoDisciplinario
+            ProcesoDisciplinario
+            .IdProcesoDisciplinario
             == id_proceso
         )
         .first()
@@ -53,9 +65,11 @@ def obtener_proceso_o_error(
             status_code=404,
             detail={
                 "mensaje": (
-                    "Proceso disciplinario no encontrado."
+                    "Proceso disciplinario "
+                    "no encontrado."
                 ),
-                "IdProcesoDisciplinario": id_proceso,
+                "IdProcesoDisciplinario":
+                    id_proceso,
             },
         )
 
@@ -65,105 +79,191 @@ def obtener_proceso_o_error(
 def validar_proceso_abierto(
     proceso: ProcesoDisciplinario,
 ) -> None:
-    """
-    Impide modificar un proceso disciplinario
-    que ya se encuentre cerrado.
-    """
-
-    estado_proceso = str(
+    estado = str(
         proceso.EstadoProceso or ""
     ).strip().upper()
 
-    if estado_proceso == "CERRADO":
+    if estado == "CERRADO":
         raise HTTPException(
             status_code=409,
             detail={
                 "mensaje": (
-                    "El proceso disciplinario ya fue cerrado "
-                    "y no admite modificaciones."
+                    "El proceso disciplinario "
+                    "ya fue cerrado y no admite "
+                    "modificaciones."
                 ),
                 "IdProcesoDisciplinario": (
-                    proceso.IdProcesoDisciplinario
+                    proceso
+                    .IdProcesoDisciplinario
                 ),
-                "EstadoProceso": proceso.EstadoProceso,
+                "EstadoProceso":
+                    proceso.EstadoProceso,
+            },
+        )
+
+
+def obtener_cierre_o_error(
+    db: Session,
+    id_cierre: int,
+) -> CierreProcesoDisciplinario:
+    cierre = (
+        db.query(
+            CierreProcesoDisciplinario
+        )
+        .filter(
+            CierreProcesoDisciplinario
+            .IdCierreProcesoDisciplinario
+            == id_cierre
+        )
+        .first()
+    )
+
+    if not cierre:
+        raise HTTPException(
+            status_code=404,
+            detail="Cierre no encontrado.",
+        )
+
+    return cierre
+
+
+def validar_cierre_completo(
+    cierre: CierreProcesoDisciplinario,
+) -> None:
+    tipo = str(
+        cierre.TipoCierre or ""
+    ).strip().upper()
+
+    conclusion = str(
+        cierre.ConclusionRRLL or ""
+    ).strip()
+
+    responsable = str(
+        cierre.ResponsableCierre or ""
+    ).strip()
+
+    medida = str(
+        cierre.MedidaDisciplinaria or ""
+    ).strip()
+
+    errores = []
+
+    if tipo not in {
+        "CON_MEDIDA_DISCIPLINARIA",
+        "SIN_MEDIDA_DISCIPLINARIA",
+        "ARCHIVO_DEL_PROCESO",
+    }:
+        errores.append(
+            "Debe seleccionar un tipo de cierre."
+        )
+
+    if not cierre.FechaCierre:
+        errores.append(
+            "La fecha de cierre es obligatoria."
+        )
+
+    if not responsable:
+        errores.append(
+            "El responsable del cierre "
+            "es obligatorio."
+        )
+
+    if not conclusion:
+        errores.append(
+            "La conclusión de Relaciones "
+            "Laborales es obligatoria."
+        )
+
+    if (
+        tipo == "CON_MEDIDA_DISCIPLINARIA"
+        and not medida
+    ):
+        errores.append(
+            "Debe registrar la medida "
+            "disciplinaria."
+        )
+
+    if errores:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": errores[0],
+                "errores": errores,
             },
         )
 
 
 def sincronizar_cierre_con_agenda(
     db: Session,
-    id_proceso_disciplinario: int,
+    proceso: ProcesoDisciplinario,
+    usuario: str,
 ) -> None:
-    """
-    Sincroniza el cierre del expediente disciplinario
-    con el proceso principal y con la agenda.
-
-    ProcesoDisciplinario:
-        EstadoProceso = CERRADO
-
-    AgendaProcesoDisciplinario:
-        EstadoAgenda = ATENDIDO
-        ColorAgenda = VERDE
-    """
-
-    fecha_actualizacion = datetime.now()
-
-    proceso = obtener_proceso_o_error(
-        db=db,
-        id_proceso=id_proceso_disciplinario,
+    fecha_actualizacion = (
+        ahora_colombia()
     )
 
     proceso.EstadoProceso = "CERRADO"
-    proceso.FechaActualizacion = fecha_actualizacion
-    proceso.UsuarioActualizacion = "rrll_cierre"
+    proceso.FechaActualizacion = (
+        fecha_actualizacion
+    )
+    proceso.UsuarioActualizacion = (
+        usuario
+    )
 
-    eventos_agenda = (
-        db.query(AgendaProcesoDisciplinario)
+    eventos = (
+        db.query(
+            AgendaProcesoDisciplinario
+        )
         .filter(
-            AgendaProcesoDisciplinario.IdProcesoDisciplinario
-            == id_proceso_disciplinario,
-            AgendaProcesoDisciplinario.Activo.is_(True),
+            AgendaProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == proceso
+            .IdProcesoDisciplinario,
+            AgendaProcesoDisciplinario
+            .Activo.is_(True),
         )
         .all()
     )
 
-    for evento in eventos_agenda:
+    for evento in eventos:
         evento.EstadoAgenda = "ATENDIDO"
         evento.ColorAgenda = "VERDE"
-        evento.FechaActualizacion = fecha_actualizacion
-        evento.UsuarioActualizacion = "rrll_cierre"
+        evento.FechaActualizacion = (
+            fecha_actualizacion
+        )
+        evento.UsuarioActualizacion = (
+            usuario
+        )
 
 
 @router.post(
     "/",
-    response_model=CierreProcesoDisciplinarioResponse,
+    response_model=(
+        CierreProcesoDisciplinarioResponse
+    ),
 )
-def crear_cierre(
+def crear_borrador_cierre(
     data: CierreProcesoDisciplinarioCreate,
     db: Session = Depends(get_db),
 ):
-    """
-    Registra el cierre de un proceso disciplinario abierto.
-
-    Después de guardar el cierre:
-    - El proceso queda CERRADO.
-    - La agenda queda ATENDIDA.
-    - El color de agenda queda VERDE.
-    """
-
     proceso = obtener_proceso_o_error(
         db=db,
-        id_proceso=data.IdProcesoDisciplinario,
+        id_proceso=(
+            data.IdProcesoDisciplinario
+        ),
     )
 
-    # Permite cerrar un proceso abierto,
-    # pero impide registrar otro cierre si ya estaba cerrado.
-    validar_proceso_abierto(proceso)
+    validar_proceso_abierto(
+        proceso
+    )
 
     cierre_existente = (
-        db.query(CierreProcesoDisciplinario)
+        db.query(
+            CierreProcesoDisciplinario
+        )
         .filter(
-            CierreProcesoDisciplinario.IdProcesoDisciplinario
+            CierreProcesoDisciplinario
+            .IdProcesoDisciplinario
             == data.IdProcesoDisciplinario
         )
         .first()
@@ -174,41 +274,35 @@ def crear_cierre(
             status_code=409,
             detail={
                 "mensaje": (
-                    "El proceso disciplinario ya tiene "
-                    "un cierre registrado."
+                    "El proceso ya tiene un "
+                    "borrador de cierre."
                 ),
-                "IdProcesoDisciplinario": (
-                    data.IdProcesoDisciplinario
-                ),
-                "IdCierreProcesoDisciplinario": (
+                "IdCierreProcesoDisciplinario":
                     cierre_existente
-                    .IdCierreProcesoDisciplinario
-                ),
+                    .IdCierreProcesoDisciplinario,
             },
         )
 
-    try:
-        nuevo_cierre = CierreProcesoDisciplinario(
+    nuevo = (
+        CierreProcesoDisciplinario(
             **data.model_dump()
         )
+    )
 
-        db.add(nuevo_cierre)
+    nuevo.FechaActualizacion = (
+        ahora_colombia()
+    )
 
-        sincronizar_cierre_con_agenda(
-            db=db,
-            id_proceso_disciplinario=(
-                data.IdProcesoDisciplinario
-            ),
+    try:
+        db.add(
+            nuevo
+        )
+        db.commit()
+        db.refresh(
+            nuevo
         )
 
-        db.commit()
-        db.refresh(nuevo_cierre)
-
-        return nuevo_cierre
-
-    except HTTPException:
-        db.rollback()
-        raise
+        return nuevo
 
     except SQLAlchemyError as error:
         db.rollback()
@@ -216,34 +310,34 @@ def crear_cierre(
         raise HTTPException(
             status_code=500,
             detail=(
-                "No se pudo registrar el cierre ni "
-                "actualizar la agenda disciplinaria."
+                "No se pudo guardar el "
+                "borrador del cierre."
             ),
         ) from error
 
 
 @router.get(
     "/proceso/{id_proceso}",
+    response_model=(
+        CierreProcesoDisciplinarioResponse
+    ),
 )
 def obtener_cierre_por_proceso(
     id_proceso: int,
     db: Session = Depends(get_db),
 ):
-    """
-    Consulta el cierre mediante el ID del proceso.
-
-    Se permite consultar procesos abiertos y cerrados.
-    """
-
     obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
     )
 
     cierre = (
-        db.query(CierreProcesoDisciplinario)
+        db.query(
+            CierreProcesoDisciplinario
+        )
         .filter(
-            CierreProcesoDisciplinario.IdProcesoDisciplinario
+            CierreProcesoDisciplinario
+            .IdProcesoDisciplinario
             == id_proceso
         )
         .first()
@@ -254,10 +348,11 @@ def obtener_cierre_por_proceso(
             status_code=404,
             detail={
                 "mensaje": (
-                    "El proceso disciplinario no tiene "
-                    "cierre registrado."
+                    "El proceso disciplinario "
+                    "no tiene borrador de cierre."
                 ),
-                "IdProcesoDisciplinario": id_proceso,
+                "IdProcesoDisciplinario":
+                    id_proceso,
             },
         )
 
@@ -266,106 +361,69 @@ def obtener_cierre_por_proceso(
 
 @router.get(
     "/{id_cierre}",
-    response_model=CierreProcesoDisciplinarioResponse,
+    response_model=(
+        CierreProcesoDisciplinarioResponse
+    ),
 )
 def obtener_cierre(
     id_cierre: int,
     db: Session = Depends(get_db),
 ):
-    """
-    Consulta un cierre por su ID.
-
-    Se permite consultar cierres de procesos finalizados.
-    """
-
-    cierre = (
-        db.query(CierreProcesoDisciplinario)
-        .filter(
-            CierreProcesoDisciplinario
-            .IdCierreProcesoDisciplinario
-            == id_cierre
-        )
-        .first()
+    return obtener_cierre_o_error(
+        db=db,
+        id_cierre=id_cierre,
     )
-
-    if not cierre:
-        raise HTTPException(
-            status_code=404,
-            detail="Cierre no encontrado",
-        )
-
-    return cierre
 
 
 @router.put(
     "/{id_cierre}",
-    response_model=CierreProcesoDisciplinarioResponse,
+    response_model=(
+        CierreProcesoDisciplinarioResponse
+    ),
 )
-def actualizar_cierre(
+def actualizar_borrador_cierre(
     id_cierre: int,
     data: CierreProcesoDisciplinarioUpdate,
     db: Session = Depends(get_db),
 ):
-    """
-    Actualiza un cierre únicamente cuando el proceso
-    todavía se encuentre abierto.
-
-    Como la creación del cierre cambia el proceso a CERRADO,
-    posteriormente el expediente queda bloqueado.
-    """
-
-    cierre = (
-        db.query(CierreProcesoDisciplinario)
-        .filter(
-            CierreProcesoDisciplinario
-            .IdCierreProcesoDisciplinario
-            == id_cierre
-        )
-        .first()
+    cierre = obtener_cierre_o_error(
+        db=db,
+        id_cierre=id_cierre,
     )
-
-    if not cierre:
-        raise HTTPException(
-            status_code=404,
-            detail="Cierre no encontrado",
-        )
 
     proceso = obtener_proceso_o_error(
         db=db,
-        id_proceso=cierre.IdProcesoDisciplinario,
+        id_proceso=(
+            cierre.IdProcesoDisciplinario
+        ),
     )
 
-    validar_proceso_abierto(proceso)
+    validar_proceso_abierto(
+        proceso
+    )
 
-    datos_actualizacion = data.model_dump(
+    cambios = data.model_dump(
         exclude_unset=True
     )
 
-    for campo, valor in datos_actualizacion.items():
+    for campo, valor in cambios.items():
         setattr(
             cierre,
             campo,
             valor,
         )
 
-    cierre.FechaActualizacion = datetime.now()
+    cierre.FechaActualizacion = (
+        ahora_colombia()
+    )
 
     try:
-        sincronizar_cierre_con_agenda(
-            db=db,
-            id_proceso_disciplinario=(
-                cierre.IdProcesoDisciplinario
-            ),
+        db.commit()
+        db.refresh(
+            cierre
         )
 
-        db.commit()
-        db.refresh(cierre)
-
         return cierre
-
-    except HTTPException:
-        db.rollback()
-        raise
 
     except SQLAlchemyError as error:
         db.rollback()
@@ -373,7 +431,90 @@ def actualizar_cierre(
         raise HTTPException(
             status_code=500,
             detail=(
-                "No se pudo actualizar el cierre ni "
-                "sincronizar la agenda disciplinaria."
+                "No se pudo actualizar el "
+                "borrador del cierre."
+            ),
+        ) from error
+
+
+@router.post(
+    "/{id_cierre}/finalizar",
+    response_model=(
+        CierreProcesoDisciplinarioResponse
+    ),
+)
+def finalizar_cierre(
+    id_cierre: int,
+    db: Session = Depends(get_db),
+):
+    cierre = obtener_cierre_o_error(
+        db=db,
+        id_cierre=id_cierre,
+    )
+
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=(
+            cierre.IdProcesoDisciplinario
+        ),
+    )
+
+    validar_proceso_abierto(
+        proceso
+    )
+
+    validar_cierre_completo(
+        cierre
+    )
+
+    usuario = (
+        str(
+            cierre.ResponsableCierre
+            or "rrll"
+        ).strip()
+        or "rrll"
+    )
+
+    if (
+        cierre.TipoCierre
+        in {
+            "SIN_MEDIDA_DISCIPLINARIA",
+            "ARCHIVO_DEL_PROCESO",
+        }
+        and not str(
+            cierre.MedidaDisciplinaria
+            or ""
+        ).strip()
+    ):
+        cierre.MedidaDisciplinaria = (
+            "Sin medida disciplinaria"
+        )
+
+    cierre.FechaActualizacion = (
+        ahora_colombia()
+    )
+
+    sincronizar_cierre_con_agenda(
+        db=db,
+        proceso=proceso,
+        usuario=usuario,
+    )
+
+    try:
+        db.commit()
+        db.refresh(
+            cierre
+        )
+
+        return cierre
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo finalizar el "
+                "proceso disciplinario."
             ),
         ) from error

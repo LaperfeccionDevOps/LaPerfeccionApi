@@ -16,9 +16,12 @@ class CierreProcesoDisciplinario(Base):
 
     IdProcesoDisciplinario = Column(
         Integer,
-        ForeignKey("ProcesoDisciplinario.IdProcesoDisciplinario"),
+        ForeignKey(
+            "ProcesoDisciplinario.IdProcesoDisciplinario"
+        ),
         nullable=False,
         index=True,
+        unique=True,
     )
 
     FechaCierre = Column(
@@ -32,7 +35,7 @@ class CierreProcesoDisciplinario(Base):
     )
 
     MedidaDisciplinaria = Column(
-        String(150),
+        String(500),
         nullable=True,
     )
 

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
@@ -47,10 +47,10 @@ DIAS_HABILES_MINIMOS_CITACION = 5
 HORA_INICIO_MANANA = time(8, 0)
 HORA_FIN_MANANA = time(13, 0)
 HORA_INICIO_TARDE = time(14, 0)
-HORA_FIN_JORNADA = time(17, 30)
+HORA_FIN_JORNADA = time(17, 0)
 
 DURACION_CITACION_MINUTOS = 40
-CAPACIDAD_MAXIMA_DIARIA = 12
+CAPACIDAD_MAXIMA_DIARIA = 11
 
 
 COLORES_POR_ESTADO = {
@@ -60,6 +60,154 @@ COLORES_POR_ESTADO = {
     "CANCELADO": "ROJO",
     "REPROGRAMADO": "GRIS",
 }
+
+
+ZONA_COLOMBIA = timezone(
+    timedelta(hours=-5)
+)
+
+
+def obtener_ahora_colombia() -> datetime:
+    return datetime.now(
+        ZONA_COLOMBIA
+    )
+
+
+def obtener_fecha_actual_colombia() -> date:
+    return obtener_ahora_colombia().date()
+
+
+def calcular_domingo_pascua(
+    anio: int,
+) -> date:
+    """
+    Calcula el Domingo de Pascua mediante
+    el algoritmo gregoriano de Meeus/Jones/Butcher.
+    """
+
+    a = anio % 19
+    b = anio // 100
+    c = anio % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    ajuste_semana = (
+        32
+        + 2 * e
+        + 2 * i
+        - h
+        - k
+    ) % 7
+
+    ajuste_excepcion = (
+        a
+        + 11 * h
+        + 22 * ajuste_semana
+    ) // 451
+
+    mes = (
+        h
+        + ajuste_semana
+        - 7 * ajuste_excepcion
+        + 114
+    ) // 31
+
+    dia = (
+        (
+            h
+            + ajuste_semana
+            - 7 * ajuste_excepcion
+            + 114
+        ) % 31
+    ) + 1
+
+    return date(
+        anio,
+        mes,
+        dia,
+    )
+
+
+def mover_al_lunes_siguiente(
+    fecha_festivo: date,
+) -> date:
+    dias_hasta_lunes = (
+        7 - fecha_festivo.weekday()
+    ) % 7
+
+    return fecha_festivo + timedelta(
+        days=dias_hasta_lunes
+    )
+
+
+def obtener_festivos_colombia(
+    anio: int,
+) -> set[date]:
+    """
+    Retorna los festivos nacionales de Colombia
+    para el año indicado, incluidos los trasladados
+    al lunes y los dependientes de Semana Santa.
+    """
+
+    pascua = calcular_domingo_pascua(
+        anio
+    )
+
+    festivos = {
+        date(anio, 1, 1),
+        date(anio, 5, 1),
+        date(anio, 7, 20),
+        date(anio, 8, 7),
+        date(anio, 12, 8),
+        date(anio, 12, 25),
+        pascua - timedelta(days=3),
+        pascua - timedelta(days=2),
+        pascua + timedelta(days=43),
+        pascua + timedelta(days=64),
+        pascua + timedelta(days=71),
+    }
+
+    festivos_trasladables = (
+        date(anio, 1, 6),
+        date(anio, 3, 19),
+        date(anio, 6, 29),
+        date(anio, 8, 15),
+        date(anio, 10, 12),
+        date(anio, 11, 1),
+        date(anio, 11, 11),
+    )
+
+    for festivo in festivos_trasladables:
+        festivos.add(
+            mover_al_lunes_siguiente(
+                festivo
+            )
+        )
+
+    return festivos
+
+
+def es_festivo_colombia(
+    fecha_valor: date,
+) -> bool:
+    return fecha_valor in obtener_festivos_colombia(
+        fecha_valor.year
+    )
+
+
+def es_dia_habil_colombia(
+    fecha_valor: date,
+) -> bool:
+    return (
+        fecha_valor.weekday() < 5
+        and not es_festivo_colombia(
+            fecha_valor
+        )
+    )
 
 
 def obtener_proceso_o_error(
@@ -148,7 +296,9 @@ def sumar_dias_habiles(
     while dias_sumados < cantidad_dias:
         fecha_resultado += timedelta(days=1)
 
-        if fecha_resultado.weekday() < 5:
+        if es_dia_habil_colombia(
+            fecha_resultado
+        ):
             dias_sumados += 1
 
     return fecha_resultado
@@ -300,10 +450,35 @@ def validar_dia_habil_agenda(
     if fecha_evento.weekday() >= 5:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Las citaciones solo pueden programarse "
-                "de lunes a viernes."
-            ),
+            detail={
+                "mensaje": (
+                    "Las citaciones no pueden programarse "
+                    "los sábados ni domingos."
+                ),
+                "fechaIngresada": (
+                    fecha_evento.strftime(
+                        "%d/%m/%Y"
+                    )
+                ),
+            },
+        )
+
+    if es_festivo_colombia(
+        fecha_evento
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "La fecha seleccionada es festivo "
+                    "en Colombia y no admite citaciones."
+                ),
+                "fechaIngresada": (
+                    fecha_evento.strftime(
+                        "%d/%m/%Y"
+                    )
+                ),
+            },
         )
 
 
@@ -342,7 +517,7 @@ def validar_bloque_citacion(
                     "13:00 a 14:00"
                 ),
                 "finJornada": (
-                    "17:30"
+                    "17:00"
                 ),
             },
         )
@@ -541,24 +716,121 @@ def listar_tipos_evento(
     )
 
 
+@router.get("/configuracion-citacion")
+def obtener_configuracion_citacion():
+    fecha_servidor = (
+        obtener_fecha_actual_colombia()
+    )
+
+    fecha_minima = sumar_dias_habiles(
+        fecha_servidor,
+        DIAS_HABILES_MINIMOS_CITACION,
+    )
+
+    return {
+        "fechaServidor": fecha_servidor,
+        "fechaMinimaPermitida": fecha_minima,
+        "diasHabilesMinimos": (
+            DIAS_HABILES_MINIMOS_CITACION
+        ),
+        "duracionMinutos": (
+            DURACION_CITACION_MINUTOS
+        ),
+        "capacidadMaxima": (
+            CAPACIDAD_MAXIMA_DIARIA
+        ),
+        "horariosBase": [
+            {
+                "HoraInicio": (
+                    hora_inicio.strftime(
+                        "%H:%M"
+                    )
+                ),
+                "HoraFin": (
+                    hora_fin.strftime(
+                        "%H:%M"
+                    )
+                ),
+                "Etiqueta": (
+                    f"{hora_inicio.strftime('%H:%M')} "
+                    f"- {hora_fin.strftime('%H:%M')}"
+                ),
+            }
+            for hora_inicio, hora_fin
+            in BLOQUES_CITACION
+        ],
+    }
+
+
+@router.get("/festivos/{anio}")
+def listar_festivos_colombia(
+    anio: int,
+):
+    if anio < 2000 or anio > 2100:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "El año consultado debe estar "
+                "entre 2000 y 2100."
+            ),
+        )
+
+    festivos = sorted(
+        obtener_festivos_colombia(
+            anio
+        )
+    )
+
+    return {
+        "anio": anio,
+        "total": len(festivos),
+        "festivos": festivos,
+    }
+
+
 @router.get("/horarios-disponibles/{fecha_evento}")
 def obtener_horarios_disponibles(
     fecha_evento: date,
     db: Session = Depends(get_db),
 ):
-    if fecha_evento.weekday() >= 5:
-        return {
-            "fecha": fecha_evento,
-            "capacidadMaxima": (
-                CAPACIDAD_MAXIMA_DIARIA
-            ),
-            "cuposDisponibles": 0,
-            "horarios": [],
-            "mensaje": (
-                "No existen horarios disponibles "
-                "los sábados ni domingos."
-            ),
-        }
+    fecha_servidor = (
+        obtener_fecha_actual_colombia()
+    )
+
+    fecha_minima = sumar_dias_habiles(
+        fecha_servidor,
+        DIAS_HABILES_MINIMOS_CITACION,
+    )
+
+    if fecha_evento < fecha_minima:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "La fecha seleccionada no cumple "
+                    "el mínimo de cinco días hábiles."
+                ),
+                "fechaServidor": (
+                    fecha_servidor.strftime(
+                        "%d/%m/%Y"
+                    )
+                ),
+                "fechaIngresada": (
+                    fecha_evento.strftime(
+                        "%d/%m/%Y"
+                    )
+                ),
+                "fechaMinimaPermitida": (
+                    fecha_minima.strftime(
+                        "%d/%m/%Y"
+                    )
+                ),
+            },
+        )
+
+    validar_dia_habil_agenda(
+        fecha_evento
+    )
 
     horarios_disponibles = []
 
@@ -634,7 +906,7 @@ def crear_evento_agenda(
             ),
         )
 
-    fecha_creacion_evento = datetime.now()
+    fecha_creacion_evento = obtener_ahora_colombia()
     datos_evento = data.model_dump()
 
     if (
@@ -793,7 +1065,7 @@ def listar_agenda_por_fecha(
 def listar_agenda_hoy(
     db: Session = Depends(get_db),
 ):
-    fecha_hoy = date.today()
+    fecha_hoy = obtener_fecha_actual_colombia()
 
     rows = consultar_eventos_enriquecidos(
         db=db,
@@ -850,7 +1122,7 @@ def iniciar_gestion_desde_agenda(
         )
 
     eventos_actualizados = 0
-    fecha_actualizacion = datetime.now()
+    fecha_actualizacion = obtener_ahora_colombia()
 
     try:
         for evento in eventos:
@@ -1091,7 +1363,7 @@ def reprogramar_evento_agenda(
             ),
         )
 
-    fecha_movimiento = datetime.now()
+    fecha_movimiento = obtener_ahora_colombia()
 
     # La reprogramación vuelve a exigir cinco días hábiles,
     # contados desde el día en que Yeny realiza el cambio.
@@ -1244,7 +1516,7 @@ def cancelar_evento_agenda(
             ),
         )
 
-    fecha_movimiento = datetime.now()
+    fecha_movimiento = obtener_ahora_colombia()
 
     historial = HistorialAgendaProcesoDisciplinario(
         IdAgendaProcesoDisciplinario=(
@@ -1486,7 +1758,7 @@ def actualizar_evento_agenda(
             )
 
         evento.FechaActualizacion = (
-            datetime.now()
+            obtener_ahora_colombia()
         )
 
         db.commit()
@@ -1543,7 +1815,7 @@ def eliminar_evento_agenda(
         evento.ColorAgenda = "ROJO"
 
         evento.FechaActualizacion = (
-            datetime.now()
+            obtener_ahora_colombia()
         )
 
         evento.UsuarioActualizacion = (
