@@ -1,5 +1,6 @@
-from typing import Optional
+from typing import Optional, List
 from datetime import date, datetime
+import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from pydantic import BaseModel, Field
@@ -318,6 +319,111 @@ def buscar_trabajador_por_documento(
     if not row:
         raise HTTPException(status_code=404, detail="No se encontró trabajador con ese documento.")
     return dict(row)
+
+
+@router.get("/trabajador/buscar", response_model=List[TrabajadorBusquedaOut])
+def buscar_trabajadores_por_documento_o_nombre(
+    busqueda: str = Query(..., min_length=2, description="Número de documento o nombre del trabajador"),
+    tipo_documento: Optional[str] = Query(None, description="CC | CE | TI | PPT. Opcional para búsqueda por nombre"),
+    limite: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    termino = " ".join((busqueda or "").strip().split())
+
+    if len(termino) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Debe escribir al menos 2 caracteres para buscar."
+        )
+
+    tipo_txt = _norm_tipo(tipo_documento) if tipo_documento else ""
+    id_tipo = None
+
+    if tipo_txt:
+        id_tipo = TIPO_DOC_TO_ID.get(tipo_txt)
+        if not id_tipo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tipo_documento inválido: {tipo_documento}. Usa CC, CE, TI o PPT."
+            )
+
+    solo_digitos = termino.isdigit()
+    parametros = {"limite": limite}
+    condiciones = []
+
+    if id_tipo is not None:
+        condiciones.append('rp."IdTipoIdentificacion" = :id_tipo')
+        parametros["id_tipo"] = id_tipo
+
+    if solo_digitos:
+        numero = _norm_num(termino)
+        condiciones.append(
+            'REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),\'.\',\'\'),\' \',\'\') LIKE :numero'
+        )
+        parametros["numero"] = f"%{numero}%"
+    else:
+        expresion_nombre = '''
+            UPPER(
+                TRANSLATE(
+                    CONCAT_WS(' ', COALESCE(rp."Nombres", ''), COALESCE(rp."Apellidos", '')),
+                    'ÁÉÍÓÚÜÑáéíóúüñ',
+                    'AEIOUUNAEIOUUN'
+                )
+            )
+        '''
+
+        termino_sin_acentos = unicodedata.normalize("NFKD", termino)
+        termino_sin_acentos = "".join(
+            caracter
+            for caracter in termino_sin_acentos
+            if not unicodedata.combining(caracter)
+        )
+
+        tokens = [
+            token
+            for token in termino_sin_acentos.upper().split()
+            if token.strip()
+        ]
+
+        for index, token in enumerate(tokens):
+            nombre_parametro = f"token_{index}"
+            condiciones.append(f"{expresion_nombre} LIKE :{nombre_parametro}")
+            parametros[nombre_parametro] = f"%{token}%"
+
+    where_sql = " AND ".join(condiciones)
+
+    q = text(f"""
+        SELECT
+          rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+          rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+          rp."NumeroIdentificacion"    AS "NumeroDocumento",
+          rp."Nombres"                 AS "Nombres",
+          rp."Apellidos"               AS "Apellidos",
+          TRIM(
+              CONCAT_WS(
+                  ' ',
+                  COALESCE(rp."Nombres", ''),
+                  COALESCE(rp."Apellidos", '')
+              )
+          ) AS "NombreCompleto"
+        FROM public."RegistroPersonal" rp
+        WHERE {where_sql}
+        ORDER BY
+          CASE
+            WHEN REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :coincidencia_exacta
+            THEN 0
+            ELSE 1
+          END,
+          rp."Nombres",
+          rp."Apellidos",
+          rp."IdRegistroPersonal" DESC
+        LIMIT :limite;
+    """)
+
+    parametros["coincidencia_exacta"] = _norm_num(termino) if solo_digitos else ""
+
+    rows = db.execute(q, parametros).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @router.get("/trabajador/detalle", response_model=TrabajadorBusquedaDetalleOut)

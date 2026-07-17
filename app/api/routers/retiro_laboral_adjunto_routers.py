@@ -1,6 +1,9 @@
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
+import shutil
+import subprocess
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -14,6 +17,192 @@ router = APIRouter(prefix="/api/rrll", tags=["RRLL - Adjuntos"])
 
 APP_DIR = Path(__file__).resolve().parents[2]
 BASE_STORAGE = Path("C:/LaPerfeccionStorage/rrll/retiros")
+
+
+EXTENSIONES_IMAGEN = {".png", ".jpg", ".jpeg", ".webp"}
+EXTENSIONES_WORD = {".doc", ".docx"}
+
+
+def _resolver_ruta_archivo(row) -> Path:
+    """
+    Resuelve la ruta física del adjunto sin modificar el registro de base de datos.
+    Mantiene compatibilidad con rutas antiguas y con C:/LaPerfeccionStorage.
+    """
+    ruta_guardada = str(row.get("RutaArchivo") or "").strip()
+    id_retiro = row.get("IdRetiroLaboral")
+    nombre_archivo = str(row.get("NombreArchivo") or "").strip()
+
+    if not id_retiro or not nombre_archivo:
+        raise HTTPException(
+            status_code=500,
+            detail="El adjunto no tiene información suficiente para localizar el archivo.",
+        )
+
+    ruta_storage = BASE_STORAGE / str(id_retiro) / nombre_archivo
+
+    # Las rutas antiguas absolutas de Windows pueden pertenecer a otra instalación.
+    if ruta_guardada.upper().startswith("C:"):
+        ruta = Path(ruta_guardada)
+        if not ruta.exists():
+            ruta = ruta_storage
+    elif ruta_guardada:
+        ruta_configurada = Path(ruta_guardada)
+        ruta = (
+            ruta_configurada
+            if ruta_configurada.is_absolute()
+            else APP_DIR / ruta_configurada
+        )
+    else:
+        ruta = ruta_storage
+
+    if not ruta.exists():
+        ruta = ruta_storage
+
+    ruta = ruta.resolve()
+
+    if not ruta.exists() or not ruta.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "El archivo no fue encontrado en el almacenamiento actual. "
+                "Puede ser un adjunto antiguo no disponible."
+            ),
+        )
+
+    return ruta
+
+
+def _buscar_libreoffice() -> Path:
+    """
+    Busca LibreOffice en PATH y en las rutas habituales de Windows.
+    Se utiliza únicamente para convertir Word a PDF al presionar Ver.
+    """
+    candidatos = []
+
+    for ejecutable in ("soffice.com", "soffice.exe", "soffice"):
+        encontrado = shutil.which(ejecutable)
+        if encontrado:
+            candidatos.append(Path(encontrado))
+
+    candidatos.extend(
+        [
+            Path("C:/Program Files/LibreOffice/program/soffice.com"),
+            Path("C:/Program Files/LibreOffice/program/soffice.exe"),
+            Path("C:/Program Files (x86)/LibreOffice/program/soffice.com"),
+            Path("C:/Program Files (x86)/LibreOffice/program/soffice.exe"),
+        ]
+    )
+
+    for candidato in candidatos:
+        if candidato.exists() and candidato.is_file():
+            return candidato.resolve()
+
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "No se encontró LibreOffice en el equipo o servidor. "
+            "Es necesario para visualizar archivos Word conservando su formato."
+        ),
+    )
+
+
+def _convertir_word_a_pdf(
+    ruta_word: Path,
+    id_retiro_laboral: int,
+) -> Path:
+    """
+    Convierte DOC/DOCX a PDF mediante LibreOffice en modo headless.
+    Crea una copia de vista previa; nunca altera el Word original.
+    """
+    carpeta_preview = BASE_STORAGE / "_preview" / str(id_retiro_laboral)
+    carpeta_preview.mkdir(parents=True, exist_ok=True)
+
+    marca_archivo = ruta_word.stat().st_mtime_ns
+    ruta_pdf_cache = carpeta_preview / f"{ruta_word.stem}_{marca_archivo}.pdf"
+
+    if (
+        ruta_pdf_cache.exists()
+        and ruta_pdf_cache.is_file()
+        and ruta_pdf_cache.stat().st_size > 0
+    ):
+        return ruta_pdf_cache.resolve()
+
+    libreoffice = _buscar_libreoffice()
+    carpeta_temporal = carpeta_preview / f"tmp_{uuid.uuid4().hex}"
+    perfil_temporal = carpeta_preview / f"profile_{uuid.uuid4().hex}"
+
+    carpeta_temporal.mkdir(parents=True, exist_ok=True)
+    perfil_temporal.mkdir(parents=True, exist_ok=True)
+
+    try:
+        comando = [
+            str(libreoffice),
+            f"-env:UserInstallation={perfil_temporal.resolve().as_uri()}",
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(carpeta_temporal),
+            str(ruta_word),
+        ]
+
+        resultado = subprocess.run(
+            comando,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+        if resultado.returncode != 0:
+            detalle = (
+                resultado.stderr
+                or resultado.stdout
+                or "LibreOffice no informó el motivo."
+            ).strip()
+
+            raise HTTPException(
+                status_code=500,
+                detail=f"No se pudo convertir el archivo Word a PDF. Detalle: {detalle}",
+            )
+
+        ruta_generada = carpeta_temporal / f"{ruta_word.stem}.pdf"
+
+        if not ruta_generada.exists():
+            candidatos_pdf = list(carpeta_temporal.glob("*.pdf"))
+            if candidatos_pdf:
+                ruta_generada = candidatos_pdf[0]
+
+        if (
+            not ruta_generada.exists()
+            or not ruta_generada.is_file()
+            or ruta_generada.stat().st_size == 0
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="LibreOffice terminó el proceso, pero no generó el PDF.",
+            )
+
+        shutil.move(str(ruta_generada), str(ruta_pdf_cache))
+        return ruta_pdf_cache.resolve()
+
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="La conversión del archivo Word tardó más de 120 segundos.",
+        ) from exc
+
+    finally:
+        shutil.rmtree(carpeta_temporal, ignore_errors=True)
+        shutil.rmtree(perfil_temporal, ignore_errors=True)
+
+
+def _nombre_inline(nombre: str) -> str:
+    """
+    Evita caracteres que puedan romper el encabezado Content-Disposition.
+    """
+    nombre_limpio = str(nombre or "archivo").replace('"', "").replace("\r", "")
+    return nombre_limpio.replace("\n", "")
 
 
 class RetiroAdjuntoOut(BaseModel):
@@ -322,6 +511,110 @@ def consultar_adjunto(
     if not row:
         raise HTTPException(status_code=404, detail="No existe el adjunto.")
     return dict(row)
+
+
+
+@router.get("/adjuntos/{id_adjunto}/ver")
+def ver_adjunto(
+    id_adjunto: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Vista previa del adjunto:
+    - PDF: se muestra directamente.
+    - Imágenes: se muestran directamente.
+    - DOC/DOCX: se convierten temporalmente a PDF.
+    El archivo original nunca se modifica.
+    """
+    q = text("""
+        SELECT
+            "IdRetiroLaboralAdjunto",
+            "IdRetiroLaboral",
+            "NombreArchivo",
+            COALESCE(
+                "NombreArchivoOriginal",
+                "NombreArchivo"
+            ) AS "NombreDescarga",
+            "RutaArchivo",
+            "ExtensionArchivo",
+            "MimeType"
+        FROM public."RetiroLaboralAdjunto"
+        WHERE "IdRetiroLaboralAdjunto" = :id_adjunto
+          AND COALESCE("Eliminado", false) = false
+          AND COALESCE("Activo", true) = true
+        LIMIT 1;
+    """)
+
+    row = db.execute(
+        q,
+        {"id_adjunto": id_adjunto},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No existe el adjunto.")
+
+    ruta_original = _resolver_ruta_archivo(row)
+
+    nombre_original = str(
+        row["NombreDescarga"]
+        or row["NombreArchivo"]
+        or ruta_original.name
+    ).strip()
+
+    extension = str(
+        row["ExtensionArchivo"]
+        or Path(nombre_original).suffix
+        or ruta_original.suffix
+        or ""
+    ).strip().lower()
+
+    if extension and not extension.startswith("."):
+        extension = f".{extension}"
+
+    if extension == ".pdf":
+        ruta_vista = ruta_original
+        media_type = "application/pdf"
+        nombre_vista = f"{Path(nombre_original).stem}.pdf"
+
+    elif extension in EXTENSIONES_IMAGEN:
+        ruta_vista = ruta_original
+        media_type_por_extension = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }
+        media_type = media_type_por_extension[extension]
+        nombre_vista = nombre_original
+
+    elif extension in EXTENSIONES_WORD:
+        ruta_vista = _convertir_word_a_pdf(
+            ruta_word=ruta_original,
+            id_retiro_laboral=row["IdRetiroLaboral"],
+        )
+        media_type = "application/pdf"
+        nombre_vista = f"{Path(nombre_original).stem}.pdf"
+
+    else:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Este tipo de archivo no se puede visualizar. "
+                "Utilice el botón Descargar."
+            ),
+        )
+
+    return FileResponse(
+        path=str(ruta_vista),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f'inline; filename="{_nombre_inline(nombre_vista)}"'
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/adjuntos/{id_adjunto}/descargar")
