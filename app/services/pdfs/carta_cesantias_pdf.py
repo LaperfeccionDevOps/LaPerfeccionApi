@@ -17,7 +17,7 @@ LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA.jpeg"
 LOGO_CERTIFICACIONES = ASSETS / "LOGO_CERTIFICACIONES.jpeg"
 LOGO_ISSA = ASSETS / "LOGO_ISSA.jpeg.png"
 LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
-FIRMA = ASSETS / "FIRMA_EMPLEADOR.png"
+FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
 OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -204,10 +204,7 @@ LOGO_EMPRESA_LIMPIO = limpiar_fondo_imagen(
     "LOGO_EMPRESA_limpio.png",
 )
 
-FIRMA_LIMPIA = preparar_firma(
-    FIRMA,
-    "FIRMA_EMPLEADOR_limpia_final_v2.png",
-)
+FIRMA_LIMPIA = FIRMA
 
 
 class CartaCesantiasPDF:
