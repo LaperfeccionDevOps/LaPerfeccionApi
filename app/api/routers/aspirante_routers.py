@@ -227,7 +227,10 @@ def listar_aspirantes(
                 DA."Barrio",
                 CARG."NombreCargo",
                 ASCARGO."Salario",
+                COALESCE(
                 CB."FechaIngreso",
+                rp."FechaIngresoHistorica"
+            ) AS "FechaIngreso",
                 CL."Nombre" AS "NombreCliente"
             FROM "RegistroPersonal" rp
             LEFT JOIN "EstadoProceso" esp ON rp."IdEstadoProceso" = esp."IdEstadoProceso"
@@ -314,6 +317,7 @@ def listar_aspirantes(
                 CARG."NombreCargo",
                 ASCARGO."Salario",
                 CB."FechaIngreso",
+                rp."FechaIngresoHistorica",
                 CL."Nombre"
             ORDER BY rp."FechaCreacion" DESC
         """

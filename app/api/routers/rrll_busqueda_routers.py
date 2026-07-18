@@ -471,7 +471,10 @@ def buscar_trabajador_detalle_por_documento(
           rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
           rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
 
-          cb."FechaIngreso"::text                     AS "FechaInicio"
+          COALESCE(
+                cb."FechaIngreso",
+                rp."FechaIngresoHistorica"
+        )::text                                    AS "FechaInicio"
 
         FROM public."RegistroPersonal" rp
 

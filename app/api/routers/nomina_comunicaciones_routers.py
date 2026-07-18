@@ -39,7 +39,10 @@ def obtener_datos_trabajador(db: Session, id_retiro_laboral: int):
             COALESCE(c."NombreCargo", acc_c."NombreCargo") AS "CargoNombre",
 
             fc."Nombre" AS "FondoCesantiasNombre",
-            cb."FechaIngreso" AS "FechaIngreso",
+            COALESCE(
+                cb."FechaIngreso",
+                rp."FechaIngresoHistorica"
+            ) AS "FechaIngreso",
             acc."Salario" AS "Salario"
 
         FROM public."RetiroLaboral" rl
