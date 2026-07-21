@@ -169,6 +169,7 @@ def listar_aspirantes(
     search: Optional[str] = Query(None),
     current=Depends(
        require_roles_ids(
+           ROL_SUPER_ADMIN,
         ROL_SELECCION,
         ROL_TALENTO_HUMANO,
         ROL_CONTRATACION,
@@ -386,6 +387,7 @@ def obtener_aspirante(
     db: Session = Depends(get_db),
     current=Depends(
       require_roles_ids(
+          ROL_SUPER_ADMIN,
         ROL_SELECCION,
         ROL_TALENTO_HUMANO,
         ROL_CONTRATACION,
