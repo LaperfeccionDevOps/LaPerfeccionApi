@@ -13,6 +13,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -39,6 +40,175 @@ router = APIRouter(
 
 APP_DIR = Path(__file__).resolve().parents[2]
 STORAGE_DIR = (APP_DIR / "storage").resolve()
+
+
+TIPOS_CARPETA_DIGITAL_RRLL = {
+    "PROCESO_DISCIPLINARIO": 82,
+    "PROCESOS_DISCIPLINARIOS": 82,
+    "AUSENTISMO": 83,
+    "LLAMADO_ATENCION": 86,
+    "LLAMADOS_ATENCION": 86,
+    "DESCARGOS": 87,
+    "SUSPENSION": 93,
+}
+
+
+def normalizar_tipo_documento(
+    valor: str | None,
+) -> str:
+    """
+    Normaliza el tipo recibido desde el frontend para poder
+    relacionarlo con el catálogo de Carpeta Digital.
+    """
+
+    return (
+        str(valor or "")
+        .strip()
+        .upper()
+        .replace("Á", "A")
+        .replace("É", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ú", "U")
+        .replace("Ü", "U")
+        .replace("Ñ", "N")
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def obtener_tipo_carpeta_digital(
+    tipo_documento: str | None,
+) -> int | None:
+    """
+    Retorna el IdTipoDocumentacion de la carpeta de activos
+    cuando el tipo seleccionado corresponde a un documento RRLL.
+
+    Otros tipos usados por Operaciones, como EVIDENCIA_OPERACIONES,
+    continúan guardándose únicamente en el expediente disciplinario.
+    """
+
+    codigo = normalizar_tipo_documento(
+        tipo_documento
+    )
+
+    return TIPOS_CARPETA_DIGITAL_RRLL.get(
+        codigo
+    )
+
+
+def obtener_proceso_o_error(
+    db: Session,
+    id_proceso: int,
+) -> ProcesoDisciplinario:
+    proceso = (
+        db.query(ProcesoDisciplinario)
+        .filter(
+            ProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso
+        )
+        .first()
+    )
+
+    if not proceso:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "Proceso disciplinario no encontrado."
+                ),
+                "IdProcesoDisciplinario": id_proceso,
+            },
+        )
+
+    return proceso
+
+
+def registrar_documento_carpeta_digital(
+    db: Session,
+    id_registro_personal: int,
+    id_tipo_documentacion: int,
+    contenido_archivo: bytes,
+    nombre_archivo: str,
+    formato: str,
+) -> int:
+    """
+    Inserta el archivo en Documentos y crea su relación con el
+    trabajador en RelacionTipoDocumentacion.
+
+    No ejecuta commit. La transacción se confirma desde el endpoint
+    principal junto con DocumentoProcesoDisciplinario.
+    """
+
+    documento_carpeta = (
+        db.execute(
+            text(
+                """
+                INSERT INTO public."Documentos" (
+                    "IdTipoDocumentacion",
+                    "DocumentoCargado",
+                    "FechaCreacion",
+                    "FechaActualizacion",
+                    "Formato",
+                    "Nombre"
+                )
+                VALUES (
+                    :id_tipo_documentacion,
+                    :documento_cargado,
+                    NOW(),
+                    NOW(),
+                    :formato,
+                    :nombre
+                )
+                RETURNING "IdDocumento"
+                """
+            ),
+            {
+                "id_tipo_documentacion": (
+                    id_tipo_documentacion
+                ),
+                "documento_cargado": contenido_archivo,
+                "formato": formato,
+                "nombre": nombre_archivo,
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if not documento_carpeta:
+        raise RuntimeError(
+            "No fue posible crear el documento "
+            "en la Carpeta Digital."
+        )
+
+    id_documento = int(
+        documento_carpeta["IdDocumento"]
+    )
+
+    db.execute(
+        text(
+            """
+            INSERT INTO public."RelacionTipoDocumentacion" (
+                "IdRegistroPersonal",
+                "IdDocumento"
+            )
+            VALUES (
+                :id_registro_personal,
+                :id_documento
+            )
+            """
+        ),
+        {
+            "id_registro_personal": (
+                id_registro_personal
+            ),
+            "id_documento": id_documento,
+        },
+    )
+
+    return id_documento
 
 
 def obtener_documento_o_error(
@@ -330,6 +500,11 @@ def subir_documento_proceso_disciplinario(
     archivo: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=IdProcesoDisciplinario,
+    )
+
     nombre_archivo = Path(
         archivo.filename or ""
     ).name.strip()
@@ -339,6 +514,47 @@ def subir_documento_proceso_disciplinario(
             status_code=400,
             detail="El archivo debe tener un nombre válido.",
         )
+
+    try:
+        contenido_archivo = archivo.file.read()
+    except OSError as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "No se pudo leer el archivo recibido."
+            ),
+        ) from error
+
+    if not contenido_archivo:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo recibido está vacío.",
+        )
+
+    codigo_tipo_documento = (
+        normalizar_tipo_documento(
+            TipoDocumento
+        )
+    )
+
+    id_tipo_carpeta_digital = (
+        obtener_tipo_carpeta_digital(
+            codigo_tipo_documento
+        )
+    )
+
+    extension = (
+        Path(nombre_archivo)
+        .suffix
+        .lstrip(".")
+        .lower()
+    )
+
+    formato_documento = (
+        archivo.content_type
+        or extension
+        or "application/octet-stream"
+    )
 
     carpeta_destino_absoluta = (
         STORAGE_DIR
@@ -369,16 +585,18 @@ def subir_documento_proceso_disciplinario(
         with ruta_archivo_absoluta.open(
             "wb"
         ) as buffer:
-            shutil.copyfileobj(
-                archivo.file,
-                buffer,
+            buffer.write(
+                contenido_archivo
             )
 
         nuevo = DocumentoProcesoDisciplinario(
             IdProcesoDisciplinario=(
                 IdProcesoDisciplinario
             ),
-            TipoDocumento=TipoDocumento,
+            TipoDocumento=(
+                codigo_tipo_documento
+                or TipoDocumento
+            ),
             NombreArchivo=nombre_archivo,
             RutaArchivo=str(
                 ruta_archivo_relativa
@@ -387,6 +605,24 @@ def subir_documento_proceso_disciplinario(
         )
 
         db.add(nuevo)
+        db.flush()
+
+        if id_tipo_carpeta_digital is not None:
+            registrar_documento_carpeta_digital(
+                db=db,
+                id_registro_personal=(
+                    proceso.IdRegistroPersonal
+                ),
+                id_tipo_documentacion=(
+                    id_tipo_carpeta_digital
+                ),
+                contenido_archivo=(
+                    contenido_archivo
+                ),
+                nombre_archivo=nombre_archivo,
+                formato=formato_documento,
+            )
+
         db.commit()
         db.refresh(nuevo)
 
@@ -402,21 +638,43 @@ def subir_documento_proceso_disciplinario(
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "El archivo fue recibido, pero no se pudo "
-                "registrar en la base de datos."
-            ),
+            detail={
+                "mensaje": (
+                    "El archivo fue recibido, pero no se pudo "
+                    "registrar completamente en el expediente "
+                    "disciplinario y la Carpeta Digital."
+                ),
+                "IdProcesoDisciplinario": (
+                    IdProcesoDisciplinario
+                ),
+                "TipoDocumento": (
+                    codigo_tipo_documento
+                ),
+            },
         ) from error
 
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         db.rollback()
+
+        if ruta_archivo_absoluta.exists():
+            ruta_archivo_absoluta.unlink(
+                missing_ok=True
+            )
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "No se pudo guardar el archivo en "
-                "el almacenamiento del servidor."
-            ),
+            detail={
+                "mensaje": (
+                    "No se pudo guardar el documento de forma "
+                    "completa."
+                ),
+                "IdProcesoDisciplinario": (
+                    IdProcesoDisciplinario
+                ),
+                "TipoDocumento": (
+                    codigo_tipo_documento
+                ),
+            },
         ) from error
 
     finally:
