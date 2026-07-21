@@ -5,6 +5,7 @@ from typing import Any, Optional
 from xml.sax.saxutils import escape
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from reportlab.lib import colors
@@ -178,6 +179,96 @@ def _hora(valor: Any) -> str:
 
     return texto or "—"
 
+
+
+def _tipo_cierre_legible(valor: Any) -> str:
+    """
+    Convierte el código interno del cierre en un texto
+    legible para el expediente disciplinario.
+    """
+
+    codigo = _texto(valor, "").strip().upper()
+
+    tipos_cierre = {
+        "CON_MEDIDA_DISCIPLINARIA": "Con medida disciplinaria",
+        "SIN_MEDIDA_DISCIPLINARIA": "Sin medida disciplinaria",
+        "ARCHIVO_PROCESO": "Archivo del proceso",
+        "ARCHIVO_DEL_PROCESO": "Archivo del proceso",
+    }
+
+    if not codigo:
+        return "—"
+
+    return tipos_cierre.get(
+        codigo,
+        codigo.replace("_", " " ).capitalize(),
+    )
+
+
+def _obtener_cargo_trabajador(
+    db: Session,
+    id_registro_personal: int,
+) -> str:
+    """
+    Consulta el cargo real y más reciente del trabajador desde
+    AsignacionCargoCliente y la tabla maestra Cargo.
+
+    Usa el mismo origen de información que la consulta de detalle
+    de trabajador de Relaciones Laborales.
+    """
+
+    fila_cargo = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    cg."NombreCargo" AS "Cargo"
+                FROM public."RegistroPersonal" rp
+
+                LEFT JOIN LATERAL (
+                    SELECT
+                        acc."IdCargo"
+                    FROM public."AsignacionCargoCliente" acc
+                    WHERE
+                        acc."IdRegistroPersonal"
+                        = rp."IdRegistroPersonal"
+                    ORDER BY
+                        COALESCE(
+                            acc."FechaActualizacion",
+                            acc."FechaCreacion"
+                        ) DESC NULLS LAST,
+                        acc."IdAsignacionCargoCliente" DESC
+                    LIMIT 1
+                ) asignacion ON TRUE
+
+                LEFT JOIN public."Cargo" cg
+                    ON cg."IdCargo" = asignacion."IdCargo"
+
+                WHERE
+                    rp."IdRegistroPersonal"
+                    = :id_registro_personal
+                LIMIT 1
+                """
+            ),
+            {
+                "id_registro_personal": (
+                    id_registro_personal
+                )
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if fila_cargo:
+        cargo = str(
+            fila_cargo.get("Cargo") or ""
+        ).strip()
+
+        if cargo:
+            return cargo
+
+    return "—"
 
 def _obtener_descripcion_relacion(
     objeto: Any,
@@ -790,16 +881,10 @@ def generar_expediente_disciplinario_pdf(
         )
     )
 
-    cargo = _obtener_descripcion_relacion(
-        getattr(
-            trabajador,
-            "tipo_cargo",
-            None,
-        ),
-        (
-            "Descripcion",
-            "Nombre",
-            "Codigo",
+    cargo = _obtener_cargo_trabajador(
+        db=db,
+        id_registro_personal=(
+            trabajador.IdRegistroPersonal
         ),
     )
 
@@ -1156,7 +1241,9 @@ def generar_expediente_disciplinario_pdf(
                     ],
                     [
                         "Tipo de cierre",
-                        cierre.TipoCierre,
+                        _tipo_cierre_legible(
+                            cierre.TipoCierre
+                        ),
                         "Estado",
                         "Finalizado",
                     ],
