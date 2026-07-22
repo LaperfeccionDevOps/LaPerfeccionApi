@@ -620,6 +620,34 @@ def obtener_historial_disciplinario_trabajador(
             .first()
         )
 
+        documentos_rrll = (
+            db.query(
+                DocumentoProcesoDisciplinario
+            )
+            .filter(
+                DocumentoProcesoDisciplinario
+                .IdProcesoDisciplinario
+                == proceso
+                .IdProcesoDisciplinario,
+                DocumentoProcesoDisciplinario
+                .TipoDocumento
+                != "EVIDENCIA_OPERACIONES",
+            )
+            .order_by(
+                DocumentoProcesoDisciplinario
+                .FechaCreacion
+                .desc()
+            )
+            .all()
+        )
+
+        proceso_cerrado = (
+            normalizar_texto(
+                proceso.EstadoProceso
+            )
+            == "CERRADO"
+        )
+
         historial.append(
             {
                 "IdProcesoDisciplinario": (
@@ -678,6 +706,17 @@ def obtener_historial_disciplinario_trabajador(
                     cierre.FechaCierre
                     if cierre
                     else None
+                ),
+                "CantidadDocumentosRRLL": (
+                    len(documentos_rrll)
+                ),
+                "TieneDocumentosRRLL": (
+                    len(documentos_rrll) > 0
+                ),
+                "RespuestaRRLLDisponible": (
+                    proceso_cerrado
+                    and cierre is not None
+                    and len(documentos_rrll) > 0
                 ),
             }
         )
