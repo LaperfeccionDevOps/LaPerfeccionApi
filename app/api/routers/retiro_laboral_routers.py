@@ -156,114 +156,539 @@ def crear_retiro_laboral(payload: RetiroLaboralCreate, db: Session = Depends(get
     
 
 
+
+
 @router.get("/dashboard-indicadores")
 def dashboard_indicadores_rrll(
-    anio: Optional[int] = Query(None),
-    mes: Optional[int] = Query(None),
+    anio: Optional[int] = Query(None, ge=2000, le=2100),
+    mes: Optional[int] = Query(None, ge=1, le=12),
+    id_cliente: Optional[int] = Query(None, ge=1),
+    tipo_periodo: str = Query("gestion"),
+    anio_grafica: Optional[int] = Query(None, ge=2026, le=2100),
     db: Session = Depends(get_db)
 ):
+    """
+    Indicadores RRLL de retiros.
+
+    tipo_periodo:
+    - gestion: mide la actividad de RRLL. Para abiertos usa FechaProceso/FechaCreacion
+      y para ENVIADO_NOMINA/CERRADO usa FechaCierre.
+    - retiro: mide por FechaRetiro, que corresponde al último día laborado.
+
+    Reglas:
+    - No se excluyen registros por Activo=false.
+    - ABIERTO, ENVIADO_NOMINA y CERRADO se muestran separados.
+    - FechaCierre representa el momento en que RRLL termina su gestión y entrega
+      el proceso a Nómina.
+    - Los porcentajes se calculan sobre el total real del filtro.
+    """
     try:
-        where_filtros = 'WHERE COALESCE(rl."Activo", true) = true'
-        params = {}
+        tipo_periodo = (tipo_periodo or "gestion").strip().lower()
 
-        if anio:
-            where_filtros += ' AND EXTRACT(YEAR FROM rl."FechaRetiro") = :anio'
-            params["anio"] = anio
+        if tipo_periodo not in ("gestion", "retiro"):
+            raise HTTPException(
+                status_code=400,
+                detail="tipo_periodo debe ser 'gestion' o 'retiro'."
+            )
 
-        if mes:
-            where_filtros += ' AND EXTRACT(MONTH FROM rl."FechaRetiro") = :mes'
-            params["mes"] = mes
+        anio_actual = int(
+            db.execute(
+                text("SELECT EXTRACT(YEAR FROM CURRENT_DATE)::int;")
+            ).scalar()
+        )
+        anio_consulta = anio or anio_actual
 
-        query_totales = text(f"""
+        if tipo_periodo == "retiro":
+            fecha_referencia = 'rl."FechaRetiro"'
+        else:
+            fecha_referencia = """
+                CASE
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN
+                         ('ENVIADO_NOMINA', 'CERRADO')
+                        THEN COALESCE(
+                            rl."FechaCierre",
+                            rl."FechaActualizacion",
+                            rl."FechaCreacion"
+                        )
+                    ELSE COALESCE(
+                        rl."FechaProceso",
+                        rl."FechaCreacion",
+                        rl."FechaActualizacion"
+                    )
+                END
+            """
+
+        anio_grafica_consulta = anio_grafica or anio_actual
+
+        params = {
+            "anio": anio_consulta,
+            "anio_grafica": anio_grafica_consulta,
+            "mes": mes,
+            "id_cliente": id_cliente,
+        }
+
+        filtro_periodo = f"""
+            EXTRACT(YEAR FROM ({fecha_referencia})) = :anio
+            AND (
+                :mes IS NULL
+                OR EXTRACT(MONTH FROM ({fecha_referencia})) = :mes
+            )
+            AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+        """
+
+        cte_base = f"""
+            WITH base AS (
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    rl."IdCliente",
+                    COALESCE(
+                        NULLIF(TRIM(c."Nombre"), ''),
+                        'SIN SEDE REGISTRADA'
+                    ) AS sede,
+                    COALESCE(
+                        NULLIF(TRIM(mr."Nombre"), ''),
+                        'SIN MOTIVO'
+                    ) AS motivo,
+                    COALESCE(
+                        NULLIF(TRIM(tr."Nombre"), ''),
+                        'SIN TIPIFICACIÓN'
+                    ) AS tipificacion,
+                    UPPER(
+                        TRIM(
+                            COALESCE(rl."EstadoCasoRRLL", 'SIN ESTADO')
+                        )
+                    ) AS estado,
+                    COALESCE(rl."Activo", true) AS activo,
+                    rl."FechaProceso",
+                    rl."FechaRetiro",
+                    rl."FechaCierre",
+                    rl."FechaCreacion",
+                    rl."FechaActualizacion",
+                    ({fecha_referencia}) AS fecha_referencia,
+                    rp."Nombres",
+                    rp."Apellidos",
+                    rp."NumeroIdentificacion",
+                    EXISTS (
+                        SELECT 1
+                        FROM public."EntrevistaRetiro" er
+                        WHERE er."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                          AND COALESCE(er."PdfGenerado", false) = true
+                          AND er."RutaPdf" IS NOT NULL
+                    ) AS entrevista_realizada
+                FROM public."RetiroLaboral" rl
+                LEFT JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                LEFT JOIN public."Cliente" c
+                    ON c."IdCliente" = rl."IdCliente"
+                LEFT JOIN public."MotivoRetiro" mr
+                    ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+                LEFT JOIN public."TipificacionRetiro" tr
+                    ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
+                WHERE {filtro_periodo}
+            )
+        """
+
+        def primera_fila(sql):
+            fila = db.execute(text(sql), params).mappings().first()
+            return dict(fila) if fila else {}
+
+        def lista_filas(sql):
+            return [
+                dict(fila)
+                for fila in db.execute(text(sql), params).mappings().all()
+            ]
+
+        query_totales = cte_base + """
             SELECT
-                COUNT(*) AS total_retiros,
-                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ABIERTO') AS retiros_abiertos,
-                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'CERRADO') AS retiros_cerrados,
+                COUNT(*)::int AS total_retiros,
+
                 COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(rl."RetiroLegalizado", 'NO')) NOT IN ('SI', 'SÍ', 'TRUE', '1')
-                ) AS pendientes_documentacion
-            FROM public."RetiroLaboral" rl
-            {where_filtros};
-        """)
+                    WHERE estado = 'ABIERTO'
+                )::int AS en_gestion_rrll,
 
-        query_estados = text(f"""
-            SELECT COALESCE(rl."EstadoCasoRRLL", 'SIN ESTADO') AS estado, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            {where_filtros}
-            GROUP BY rl."EstadoCasoRRLL"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS enviados_nomina,
 
-        query_motivos = text(f"""
-            SELECT COALESCE(mr."Nombre", 'SIN MOTIVO') AS motivo, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            {where_filtros}
-            GROUP BY mr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado = 'CERRADO'
+                )::int AS cerrados,
 
-        query_tipificaciones = text(f"""
-            SELECT COALESCE(tr."Nombre", 'SIN TIPIFICACIÓN') AS tipificacion, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
-            {where_filtros}
-            GROUP BY tr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado = 'ABIERTO' AND activo = false
+                )::int AS abiertos_inactivos,
 
-        query_documentos = text(f"""
-            SELECT 
-                tdr."Nombre" AS documento,
-                COUNT(rla."IdRetiroLaboralAdjunto") AS cantidad
-            FROM public."RetiroLaboral" rl
-            CROSS JOIN public."TipoDocumentoRetiro" tdr
-            LEFT JOIN public."RetiroLaboralAdjunto" rla
-                ON rla."IdRetiroLaboral" = rl."IdRetiroLaboral"
-                AND rla."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
-                AND COALESCE(rla."Eliminado", false) = false
-                AND COALESCE(rla."Activo", true) = true
-            {where_filtros}
-            AND tdr."IdTipoDocumentoRetiro" IN (2, 4, 10)
-            GROUP BY tdr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado = 'ABIERTO'
+                      AND entrevista_realizada
+                )::int AS entrevistas_realizadas,
 
-        query_recientes = text(f"""
+                COUNT(*) FILTER (
+                    WHERE estado = 'ABIERTO'
+                      AND NOT entrevista_realizada
+                )::int AS entrevistas_pendientes,
+
+                ROUND(
+                    COUNT(*) FILTER (
+                        WHERE estado = 'ABIERTO'
+                          AND entrevista_realizada
+                    ) * 100.0
+                    / NULLIF(
+                        COUNT(*) FILTER (
+                            WHERE estado = 'ABIERTO'
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_entrevistas
+
+            FROM base;
+        """
+
+        query_estados = cte_base + """
             SELECT
-                rl."IdRetiroLaboral",
-                rp."Nombres",
-                rp."Apellidos",
-                rp."NumeroIdentificacion",
-                mr."Nombre" AS motivo_retiro,
-                tr."Nombre" AS tipificacion_retiro,
-                rl."EstadoCasoRRLL",
-                rl."FechaRetiro"
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."RegistroPersonal" rp ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
-            {where_filtros}
-            ORDER BY rl."FechaRetiro" DESC NULLS LAST
+                estado,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY estado
+            ORDER BY cantidad DESC, estado;
+        """
+
+        query_sedes = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY "IdCliente", sede
+            ORDER BY cantidad DESC, sede;
+        """
+
+        query_motivos = cte_base + """
+            SELECT
+                motivo,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY motivo
+            ORDER BY cantidad DESC, motivo;
+        """
+
+        query_tipificaciones = cte_base + """
+            SELECT
+                tipificacion,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY tipificacion
+            ORDER BY cantidad DESC, tipificacion;
+        """
+
+        query_motivos_sede = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                motivo,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(
+                        SUM(COUNT(*)) OVER (
+                            PARTITION BY "IdCliente", sede
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_dentro_sede,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje_total
+            FROM base
+            GROUP BY "IdCliente", sede, motivo
+            ORDER BY cantidad DESC, sede, motivo;
+        """
+
+        query_tipificaciones_sede = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                tipificacion,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(
+                        SUM(COUNT(*)) OVER (
+                            PARTITION BY "IdCliente", sede
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_dentro_sede,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje_total
+            FROM base
+            GROUP BY "IdCliente", sede, tipificacion
+            ORDER BY cantidad DESC, sede, tipificacion;
+        """
+
+        query_entrevistas = cte_base + """
+            SELECT
+                estado,
+                cantidad,
+                ROUND(
+                    cantidad * 100.0 /
+                    NULLIF(SUM(cantidad) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM (
+                SELECT
+                    CASE
+                        WHEN entrevista_realizada THEN 'REALIZADA'
+                        ELSE 'PENDIENTE'
+                    END AS estado,
+                    COUNT(*)::int AS cantidad
+                FROM base
+                WHERE estado = 'ABIERTO'
+                GROUP BY
+                    CASE
+                        WHEN entrevista_realizada THEN 'REALIZADA'
+                        ELSE 'PENDIENTE'
+                    END
+            ) resumen
+            ORDER BY cantidad DESC, estado;
+        """
+
+        query_tiempo_rrll = cte_base + """
+            SELECT
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM ("FechaCierre" - "FechaRetiro")
+                        ) / 86400.0
+                    ) FILTER (
+                        WHERE "FechaRetiro" IS NOT NULL
+                          AND "FechaCierre" IS NOT NULL
+                          AND "FechaCierre" >= "FechaRetiro"
+                          AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                    )::numeric,
+                    2
+                ) AS promedio_dias_gestion_rrll,
+
+                COUNT(*) FILTER (
+                    WHERE "FechaRetiro" IS NOT NULL
+                      AND "FechaCierre" IS NOT NULL
+                      AND "FechaCierre" >= "FechaRetiro"
+                      AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS registros_validos,
+
+                COUNT(*) FILTER (
+                    WHERE "FechaRetiro" IS NOT NULL
+                      AND "FechaCierre" IS NOT NULL
+                      AND "FechaCierre" < "FechaRetiro"
+                      AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS registros_excluidos_fecha_futura
+
+            FROM base;
+        """
+
+        # Evolución mensual: usa un año propio para la gráfica.
+        # Azul: procesos iniciados por RRLL.
+        # Verde: procesos enviados a Nómina por RRLL.
+        query_gestion_mensual = """
+            WITH meses AS (
+                SELECT generate_series(1, 12)::int AS numero_mes
+            ),
+            iniciados AS (
+                SELECT
+                    EXTRACT(
+                        MONTH FROM COALESCE(
+                            rl."FechaProceso",
+                            rl."FechaCreacion"
+                        )
+                    )::int AS numero_mes,
+                    COUNT(*)::int AS cantidad
+                FROM public."RetiroLaboral" rl
+                WHERE EXTRACT(
+                    YEAR FROM COALESCE(
+                        rl."FechaProceso",
+                        rl."FechaCreacion"
+                    )
+                ) = :anio_grafica
+                  AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+                GROUP BY 1
+            ),
+            enviados AS (
+                SELECT
+                    EXTRACT(MONTH FROM rl."FechaCierre")::int AS numero_mes,
+                    COUNT(*)::int AS cantidad
+                FROM public."RetiroLaboral" rl
+                WHERE UPPER(
+                    TRIM(COALESCE(rl."EstadoCasoRRLL", ''))
+                ) = 'ENVIADO_NOMINA'
+                  AND rl."FechaCierre" IS NOT NULL
+                  AND EXTRACT(YEAR FROM rl."FechaCierre") = :anio_grafica
+                  AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+                GROUP BY 1
+            )
+            SELECT
+                m.numero_mes,
+                CASE m.numero_mes
+                    WHEN 1 THEN 'ENERO'
+                    WHEN 2 THEN 'FEBRERO'
+                    WHEN 3 THEN 'MARZO'
+                    WHEN 4 THEN 'ABRIL'
+                    WHEN 5 THEN 'MAYO'
+                    WHEN 6 THEN 'JUNIO'
+                    WHEN 7 THEN 'JULIO'
+                    WHEN 8 THEN 'AGOSTO'
+                    WHEN 9 THEN 'SEPTIEMBRE'
+                    WHEN 10 THEN 'OCTUBRE'
+                    WHEN 11 THEN 'NOVIEMBRE'
+                    WHEN 12 THEN 'DICIEMBRE'
+                END AS mes,
+                COALESCE(i.cantidad, 0)::int AS procesos_iniciados,
+                COALESCE(e.cantidad, 0)::int AS enviados_nomina
+            FROM meses m
+            LEFT JOIN iniciados i ON i.numero_mes = m.numero_mes
+            LEFT JOIN enviados e ON e.numero_mes = m.numero_mes
+            ORDER BY m.numero_mes;
+        """
+
+        query_recientes = cte_base + """
+            SELECT
+                "IdRetiroLaboral",
+                "Nombres",
+                "Apellidos",
+                "NumeroIdentificacion",
+                sede AS sede_cliente,
+                motivo AS motivo_retiro,
+                tipificacion AS tipificacion_retiro,
+                estado AS "EstadoCasoRRLL",
+                "FechaProceso",
+                "FechaCierre",
+                fecha_referencia
+            FROM base
+            ORDER BY fecha_referencia DESC NULLS LAST,
+                     "IdRetiroLaboral" DESC
             LIMIT 10;
-        """)
+        """
+
+        query_anios = """
+            SELECT DISTINCT anio
+            FROM (
+                SELECT EXTRACT(
+                    YEAR FROM COALESCE(
+                        "FechaProceso",
+                        "FechaCreacion",
+                        "FechaRetiro"
+                    )
+                )::int AS anio
+                FROM public."RetiroLaboral"
+
+                UNION
+
+                SELECT EXTRACT(YEAR FROM "FechaCierre")::int AS anio
+                FROM public."RetiroLaboral"
+                WHERE "FechaCierre" IS NOT NULL
+
+                UNION
+
+                SELECT EXTRACT(YEAR FROM "FechaRetiro")::int AS anio
+                FROM public."RetiroLaboral"
+                WHERE "FechaRetiro" IS NOT NULL
+            ) anios
+            WHERE anio IS NOT NULL
+            ORDER BY anio DESC;
+        """
+
+        query_clientes = """
+            SELECT
+                c."IdCliente" AS id_cliente,
+                c."Nombre" AS cliente
+            FROM public."Cliente" c
+            WHERE NULLIF(TRIM(COALESCE(c."Nombre", '')), '') IS NOT NULL
+            ORDER BY c."Nombre";
+        """
+
+        totales = primera_fila(query_totales)
 
         return {
             "success": True,
             "message": "Indicadores RRLL consultados correctamente.",
             "data": {
-                "filtros": {"anio": anio, "mes": mes},
-                "totales": dict(db.execute(query_totales, params).mappings().first()),
-                "estados": [dict(r) for r in db.execute(query_estados, params).mappings().all()],
-                "motivos": [dict(r) for r in db.execute(query_motivos, params).mappings().all()],
-                "tipificaciones": [dict(r) for r in db.execute(query_tipificaciones, params).mappings().all()],
-                "documentos": [dict(r) for r in db.execute(query_documentos, params).mappings().all()],
-                "retiros_recientes": [dict(r) for r in db.execute(query_recientes, params).mappings().all()],
-            }
+                "filtros": {
+                    "anio": anio_consulta,
+                    "mes": mes,
+                    "id_cliente": id_cliente,
+                    "tipo_periodo": tipo_periodo,
+                    "anio_grafica": anio_grafica_consulta,
+                    "anios_disponibles": [
+                        fila["anio"]
+                        for fila in db.execute(
+                            text(query_anios)
+                        ).mappings().all()
+                    ],
+                    "clientes": [
+                        dict(fila)
+                        for fila in db.execute(
+                            text(query_clientes)
+                        ).mappings().all()
+                    ],
+                },
+                "totales": totales,
+                "estados": lista_filas(query_estados),
+                "sedes": lista_filas(query_sedes),
+                "motivos": lista_filas(query_motivos),
+                "tipificaciones": lista_filas(query_tipificaciones),
+                "motivos_por_sede": lista_filas(query_motivos_sede),
+                "tipificaciones_por_sede": lista_filas(
+                    query_tipificaciones_sede
+                ),
+                "entrevistas": lista_filas(query_entrevistas),
+                "tiempo_gestion_rrll": primera_fila(query_tiempo_rrll),
+                "gestion_mensual": [
+                    dict(fila)
+                    for fila in db.execute(
+                        text(query_gestion_mensual),
+                        params
+                    ).mappings().all()
+                ],
+                "retiros_recientes": lista_filas(query_recientes),
+            },
         }
 
+    except HTTPException:
+        raise
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error consultando dashboard RRLL: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error consultando indicadores RRLL: {str(e)}"
+        )
 
 @router.get("/{id_retiro_laboral}")
 def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_db)):
@@ -945,4 +1370,3 @@ def descargar_entrevista_retiro_carpeta_digital(
             status_code=500,
             detail=f"Error al descargar entrevista de retiro: {str(e)}"
         )
-    
