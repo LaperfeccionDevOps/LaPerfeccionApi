@@ -1,6 +1,8 @@
 from pathlib import Path
 from datetime import datetime
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches
 from sqlalchemy import text
 import re
 
@@ -19,6 +21,8 @@ TEMPLATE_PAQUETE_RETIRO = BASE_DIR / "templates" / "rrll" / "paquete" / "paquete
 TIPO_DOC_PAQUETE_RETIRO = 10
 
 TEMPLATE_PAQUETE_RETIRO_VOLUNTARIO = BASE_DIR / "templates" / "rrll" / "paquete" / "paquete_retiro_voluntario.docx"
+
+FIRMA_YENY = BASE_DIR / "assets" / "comunicaciones" / "FIRMA_YENY.png"
 
 # ✅ RUTA CORRECTA:
 # cada documento generado debe quedar dentro de:
@@ -63,6 +67,120 @@ def _replace_text_in_table(table, replacements: dict):
             for paragraph in cell.paragraphs:
                 _replace_text_in_paragraph(paragraph, replacements)
 
+
+
+def _paragraph_has_image(paragraph) -> bool:
+    """Indica si el párrafo contiene una imagen incrustada."""
+    return bool(
+        paragraph._p.xpath(".//w:drawing")
+        or paragraph._p.xpath(".//w:pict")
+    )
+
+
+def _remove_images_from_paragraph(paragraph):
+    """Elimina únicamente las imágenes contenidas en el párrafo indicado."""
+    for drawing in paragraph._p.xpath(".//w:drawing"):
+        parent = drawing.getparent()
+        if parent is not None:
+            parent.remove(drawing)
+
+    for pict in paragraph._p.xpath(".//w:pict"):
+        parent = pict.getparent()
+        if parent is not None:
+            parent.remove(pict)
+
+
+def _clear_paragraph(paragraph):
+    """Limpia el contenido del párrafo conservando su posición en la plantilla."""
+    for child in list(paragraph._p):
+        paragraph._p.remove(child)
+
+
+def _iter_document_paragraph_groups(doc):
+    """
+    Devuelve grupos de párrafos del cuerpo y de las tablas para poder
+    encontrar la firma sin modificar logos, encabezados u otras imágenes.
+    """
+    yield doc.paragraphs
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                yield cell.paragraphs
+
+
+def _insertar_firma_yeny(doc, modo_compacto: bool = False):
+    """
+    Reemplaza los placeholders de nombre/cargo por la imagen completa de Yeny.
+    Si existe una firma vieja inmediatamente antes de los placeholders,
+    elimina solamente esa imagen y conserva el resto de la plantilla.
+    """
+    if not FIRMA_YENY.exists():
+        raise FileNotFoundError(f"No se encontró la firma de Yeny: {FIRMA_YENY}")
+
+    firma_insertada = False
+
+    for paragraphs in _iter_document_paragraph_groups(doc):
+        for index, paragraph in enumerate(paragraphs):
+            if "{{NOMBRE_ANALISTA}}" not in paragraph.text:
+                continue
+
+            # Busca hacia atrás únicamente la imagen más cercana a la firma.
+            for previous_index in range(index - 1, max(-1, index - 4), -1):
+                previous_paragraph = paragraphs[previous_index]
+                if _paragraph_has_image(previous_paragraph):
+                    _remove_images_from_paragraph(previous_paragraph)
+                    break
+
+            _clear_paragraph(paragraph)
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+            if modo_compacto:
+                # Solo para la carta de finalización: evita que Word envíe
+                # todo el bloque de firma a una segunda hoja.
+                paragraph.paragraph_format.keep_together = False
+                paragraph.paragraph_format.keep_with_next = False
+                paragraph.paragraph_format.space_before = 0
+                paragraph.paragraph_format.space_after = 0
+                ancho_firma = Inches(2.10)
+            else:
+                # Se conserva exactamente el formato que ya quedó validado
+                # para primer llamado, segundo llamado y paquetes de retiro.
+                paragraph.paragraph_format.keep_together = True
+                paragraph.paragraph_format.keep_with_next = True
+                ancho_firma = Inches(2.35)
+
+            run = paragraph.add_run()
+            run.add_picture(str(FIRMA_YENY), width=ancho_firma)
+
+            texto_firma = paragraph.add_run(
+                "\nYENY CUESTO"
+                "\nANALISTA TALENTO HUMANO"
+                "\nAseos La Perfección S.A.S."
+            )
+            texto_firma.bold = True
+
+            firma_insertada = True
+
+            # El cargo ya viene dentro de la nueva imagen.
+            if index + 1 < len(paragraphs):
+                next_paragraph = paragraphs[index + 1]
+                if "{{CARGO_ANALISTA}}" in next_paragraph.text:
+                    _clear_paragraph(next_paragraph)
+
+                    # En algunas plantillas aparece también el nombre de la empresa
+                    # debajo del cargo. Se retira para dejar únicamente el bloque
+                    # completo de la firma nueva.
+                    if index + 2 < len(paragraphs):
+                        company_paragraph = paragraphs[index + 2]
+                        if company_paragraph.text.strip().upper() == "ASEOS LA PERFECCIÓN S.A.S.":
+                            _clear_paragraph(company_paragraph)
+
+    if not firma_insertada:
+        raise ValueError(
+            "No se encontró el placeholder {{NOMBRE_ANALISTA}} "
+            "en la plantilla seleccionada."
+        )
 
 def _get_output_dir_for_retiro(id_retiro_laboral: int) -> Path:
     output_dir = OUTPUT_BASE_DIR / str(id_retiro_laboral)
@@ -127,6 +245,7 @@ def generar_primer_llamado(db, id_retiro_laboral: int):
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_PRIMER_LLAMADO))
+    _insertar_firma_yeny(doc)
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -147,8 +266,6 @@ def generar_primer_llamado(db, id_retiro_laboral: int):
         "{{CARGO}}": _upper_text(datos.get("Cargo", "")),
         "{{CIUDAD}}": "CIUDAD",
         "{{FECHA_AUSENCIA}}": fecha_ausencia,
-        "{{NOMBRE_ANALISTA}}": "YENY CUESTO",
-        "{{CARGO_ANALISTA}}": "ANALISTA TALENTO HUMANO",
         "{{ASUNTO}}": "PRIMER LLAMADO ABANDONO INASISTENCIA AL CARGO",
     }
 
@@ -169,6 +286,7 @@ def generar_segundo_llamado(db, id_retiro_laboral: int):
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_SEGUNDO_LLAMADO))
+    _insertar_firma_yeny(doc)
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -189,8 +307,6 @@ def generar_segundo_llamado(db, id_retiro_laboral: int):
         "{{CARGO}}": _upper_text(datos.get("Cargo", "")),
         "{{CIUDAD}}": "CIUDAD",
         "{{FECHA_AUSENCIA}}": fecha_ausencia,
-        "{{NOMBRE_ANALISTA}}": "YENY CUESTO",
-        "{{CARGO_ANALISTA}}": "ANALISTA TALENTO HUMANO",
         "{{ASUNTO}}": "SEGUNDO LLAMADO ABANDONO INASISTENCIA AL CARGO",
     }
 
@@ -211,6 +327,7 @@ def generar_carta_finalizacion(db, id_retiro_laboral: int):
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
     doc = Document(str(TEMPLATE_CARTA_FINALIZACION))
+    _insertar_firma_yeny(doc, modo_compacto=True)
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -231,8 +348,6 @@ def generar_carta_finalizacion(db, id_retiro_laboral: int):
         "{{CARGO}}": _upper_text(datos.get("Cargo", "")),
         "{{CIUDAD}}": "CIUDAD",
         "{{FECHA_AUSENCIA}}": fecha_ausencia,
-        "{{NOMBRE_ANALISTA}}": "YENY CUESTO",
-        "{{CARGO_ANALISTA}}": "ANALISTA TALENTO HUMANO",
         "{{ASUNTO}}": "CARTA DE FINALIZACIÓN DEL CONTRATO",
     }
 
@@ -277,6 +392,8 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
         print("DEBUG PAQUETE: usando plantilla NORMAL")
         doc = Document(str(TEMPLATE_PAQUETE_RETIRO))
 
+    _insertar_firma_yeny(doc)
+
     fecha_fin = datos.get("FechaAusencia")
     if fecha_fin:
         try:
@@ -296,8 +413,6 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
         "{{TELEFONO}}": _upper_text(datos.get("Telefono", "")),
         "{{CARGO}}": _upper_text(datos.get("Cargo", "")),
         "{{CIUDAD}}": "CIUDAD",
-        "{{NOMBRE_ANALISTA}}": "YENY CUESTO",
-        "{{CARGO_ANALISTA}}": "ANALISTA TALENTO HUMANO",
     }
 
     for paragraph in doc.paragraphs:

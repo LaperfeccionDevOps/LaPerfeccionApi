@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 from collections import Counter
 
@@ -19,6 +19,409 @@ router = APIRouter(
     prefix="/api/rrll-excel",
     tags=["RRLL Excel"]
 )
+
+
+def _quote_identifier(identifier: str) -> str:
+    """
+    Protege nombres de tablas y columnas obtenidos desde information_schema.
+    No recibe valores escritos por el usuario.
+    """
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _obtener_columnas_tabla(db: Session, nombre_tabla: str) -> dict:
+    """
+    Retorna las columnas reales de una tabla pública, conservando mayúsculas
+    y minúsculas. La llave del diccionario queda normalizada en minúsculas.
+    """
+    filas = db.execute(
+        text("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :nombre_tabla
+        """),
+        {"nombre_tabla": nombre_tabla},
+    ).mappings().all()
+
+    return {
+        str(fila["column_name"]).lower(): str(fila["column_name"])
+        for fila in filas
+    }
+
+
+def _buscar_columna(columnas: dict, candidatos: list[str]):
+    for candidato in candidatos:
+        columna_real = columnas.get(str(candidato).lower())
+        if columna_real:
+            return columna_real
+    return None
+
+
+def _normalizar_numero_identificacion(valor) -> str:
+    return str(valor or "").strip().replace(".", "").replace(" ", "")
+
+
+def _convertir_a_fecha(valor):
+    """
+    Convierte fechas provenientes de PostgreSQL o cadenas comunes a date.
+    Si el valor no es válido, retorna None.
+    """
+    if valor is None or valor == "":
+        return None
+
+    if isinstance(valor, datetime):
+        return valor.date()
+
+    if isinstance(valor, date):
+        return valor
+
+    texto_fecha = str(valor).strip()
+    if not texto_fecha:
+        return None
+
+    formatos = (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d/%m/%Y",
+    )
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(texto_fecha[:19], formato).date()
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(texto_fecha.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _completar_total_tiempo_trabajo(resultados):
+    """
+    Conserva el total que ya venga calculado por la función SQL.
+
+    Solo cuando está vacío y existen fecha de ingreso y fecha de retiro,
+    calcula los días transcurridos como:
+
+        fecha_retiro - fecha_ingreso
+
+    Ejemplo:
+        2026-07-10 a 2026-07-11 = 1 día.
+
+    No actualiza la base de datos.
+    """
+    resultados_mutables = [dict(row) for row in resultados]
+
+    for row in resultados_mutables:
+        total_actual = row.get("total_tiempo_de_trabajo")
+
+        if total_actual not in (None, ""):
+            continue
+
+        fecha_ingreso = _convertir_a_fecha(row.get("fecha_ingreso"))
+        fecha_retiro = _convertir_a_fecha(row.get("fecha_retiro"))
+
+        if not fecha_ingreso or not fecha_retiro:
+            continue
+
+        dias_trabajados = (fecha_retiro - fecha_ingreso).days
+
+        if dias_trabajados >= 0:
+            row["total_tiempo_de_trabajo"] = dias_trabajados
+
+    return resultados_mutables
+
+
+def _completar_fechas_ingreso_migrados(db: Session, resultados):
+    """
+    Completa únicamente las fechas de ingreso que la función principal dejó
+    vacías. Prioridad:
+
+    1. ContratacionBasica.
+    2. HistorialLaboral, incluyendo registros ACTIVO MIGRADO.
+    3. Tabla histórica migracionactivossynergy, si existe y contiene columnas
+       identificables de documento y fecha de ingreso.
+
+    No modifica información en base de datos.
+    """
+    resultados_mutables = [dict(row) for row in resultados]
+
+    numeros_faltantes = {
+        _normalizar_numero_identificacion(row.get("numero_identificacion"))
+        for row in resultados_mutables
+        if not row.get("fecha_ingreso")
+        and _normalizar_numero_identificacion(row.get("numero_identificacion"))
+    }
+
+    if not numeros_faltantes:
+        return resultados_mutables
+
+    fechas_por_documento = {}
+
+    columnas_rp = _obtener_columnas_tabla(db, "RegistroPersonal")
+    rp_id = _buscar_columna(columnas_rp, ["IdRegistroPersonal"])
+    rp_documento = _buscar_columna(
+        columnas_rp,
+        ["NumeroIdentificacion", "NumeroDocumento", "Documento"],
+    )
+
+    if rp_id and rp_documento:
+        fuentes_relacionadas = [
+            (
+                "ContratacionBasica",
+                ["IdRegistroPersonal"],
+                ["FechaIngreso", "FechaInicio", "FechaIngresoEmpresa"],
+                None,
+            ),
+            (
+                "HistorialLaboral",
+                ["IdRegistroPersonal"],
+                ["FechaIngreso", "FechaInicio", "FechaVinculacion"],
+                ["FechaActualizacion", "FechaCreacion", "IdHistorialLaboral"],
+            ),
+        ]
+
+        for nombre_tabla, candidatos_fk, candidatos_fecha, candidatos_orden in fuentes_relacionadas:
+            columnas = _obtener_columnas_tabla(db, nombre_tabla)
+            if not columnas:
+                continue
+
+            fk = _buscar_columna(columnas, candidatos_fk)
+            fecha = _buscar_columna(columnas, candidatos_fecha)
+
+            if not fk or not fecha:
+                continue
+
+            columna_orden = _buscar_columna(columnas, candidatos_orden or [])
+            expresion_documento = (
+                "REPLACE(REPLACE(TRIM(CAST("
+                f"rp.{_quote_identifier(rp_documento)} AS TEXT"
+                ")), '.', ''), ' ', '')"
+            )
+
+            columna_orden_real = columna_orden or fecha
+
+            orden_sql = (
+                "ORDER BY "
+                f"{expresion_documento}, "
+                f"fuente.{_quote_identifier(columna_orden_real)} DESC NULLS LAST"
+            )
+
+            consulta = text(f"""
+                SELECT DISTINCT ON (
+                    {expresion_documento}
+                )
+                    {expresion_documento} AS numero_identificacion,
+                    fuente.{_quote_identifier(fecha)} AS fecha_ingreso
+                FROM public.{_quote_identifier("RegistroPersonal")} rp
+                INNER JOIN public.{_quote_identifier(nombre_tabla)} fuente
+                    ON fuente.{_quote_identifier(fk)}
+                     = rp.{_quote_identifier(rp_id)}
+                WHERE REPLACE(REPLACE(TRIM(CAST(
+                        rp.{_quote_identifier(rp_documento)} AS TEXT
+                    )), '.', ''), ' ', '') = ANY(:numeros)
+                  AND fuente.{_quote_identifier(fecha)} IS NOT NULL
+                {orden_sql}
+            """)
+
+            filas = db.execute(
+                consulta,
+                {"numeros": list(numeros_faltantes)},
+            ).mappings().all()
+
+            for fila in filas:
+                numero = _normalizar_numero_identificacion(
+                    fila.get("numero_identificacion")
+                )
+                if numero and numero not in fechas_por_documento:
+                    fechas_por_documento[numero] = fila.get("fecha_ingreso")
+
+    # Último respaldo: fuente histórica usada en la migración.
+    columnas_migracion = _obtener_columnas_tabla(db, "migracionactivossynergy")
+
+    if columnas_migracion:
+        columna_documento = _buscar_columna(
+            columnas_migracion,
+            [
+                "NumeroIdentificacion",
+                "NumeroDocumento",
+                "Documento",
+                "Cedula",
+                "Identificacion",
+                "CC",
+            ],
+        )
+        columna_fecha = _buscar_columna(
+            columnas_migracion,
+            [
+                "FechaIngreso",
+                "FechaInicio",
+                "FechaVinculacion",
+                "FechaIngresoEmpresa",
+                "FechaDeIngreso",
+            ],
+        )
+
+        if columna_documento and columna_fecha:
+            consulta_migracion = text(f"""
+                SELECT DISTINCT ON (
+                    REPLACE(REPLACE(TRIM(CAST(
+                        {_quote_identifier(columna_documento)} AS TEXT
+                    )), '.', ''), ' ', '')
+                )
+                    REPLACE(REPLACE(TRIM(CAST(
+                        {_quote_identifier(columna_documento)} AS TEXT
+                    )), '.', ''), ' ', '') AS numero_identificacion,
+                    {_quote_identifier(columna_fecha)} AS fecha_ingreso
+                FROM public.{_quote_identifier("migracionactivossynergy")}
+                WHERE REPLACE(REPLACE(TRIM(CAST(
+                        {_quote_identifier(columna_documento)} AS TEXT
+                    )), '.', ''), ' ', '') = ANY(:numeros)
+                  AND {_quote_identifier(columna_fecha)} IS NOT NULL
+                ORDER BY
+                    REPLACE(REPLACE(TRIM(CAST(
+                        {_quote_identifier(columna_documento)} AS TEXT
+                    )), '.', ''), ' ', ''),
+                    {_quote_identifier(columna_fecha)} DESC NULLS LAST
+            """)
+
+            filas_migracion = db.execute(
+                consulta_migracion,
+                {"numeros": list(numeros_faltantes)},
+            ).mappings().all()
+
+            for fila in filas_migracion:
+                numero = _normalizar_numero_identificacion(
+                    fila.get("numero_identificacion")
+                )
+                if numero and numero not in fechas_por_documento:
+                    fechas_por_documento[numero] = fila.get("fecha_ingreso")
+
+    for row in resultados_mutables:
+        if row.get("fecha_ingreso"):
+            continue
+
+        numero = _normalizar_numero_identificacion(
+            row.get("numero_identificacion")
+        )
+        fecha_encontrada = fechas_por_documento.get(numero)
+
+        if fecha_encontrada:
+            row["fecha_ingreso"] = fecha_encontrada
+
+    return resultados_mutables
+
+
+def _aplicar_descripcion_validada_rrll(db: Session, resultados):
+    """
+    Reemplaza únicamente la descripción específica del retiro cuando RRLL
+    haya registrado una validación oficial.
+
+    Prioridad de salida:
+    1. RetiroLaboral.DescripcionRetiroRRLL, cuando tenga contenido.
+    2. La descripción original ya devuelta por fn_reporte_retiros_excel.
+
+    No modifica información en la base de datos.
+    """
+    resultados_mutables = [dict(row) for row in resultados]
+
+    numeros = {
+        _normalizar_numero_identificacion(row.get("numero_identificacion"))
+        for row in resultados_mutables
+        if _normalizar_numero_identificacion(row.get("numero_identificacion"))
+    }
+
+    if not numeros:
+        return resultados_mutables
+
+    filas_validacion = db.execute(
+        text("""
+            SELECT
+                REPLACE(
+                    REPLACE(
+                        TRIM(CAST(rp."NumeroIdentificacion" AS TEXT)),
+                        '.',
+                        ''
+                    ),
+                    ' ',
+                    ''
+                ) AS numero_identificacion,
+                rl."FechaRetiro" AS fecha_retiro,
+                rl."DescripcionRetiroRRLL" AS descripcion_retiro_rrll,
+                rl."IdRetiroLaboral" AS id_retiro_laboral
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            WHERE REPLACE(
+                    REPLACE(
+                        TRIM(CAST(rp."NumeroIdentificacion" AS TEXT)),
+                        '.',
+                        ''
+                    ),
+                    ' ',
+                    ''
+                ) = ANY(:numeros)
+              AND NULLIF(
+                    BTRIM(COALESCE(rl."DescripcionRetiroRRLL", '')),
+                    ''
+                  ) IS NOT NULL
+            ORDER BY
+                numero_identificacion,
+                rl."FechaRetiro" DESC NULLS LAST,
+                rl."IdRetiroLaboral" DESC
+        """),
+        {"numeros": list(numeros)},
+    ).mappings().all()
+
+    validacion_por_documento_y_fecha = {}
+    validacion_mas_reciente_por_documento = {}
+
+    for fila in filas_validacion:
+        numero = _normalizar_numero_identificacion(
+            fila.get("numero_identificacion")
+        )
+        descripcion = str(
+            fila.get("descripcion_retiro_rrll") or ""
+        ).strip()
+
+        if not numero or not descripcion:
+            continue
+
+        fecha_retiro = _convertir_a_fecha(fila.get("fecha_retiro"))
+
+        if fecha_retiro:
+            clave = (numero, fecha_retiro)
+            if clave not in validacion_por_documento_y_fecha:
+                validacion_por_documento_y_fecha[clave] = descripcion
+
+        if numero not in validacion_mas_reciente_por_documento:
+            validacion_mas_reciente_por_documento[numero] = descripcion
+
+    for row in resultados_mutables:
+        numero = _normalizar_numero_identificacion(
+            row.get("numero_identificacion")
+        )
+        fecha_retiro = _convertir_a_fecha(row.get("fecha_retiro"))
+
+        descripcion_rrll = None
+
+        if numero and fecha_retiro:
+            descripcion_rrll = validacion_por_documento_y_fecha.get(
+                (numero, fecha_retiro)
+            )
+
+        if not descripcion_rrll and numero:
+            descripcion_rrll = validacion_mas_reciente_por_documento.get(
+                numero
+            )
+
+        if descripcion_rrll:
+            row["descripcion_motivo_especifico_del_retiro"] = descripcion_rrll
+
+    return resultados_mutables
 
 
 @router.get("/exportar-retiros")
@@ -152,6 +555,19 @@ def exportar_excel_retiros(
                 "fecha_fin": fecha_fin
             }
         ).mappings().all()
+
+        # Completa solo las fechas de ingreso faltantes, especialmente para
+        # trabajadores históricos provenientes de la migración.
+        resultados = _completar_fechas_ingreso_migrados(db, resultados)
+
+        # Si el total de tiempo viene vacío, lo calcula usando las fechas ya
+        # consolidadas. Los valores existentes se conservan sin cambios.
+        resultados = _completar_total_tiempo_trabajo(resultados)
+
+        # Usa primero la validación oficial de RRLL cuando exista.
+        # Si RRLL no registró una ampliación, conserva la respuesta original
+        # devuelta por fn_reporte_retiros_excel.
+        resultados = _aplicar_descripcion_validada_rrll(db, resultados)
 
         # =========================
         # TIPIFICACIONES PARA LISTA
