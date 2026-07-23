@@ -1255,7 +1255,7 @@ LIMIT 1;
                 LIMIT 1
             ) adj ON true
             WHERE COALESCE(tdr."Activo", true) = true
-             AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10, 15, 16)
+            AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10, 15, 16, 17, 18)
             ORDER BY tdr."IdTipoDocumentoRetiro";
         """)
 
