@@ -392,29 +392,45 @@ def guardar_observacion_nomina(
 def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     try:
         query_totales = text(f"""
+            WITH clasificados AS (
+                SELECT
+                    rl."IdRetiroLaboral",
+                    CASE
+                        WHEN rp."IdEstadoProceso" = 35
+                            THEN 'RETIRADO'
+
+                        WHEN rp."IdEstadoProceso" = 32
+                          OR UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN (
+                              'ENVIADO_NOMINA',
+                              'CERRADO'
+                          )
+                            THEN 'CERRADO'
+
+                        WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) = 'ABIERTO'
+                            THEN 'ABIERTO'
+
+                        ELSE 'OTRO'
+                    END AS grupo
+                FROM public."RetiroLaboral" rl
+                INNER JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                WHERE {FILTRO_NOMINA_SQL}
+            )
             SELECT
-               COUNT(*) FILTER (
-    WHERE rp."IdEstadoProceso" = 32
-       OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
-            ) AS cerrados,
+                COUNT(*) FILTER (
+                    WHERE grupo = 'CERRADO'
+                )::int AS cerrados,
 
-            COUNT(*) FILTER (
-                WHERE rp."IdEstadoProceso" <> 35
-                AND NOT (
-                    rp."IdEstadoProceso" = 32
-                    OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
-                )
-            ) AS abiertos,
+                COUNT(*) FILTER (
+                    WHERE grupo = 'ABIERTO'
+                )::int AS abiertos,
 
-            COUNT(*) FILTER (
-                WHERE rp."IdEstadoProceso" = 35
-            ) AS retirados,
+                COUNT(*) FILTER (
+                    WHERE grupo = 'RETIRADO'
+                )::int AS retirados,
 
-            COUNT(*) AS total
-            FROM public."RetiroLaboral" rl
-            INNER JOIN public."RegistroPersonal" rp
-                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE {FILTRO_NOMINA_SQL};
+                COUNT(*)::int AS total
+            FROM clasificados;
         """)
 
         totales_row = db.execute(query_totales).mappings().first()
@@ -674,6 +690,9 @@ def finalizar_retiro_nomina(
                     ELSE false
                 END AS "Adjuntado"
             FROM public."TipoDocumentoRetiro" tdr
+            -- ÚNICOS DOCUMENTOS OBLIGATORIOS PARA FINALIZAR:
+            -- 15 = Retiro ARL
+            -- 16 = Liquidación de contrato
             WHERE tdr."IdTipoDocumentoRetiro" IN (15, 16)
             ORDER BY tdr."IdTipoDocumentoRetiro";
         """)
@@ -896,8 +915,28 @@ def listar_adjuntos_nomina_retiro(
             FROM public."TipoDocumentoRetiro" tdr
             LEFT JOIN ultimo_adjunto ua
                 ON ua."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
-            WHERE tdr."IdTipoDocumentoRetiro" IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
-            ORDER BY tdr."IdTipoDocumentoRetiro";
+            WHERE
+                tdr."IdTipoDocumentoRetiro" IN (1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
+                OR UPPER(TRIM(tdr."Nombre")) IN (
+                    'SOPORTE NÓMINA',
+                    'SOPORTE NOMINA',
+                    'AUTORIZACIÓN DE DESCUENTO',
+                    'AUTORIZACION DE DESCUENTO'
+                )
+            ORDER BY
+                CASE
+                    WHEN tdr."IdTipoDocumentoRetiro" BETWEEN 1 AND 16
+                        THEN tdr."IdTipoDocumentoRetiro"
+                    WHEN UPPER(TRIM(tdr."Nombre")) IN ('SOPORTE NÓMINA', 'SOPORTE NOMINA')
+                        THEN 17
+                    WHEN UPPER(TRIM(tdr."Nombre")) IN (
+                        'AUTORIZACIÓN DE DESCUENTO',
+                        'AUTORIZACION DE DESCUENTO'
+                    )
+                        THEN 18
+                    ELSE 99
+                END,
+                tdr."IdTipoDocumentoRetiro";
         """)
 
         rows = db.execute(
@@ -925,15 +964,51 @@ async def subir_adjunto_nomina_retiro(
     db: Session = Depends(get_db)
 ):
     try:
+        query_tipo_documento = text("""
+            SELECT
+                "IdTipoDocumentoRetiro",
+                "Nombre"
+            FROM public."TipoDocumentoRetiro"
+            WHERE "IdTipoDocumentoRetiro" = :id_tipo_documento_retiro
+            LIMIT 1;
+        """)
+
+        tipo_documento = db.execute(
+            query_tipo_documento,
+            {"id_tipo_documento_retiro": IdTipoDocumentoRetiro}
+        ).mappings().first()
+
+        if not tipo_documento:
+            raise HTTPException(
+                status_code=404,
+                detail="El tipo de documento de retiro no existe."
+            )
+
+        nombre_tipo_documento = str(tipo_documento["Nombre"] or "").strip()
+        nombre_normalizado = (
+            nombre_tipo_documento
+            .upper()
+            .replace("Á", "A")
+            .replace("É", "E")
+            .replace("Í", "I")
+            .replace("Ó", "O")
+            .replace("Ú", "U")
+        )
+
         documentos_permitidos = {
-            15: "Retiro ARL",
-            16: "Liquidación de contrato",
+            "RETIRO ARL",
+            "LIQUIDACION DE CONTRATO",
+            "SOPORTE NOMINA",
+            "AUTORIZACION DE DESCUENTO",
         }
 
-        if IdTipoDocumentoRetiro not in documentos_permitidos:
+        if nombre_normalizado not in documentos_permitidos:
             raise HTTPException(
                 status_code=400,
-                detail="Nómina solo puede adjuntar Retiro ARL o Liquidación de contrato."
+                detail=(
+                    "Nómina solo puede adjuntar Retiro ARL, Liquidación de contrato, "
+                    "Soporte Nómina o Autorización de descuento."
+                )
             )
 
         query_retiro = text("""
@@ -1055,7 +1130,7 @@ async def subir_adjunto_nomina_retiro(
                 "IdRetiroLaboralAdjunto": nuevo["IdRetiroLaboralAdjunto"],
                 "IdRetiroLaboral": id_retiro_laboral,
                 "IdTipoDocumentoRetiro": IdTipoDocumentoRetiro,
-                "NombreDocumento": documentos_permitidos[IdTipoDocumentoRetiro],
+                "NombreDocumento": nombre_tipo_documento,
                 "NombreArchivo": nombre_archivo,
             },
         }
