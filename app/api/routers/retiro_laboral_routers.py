@@ -269,13 +269,33 @@ def dashboard_indicadores_rrll(
                     rp."Nombres",
                     rp."Apellidos",
                     rp."NumeroIdentificacion",
-                    EXISTS (
-                        SELECT 1
-                        FROM public."EntrevistaRetiro" er
-                        WHERE er."IdRetiroLaboral" = rl."IdRetiroLaboral"
-                          AND COALESCE(er."PdfGenerado", false) = true
-                          AND NULLIF(TRIM(COALESCE(er."RutaPdf", '')), '') IS NOT NULL
-                    ) AS entrevista_realizada
+                    CASE
+                        /*
+                         * Regla actual del negocio:
+                         * - IdTipificacionRetiro = 1 corresponde a ABANDONO.
+                         * - IdMotivoRetiro = 2 corresponde al motivo catalogado como
+                         *   TERMINACIÓN DE CONTRATO CON JUSTA CAUSA/ABANDONO DE CARGO.
+                         *
+                         * Estos procesos no requieren entrevista de retiro y se muestran
+                         * en la tarjeta "No aplica por abandono de cargo".
+                         */
+                        WHEN rl."IdTipificacionRetiro" = 1
+                             OR rl."IdMotivoRetiro" = 2
+                            THEN true
+                        ELSE false
+                    END AS es_abandono,
+
+                    CASE
+                        WHEN rl."IdTipificacionRetiro" = 1
+                             OR rl."IdMotivoRetiro" = 2
+                            THEN false
+                        ELSE EXISTS (
+                            SELECT 1
+                            FROM public."EntrevistaRetiro" er
+                            WHERE er."IdRetiroLaboral"
+                                  = rl."IdRetiroLaboral"
+                        )
+                    END AS entrevista_realizada
                 FROM public."RetiroLaboral" rl
                 LEFT JOIN public."RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
@@ -320,18 +340,35 @@ def dashboard_indicadores_rrll(
                 )::int AS abiertos_inactivos,
 
                 COUNT(*) FILTER (
-                    WHERE entrevista_realizada
+                    WHERE es_abandono
+                )::int AS entrevistas_no_aplican_abandono,
+
+                COUNT(*) FILTER (
+                    WHERE NOT es_abandono
+                )::int AS procesos_requieren_entrevista,
+
+                COUNT(*) FILTER (
+                    WHERE NOT es_abandono
+                      AND entrevista_realizada
                 )::int AS entrevistas_realizadas,
 
                 COUNT(*) FILTER (
-                    WHERE NOT entrevista_realizada
+                    WHERE NOT es_abandono
+                      AND NOT entrevista_realizada
                 )::int AS entrevistas_pendientes,
 
                 ROUND(
                     COUNT(*) FILTER (
-                        WHERE entrevista_realizada
+                        WHERE NOT es_abandono
+                          AND entrevista_realizada
                     ) * 100.0
-                    / NULLIF(COUNT(*), 0),
+                    /
+                    NULLIF(
+                        COUNT(*) FILTER (
+                            WHERE NOT es_abandono
+                        ),
+                        0
+                    ),
                     2
                 ) AS porcentaje_entrevistas
 
@@ -459,14 +496,17 @@ def dashboard_indicadores_rrll(
             FROM (
                 SELECT
                     CASE
-                        WHEN entrevista_realizada THEN 'REALIZADA'
+                        WHEN entrevista_realizada
+                            THEN 'REALIZADA'
                         ELSE 'PENDIENTE'
                     END AS estado,
                     COUNT(*)::int AS cantidad
                 FROM base
+                WHERE NOT es_abandono
                 GROUP BY
                     CASE
-                        WHEN entrevista_realizada THEN 'REALIZADA'
+                        WHEN entrevista_realizada
+                            THEN 'REALIZADA'
                         ELSE 'PENDIENTE'
                     END
             ) resumen
@@ -744,7 +784,8 @@ def actualizar_estado_retiro_laboral(
                 SELECT
                     "IdRetiroLaboral",
                     "IdRegistroPersonal",
-                    "FechaRetiro"
+                    "FechaRetiro",
+                    "IdTipificacionRetiro"
                 FROM public."RetiroLaboral"
                 WHERE "IdRetiroLaboral" = :id_retiro_laboral;
             """),
@@ -757,10 +798,29 @@ def actualizar_estado_retiro_laboral(
 
         id_registro_personal = retiro_row["IdRegistroPersonal"]
 
+        estado_destino = (
+            payload.EstadoCasoRRLL or ""
+        ).strip().upper()
+
+        # La tipificación puede permanecer vacía mientras el caso está ABIERTO,
+        # pero es obligatoria antes de enviarlo a Nómina o cerrarlo.
+        if (
+            estado_destino in ("ENVIADO_NOMINA", "CERRADO")
+            and not retiro_row["IdTipificacionRetiro"]
+        ):
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Debe seleccionar la tipificación del retiro "
+                    "antes de enviar el proceso a Nómina o cerrarlo."
+                ),
+            )
+
         fecha_cierre = payload.FechaCierre
         fecha_envio_nomina = payload.FechaEnvioNomina
 
-        if payload.EstadoCasoRRLL == "ENVIADO_NOMINA":
+        if estado_destino == "ENVIADO_NOMINA":
             fecha_cierre = payload.FechaCierre or datetime.utcnow()
             fecha_envio_nomina = None
 
