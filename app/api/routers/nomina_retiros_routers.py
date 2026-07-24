@@ -235,26 +235,48 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 rl."FechaPagoLiquidacion",
                 rl."EstadoCasoRRLL",
 
+                -- Último día laborado hasta creación del Paz y Salvo.
+                -- Esta medición se conserva en días calendario.
                 CASE
                     WHEN rl."FechaRetiro" IS NOT NULL
                      AND pso."FechaCreacion" IS NOT NULL
+                     AND DATE(pso."FechaCreacion") >= rl."FechaRetiro"
                     THEN DATE(pso."FechaCreacion") - rl."FechaRetiro"
                     ELSE NULL
                 END AS "DiasRetiroPazYSalvo",
 
+                -- Paz y Salvo hasta cierre de RRLL.
+                -- Se entrega en segundos para mostrar minutos, horas o días
+                -- sin perder la hora real del proceso.
                 CASE
                     WHEN pso."FechaCreacion" IS NOT NULL
                      AND rl."FechaCierre" IS NOT NULL
-                    THEN DATE(rl."FechaCierre") - DATE(pso."FechaCreacion")
+                     AND rl."FechaCierre" >= pso."FechaCreacion"
+                    THEN ROUND(
+                        EXTRACT(
+                            EPOCH FROM (
+                                rl."FechaCierre" - pso."FechaCreacion"
+                            )
+                        )
+                    )::bigint
                     ELSE NULL
-                END AS "DiasPazYSalvoCierreRRLL",
+                END AS "SegundosPazYSalvoCierreRRLL",
 
+                -- Cierre de RRLL hasta gestión/finalización de Nómina.
+                -- También se entrega en segundos para conservar la precisión.
                 CASE
                     WHEN rl."FechaCierre" IS NOT NULL
                      AND rl."FechaEnvioNomina" IS NOT NULL
-                    THEN DATE(rl."FechaEnvioNomina") - DATE(rl."FechaCierre")
+                     AND rl."FechaEnvioNomina" >= rl."FechaCierre"
+                    THEN ROUND(
+                        EXTRACT(
+                            EPOCH FROM (
+                                rl."FechaEnvioNomina" - rl."FechaCierre"
+                            )
+                        )
+                    )::bigint
                     ELSE NULL
-                END AS "DiasCierreRRLLNomina",
+                END AS "SegundosCierreRRLLNomina",
 
                 rp."IdEstadoProceso",
                 ep."Nombre" AS "EstadoProceso",
@@ -268,31 +290,60 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
 
                 CASE
                     WHEN rp."IdEstadoProceso" = 32
-                      OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                      OR UPPER(
+                            TRIM(
+                                COALESCE(rl."EstadoCasoRRLL", '')
+                            )
+                         ) = 'ENVIADO_NOMINA'
                     THEN true
                     ELSE false
                 END AS "PuedeGestionarNomina"
 
             FROM public."RetiroLaboral" rl
+
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            LEFT JOIN public."PazYSalvoOperaciones" pso
-                ON pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
+
+            -- Se toma un solo Paz y Salvo por retiro.
+            -- Esto evita que el mismo retiro aparezca repetido cuando
+            -- existen varios registros asociados.
+            LEFT JOIN LATERAL (
+                SELECT
+                    pso_ultimo."FechaCreacion"
+                FROM public."PazYSalvoOperaciones" pso_ultimo
+                WHERE pso_ultimo."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                ORDER BY
+                    pso_ultimo."FechaCreacion" DESC NULLS LAST
+                LIMIT 1
+            ) pso ON true
+
             LEFT JOIN public."Cliente" c
                 ON c."IdCliente" = rl."IdCliente"
+
             LEFT JOIN public."EstadoProceso" ep
                 ON ep."IdEstadoProceso" = rp."IdEstadoProceso"
+
             LEFT JOIN public."MotivoRetiro" mr
                 ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+
             LEFT JOIN public."TipificacionRetiro" tr
                 ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
+
             WHERE {FILTRO_NOMINA_SQL}
+
             ORDER BY
                 CASE
                     WHEN rp."IdEstadoProceso" = 32
-                      OR UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ENVIADO_NOMINA'
+                      OR UPPER(
+                            TRIM(
+                                COALESCE(rl."EstadoCasoRRLL", '')
+                            )
+                         ) = 'ENVIADO_NOMINA'
                     THEN 0
-                    WHEN rp."IdEstadoProceso" = 35 THEN 1
+
+                    WHEN rp."IdEstadoProceso" = 35
+                    THEN 1
+
                     ELSE 2
                 END,
                 rl."FechaCreacion" DESC;
@@ -311,7 +362,6 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al consultar retiros de nómina: {str(e)}"
         )
-
 
 @router.put("/{id_retiro_laboral}/observacion-nomina")
 def guardar_observacion_nomina(
@@ -391,31 +441,47 @@ def guardar_observacion_nomina(
 @router.get("/indicadores")
 def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     try:
+        # ============================================================
+        # 1. TOTALES POR ESTADO
+        # ============================================================
         query_totales = text(f"""
             WITH clasificados AS (
                 SELECT
                     rl."IdRetiroLaboral",
+
                     CASE
                         WHEN rp."IdEstadoProceso" = 35
-                            THEN 'RETIRADO'
+                        THEN 'RETIRADO'
 
                         WHEN rp."IdEstadoProceso" = 32
-                          OR UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN (
-                              'ENVIADO_NOMINA',
-                              'CERRADO'
-                          )
-                            THEN 'CERRADO'
+                          OR UPPER(
+                                TRIM(
+                                    COALESCE(rl."EstadoCasoRRLL", '')
+                                )
+                             ) IN (
+                                'ENVIADO_NOMINA',
+                                'CERRADO'
+                             )
+                        THEN 'CERRADO'
 
-                        WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) = 'ABIERTO'
-                            THEN 'ABIERTO'
+                        WHEN UPPER(
+                                TRIM(
+                                    COALESCE(rl."EstadoCasoRRLL", '')
+                                )
+                             ) = 'ABIERTO'
+                        THEN 'ABIERTO'
 
                         ELSE 'OTRO'
                     END AS grupo
+
                 FROM public."RetiroLaboral" rl
+
                 INNER JOIN public."RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
                 WHERE {FILTRO_NOMINA_SQL}
             )
+
             SELECT
                 COUNT(*) FILTER (
                     WHERE grupo = 'CERRADO'
@@ -430,6 +496,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                 )::int AS retirados,
 
                 COUNT(*)::int AS total
+
             FROM clasificados;
         """)
 
@@ -440,13 +507,19 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
         retirados = int(totales_row["retirados"] or 0)
         total = int(totales_row["total"] or 0)
 
+        # ============================================================
+        # 2. RETIROS POR MES
+        # ============================================================
         query_retiros_mes = text(f"""
             SELECT
-                EXTRACT(YEAR FROM fecha_base)::int AS anio,
-                EXTRACT(MONTH FROM fecha_base)::int AS mes_numero,
+                EXTRACT(YEAR FROM datos.fecha_base)::int AS anio,
+                EXTRACT(MONTH FROM datos.fecha_base)::int AS mes_numero,
                 COUNT(*)::int AS cantidad
+
             FROM (
                 SELECT
+                    rl."IdRetiroLaboral",
+
                     COALESCE(
                         rl."FechaRetiro",
                         pso."FechaCreacion",
@@ -456,16 +529,38 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                         rl."FechaProceso",
                         rl."FechaCreacion"
                     ) AS fecha_base
+
                 FROM public."RetiroLaboral" rl
+
                 INNER JOIN public."RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-                LEFT JOIN public."PazYSalvoOperaciones" pso
-                    ON pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
+
+                -- Se selecciona un único Paz y Salvo por retiro
+                -- para impedir que el gráfico mensual duplique registros.
+                LEFT JOIN LATERAL (
+                    SELECT
+                        pso_ultimo."FechaCreacion"
+                    FROM public."PazYSalvoOperaciones" pso_ultimo
+                    WHERE
+                        pso_ultimo."IdRetiroLaboral" =
+                        rl."IdRetiroLaboral"
+                    ORDER BY
+                        pso_ultimo."FechaCreacion" DESC NULLS LAST
+                    LIMIT 1
+                ) pso ON true
+
                 WHERE {FILTRO_NOMINA_SQL}
             ) datos
-            WHERE fecha_base IS NOT NULL
-            GROUP BY anio, mes_numero
-            ORDER BY anio, mes_numero;
+
+            WHERE datos.fecha_base IS NOT NULL
+
+            GROUP BY
+                EXTRACT(YEAR FROM datos.fecha_base),
+                EXTRACT(MONTH FROM datos.fecha_base)
+
+            ORDER BY
+                anio,
+                mes_numero;
         """)
 
         meses_nombre = {
@@ -483,58 +578,146 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
             12: "diciembre",
         }
 
-        retiros_por_mes_rows = db.execute(query_retiros_mes).mappings().all()
+        retiros_por_mes_rows = (
+            db.execute(query_retiros_mes)
+            .mappings()
+            .all()
+        )
 
         retiros_por_mes = [
             {
-                "mes": f"{meses_nombre.get(int(row['mes_numero']), 'sin-mes')}-{int(row['anio'])}",
+                "mes": (
+                    f"{meses_nombre.get(int(row['mes_numero']), 'sin-mes')}"
+                    f"-{int(row['anio'])}"
+                ),
                 "cantidad": int(row["cantidad"] or 0),
             }
             for row in retiros_por_mes_rows
         ]
 
+        # ============================================================
+        # 3. PROMEDIOS DE TIEMPO
+        # ============================================================
         query_promedios = text(f"""
             SELECT
-                ROUND(AVG(
-                    CASE
-                        WHEN rl."FechaRetiro" IS NOT NULL
-                         AND pso."FechaCreacion" IS NOT NULL
-                        THEN DATE(pso."FechaCreacion") - rl."FechaRetiro"
-                    END
-                ), 2) AS promedio_paz_y_salvo,
+                -- Último día laborado hasta Paz y Salvo:
+                -- se conserva en días calendario.
+                ROUND(
+                    AVG(
+                        CASE
+                            WHEN rl."FechaRetiro" IS NOT NULL
+                             AND pso."FechaCreacion" IS NOT NULL
+                             AND DATE(pso."FechaCreacion") >=
+                                 rl."FechaRetiro"
+                            THEN
+                                DATE(pso."FechaCreacion")
+                                - rl."FechaRetiro"
+                            ELSE NULL
+                        END
+                    ),
+                    2
+                ) AS promedio_paz_y_salvo_dias,
 
-                ROUND(AVG(
-                    CASE
-                        WHEN pso."FechaCreacion" IS NOT NULL
-                         AND rl."FechaCierre" IS NOT NULL
-                        THEN DATE(rl."FechaCierre") - DATE(pso."FechaCreacion")
-                    END
-                ), 2) AS promedio_rrll,
+                -- Paz y Salvo hasta cierre de RRLL:
+                -- resultado exacto en segundos.
+                ROUND(
+                    AVG(
+                        CASE
+                            WHEN pso."FechaCreacion" IS NOT NULL
+                             AND rl."FechaCierre" IS NOT NULL
+                             AND rl."FechaCierre" >=
+                                 pso."FechaCreacion"
+                            THEN EXTRACT(
+                                EPOCH FROM (
+                                    rl."FechaCierre"
+                                    - pso."FechaCreacion"
+                                )
+                            )
+                            ELSE NULL
+                        END
+                    ),
+                    0
+                ) AS promedio_rrll_segundos,
 
-                ROUND(AVG(
-                    CASE
-                        WHEN rl."FechaCierre" IS NOT NULL
-                         AND rl."FechaEnvioNomina" IS NOT NULL
-                        THEN DATE(rl."FechaEnvioNomina") - DATE(rl."FechaCierre")
-                    END
-                ), 2) AS promedio_nomina
+                -- Cierre de RRLL hasta finalización de Nómina:
+                -- resultado exacto en segundos.
+                ROUND(
+                    AVG(
+                        CASE
+                            WHEN rl."FechaCierre" IS NOT NULL
+                             AND rl."FechaEnvioNomina" IS NOT NULL
+                             AND rl."FechaEnvioNomina" >=
+                                 rl."FechaCierre"
+                            THEN EXTRACT(
+                                EPOCH FROM (
+                                    rl."FechaEnvioNomina"
+                                    - rl."FechaCierre"
+                                )
+                            )
+                            ELSE NULL
+                        END
+                    ),
+                    0
+                ) AS promedio_nomina_segundos
+
             FROM public."RetiroLaboral" rl
+
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            LEFT JOIN public."PazYSalvoOperaciones" pso
-                ON pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
+
+            -- Se usa un único Paz y Salvo por retiro para que
+            -- cada proceso participe una sola vez en el promedio.
+            LEFT JOIN LATERAL (
+                SELECT
+                    pso_ultimo."FechaCreacion"
+                FROM public."PazYSalvoOperaciones" pso_ultimo
+                WHERE
+                    pso_ultimo."IdRetiroLaboral" =
+                    rl."IdRetiroLaboral"
+                ORDER BY
+                    pso_ultimo."FechaCreacion" DESC NULLS LAST
+                LIMIT 1
+            ) pso ON true
+
             WHERE {FILTRO_NOMINA_SQL};
         """)
 
-        promedios_row = db.execute(query_promedios).mappings().first()
+        promedios_row = (
+            db.execute(query_promedios)
+            .mappings()
+            .first()
+        )
 
-        promedio_paz_y_salvo = float(promedios_row["promedio_paz_y_salvo"] or 0)
-        promedio_rrll = float(promedios_row["promedio_rrll"] or 0)
-        promedio_nomina = float(promedios_row["promedio_nomina"] or 0)
+        promedio_paz_y_salvo_dias = float(
+            promedios_row["promedio_paz_y_salvo_dias"] or 0
+        )
+
+        promedio_rrll_segundos = int(
+            promedios_row["promedio_rrll_segundos"] or 0
+        )
+
+        promedio_nomina_segundos = int(
+            promedios_row["promedio_nomina_segundos"] or 0
+        )
+
+        # Estos valores en días se conservan temporalmente por
+        # compatibilidad con el frontend actual.
+        promedio_rrll_dias = round(
+            promedio_rrll_segundos / 86400,
+            2
+        )
+
+        promedio_nomina_dias = round(
+            promedio_nomina_segundos / 86400,
+            2
+        )
 
         return {
             "success": True,
-            "message": "Indicadores de nómina retiros consultados correctamente.",
+            "message": (
+                "Indicadores de nómina retiros consultados "
+                "correctamente."
+            ),
             "data": {
                 "totales": {
                     "abiertos": abiertos,
@@ -542,17 +725,36 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
                     "retirados": retirados,
                     "total": total,
                 },
+
                 "promedios": {
-                    "pazYSalvo": promedio_paz_y_salvo,
-                    "rrll": promedio_rrll,
-                    "nomina": promedio_nomina,
-                    "operaciones": promedio_paz_y_salvo,
+                    # Valores anteriores conservados para no romper
+                    # inmediatamente el frontend actual.
+                    "pazYSalvo": promedio_paz_y_salvo_dias,
+                    "rrll": promedio_rrll_dias,
+                    "nomina": promedio_nomina_dias,
+                    "operaciones": promedio_paz_y_salvo_dias,
+
+                    # Nuevos valores exactos que utilizará el frontend.
+                    "pazYSalvoDias": promedio_paz_y_salvo_dias,
+                    "rrllSegundos": promedio_rrll_segundos,
+                    "nominaSegundos": promedio_nomina_segundos,
                 },
+
                 "distribucionEstados": [
-                    {"estado": "Abierto", "cantidad": abiertos},
-                    {"estado": "Cerrado", "cantidad": cerrados},
-                    {"estado": "Retirado", "cantidad": retirados},
+                    {
+                        "estado": "Abierto",
+                        "cantidad": abiertos,
+                    },
+                    {
+                        "estado": "Cerrado",
+                        "cantidad": cerrados,
+                    },
+                    {
+                        "estado": "Retirado",
+                        "cantidad": retirados,
+                    },
                 ],
+
                 "retirosPorMes": retiros_por_mes,
             },
         }
@@ -560,9 +762,11 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al consultar indicadores de nómina retiros: {str(e)}"
+            detail=(
+                "Error al consultar indicadores de nómina retiros: "
+                f"{str(e)}"
+            )
         )
-
 
 @router.get("/reporte-excel")
 def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):

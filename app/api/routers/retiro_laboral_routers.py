@@ -274,7 +274,7 @@ def dashboard_indicadores_rrll(
                         FROM public."EntrevistaRetiro" er
                         WHERE er."IdRetiroLaboral" = rl."IdRetiroLaboral"
                           AND COALESCE(er."PdfGenerado", false) = true
-                          AND er."RutaPdf" IS NOT NULL
+                          AND NULLIF(TRIM(COALESCE(er."RutaPdf", '')), '') IS NOT NULL
                     ) AS entrevista_realizada
                 FROM public."RetiroLaboral" rl
                 LEFT JOIN public."RegistroPersonal" rp
@@ -320,26 +320,18 @@ def dashboard_indicadores_rrll(
                 )::int AS abiertos_inactivos,
 
                 COUNT(*) FILTER (
-                    WHERE estado = 'ABIERTO'
-                      AND entrevista_realizada
+                    WHERE entrevista_realizada
                 )::int AS entrevistas_realizadas,
 
                 COUNT(*) FILTER (
-                    WHERE estado = 'ABIERTO'
-                      AND NOT entrevista_realizada
+                    WHERE NOT entrevista_realizada
                 )::int AS entrevistas_pendientes,
 
                 ROUND(
                     COUNT(*) FILTER (
-                        WHERE estado = 'ABIERTO'
-                          AND entrevista_realizada
+                        WHERE entrevista_realizada
                     ) * 100.0
-                    / NULLIF(
-                        COUNT(*) FILTER (
-                            WHERE estado = 'ABIERTO'
-                        ),
-                        0
-                    ),
+                    / NULLIF(COUNT(*), 0),
                     2
                 ) AS porcentaje_entrevistas
 
@@ -472,7 +464,6 @@ def dashboard_indicadores_rrll(
                     END AS estado,
                     COUNT(*)::int AS cantidad
                 FROM base
-                WHERE estado = 'ABIERTO'
                 GROUP BY
                     CASE
                         WHEN entrevista_realizada THEN 'REALIZADA'
@@ -548,7 +539,7 @@ def dashboard_indicadores_rrll(
                 FROM public."RetiroLaboral" rl
                 WHERE UPPER(
                     TRIM(COALESCE(rl."EstadoCasoRRLL", ''))
-                ) = 'ENVIADO_NOMINA'
+                ) IN ('ENVIADO_NOMINA', 'CERRADO')
                   AND rl."FechaCierre" IS NOT NULL
                   AND EXTRACT(YEAR FROM rl."FechaCierre") = :anio_grafica
                   AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
