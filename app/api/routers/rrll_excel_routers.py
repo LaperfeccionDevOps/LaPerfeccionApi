@@ -315,14 +315,15 @@ def _completar_fechas_ingreso_migrados(db: Session, resultados):
     return resultados_mutables
 
 
-def _aplicar_descripcion_validada_rrll(db: Session, resultados):
+def _agregar_motivo_oficial_validado_rrll(db: Session, resultados):
     """
-    Reemplaza únicamente la descripción específica del retiro cuando RRLL
-    haya registrado una validación oficial.
+    Agrega la validación oficial registrada por RRLL en una columna separada.
 
-    Prioridad de salida:
-    1. RetiroLaboral.DescripcionRetiroRRLL, cuando tenga contenido.
-    2. La descripción original ya devuelta por fn_reporte_retiros_excel.
+    La descripción original del trabajador se conserva en:
+        descripcion_motivo_especifico_del_retiro
+
+    La validación oficial de RRLL se agrega en:
+        motivo_oficial_validado_rrll
 
     No modifica información en la base de datos.
     """
@@ -383,6 +384,7 @@ def _aplicar_descripcion_validada_rrll(db: Session, resultados):
         numero = _normalizar_numero_identificacion(
             fila.get("numero_identificacion")
         )
+
         descripcion = str(
             fila.get("descripcion_retiro_rrll") or ""
         ).strip()
@@ -394,6 +396,7 @@ def _aplicar_descripcion_validada_rrll(db: Session, resultados):
 
         if fecha_retiro:
             clave = (numero, fecha_retiro)
+
             if clave not in validacion_por_documento_y_fecha:
                 validacion_por_documento_y_fecha[clave] = descripcion
 
@@ -404,6 +407,7 @@ def _aplicar_descripcion_validada_rrll(db: Session, resultados):
         numero = _normalizar_numero_identificacion(
             row.get("numero_identificacion")
         )
+
         fecha_retiro = _convertir_a_fecha(row.get("fecha_retiro"))
 
         descripcion_rrll = None
@@ -418,8 +422,7 @@ def _aplicar_descripcion_validada_rrll(db: Session, resultados):
                 numero
             )
 
-        if descripcion_rrll:
-            row["descripcion_motivo_especifico_del_retiro"] = descripcion_rrll
+        row["motivo_oficial_validado_rrll"] = descripcion_rrll or ""
 
     return resultados_mutables
 
@@ -499,7 +502,7 @@ def exportar_excel_retiros(
         # =========================
         # TITULO Y FILTROS HOJA 1
         # =========================
-        ws.merge_cells("A1:M1")
+        ws.merge_cells("A1:N1")
         ws["A1"] = "REPORTE RRLL - RETIROS"
         ws["A1"].font = Font(bold=True, size=14)
         ws["A1"].fill = fill_title
@@ -528,6 +531,7 @@ def exportar_excel_retiros(
             "TOTAL TIEMPO DE TRABAJO",
             "RETIRO LEGALIZADO",
             "DESCRIPCIÓN MOTIVO ESPECIFICO DEL RETIRO",
+            "MOTIVO OFICIAL VALIDADO POR RRLL",
             "TIPIFICACION DE RETIRO",
             "OBSERVACION ¿QUÉ DEBE MEJORAR LA COMPAÑÍA?"
         ]
@@ -564,10 +568,9 @@ def exportar_excel_retiros(
         # consolidadas. Los valores existentes se conservan sin cambios.
         resultados = _completar_total_tiempo_trabajo(resultados)
 
-        # Usa primero la validación oficial de RRLL cuando exista.
-        # Si RRLL no registró una ampliación, conserva la respuesta original
-        # devuelta por fn_reporte_retiros_excel.
-        resultados = _aplicar_descripcion_validada_rrll(db, resultados)
+        # Conserva la descripción original registrada por el trabajador.
+        # Agrega en una columna independiente la validación oficial realizada por RRLL.
+        resultados = _agregar_motivo_oficial_validado_rrll(db, resultados)
 
         # =========================
         # TIPIFICACIONES PARA LISTA
@@ -605,6 +608,7 @@ def exportar_excel_retiros(
                     else ""
                 ),
                 row.get("descripcion_motivo_especifico_del_retiro"),
+                row.get("motivo_oficial_validado_rrll"),
                 row.get("tipificacion_de_retiro"),
                 row.get("observacion_que_debe_mejorar_la_compania"),
             ]
@@ -621,7 +625,7 @@ def exportar_excel_retiros(
         # =========================
         # FILTROS Y CONGELAR PANELES
         # =========================
-        ws.auto_filter.ref = f"A{header_row}:M{max(fila_datos_fin, header_row)}"
+        ws.auto_filter.ref = f"A{header_row}:N{max(fila_datos_fin, header_row)}"
         ws.freeze_panes = "A6"
 
         # =========================
@@ -643,15 +647,20 @@ def exportar_excel_retiros(
             ws.row_dimensions[row_num].height = 30
 
             texto_k = ws[f"K{row_num}"].value or ""
-            texto_m = ws[f"M{row_num}"].value or ""
+            texto_l = ws[f"L{row_num}"].value or ""
+            texto_n = ws[f"N{row_num}"].value or ""
 
-            if len(str(texto_k)) > 40 or len(str(texto_m)) > 40:
+            if (
+                len(str(texto_k)) > 40
+                or len(str(texto_l)) > 40
+                or len(str(texto_n)) > 40
+            ):
                 ws.row_dimensions[row_num].height = 45
 
         # =========================
         # ALINEACIONES
         # =========================
-        columnas_centradas = ["A", "B", "G", "H", "I", "J", "L"]
+        columnas_centradas = ["A", "B", "G", "H", "I", "J", "M"]
         for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
             for col in columnas_centradas:
                 ws[f"{col}{row_num}"].alignment = Alignment(
@@ -660,7 +669,7 @@ def exportar_excel_retiros(
                     wrap_text=True
                 )
 
-        columnas_texto_largo = ["K", "M"]
+        columnas_texto_largo = ["K", "L", "N"]
         for row_num in range(fila_datos_inicio, fila_datos_fin + 1):
             for col in columnas_texto_largo:
                 ws[f"{col}{row_num}"].alignment = Alignment(
@@ -692,7 +701,7 @@ def exportar_excel_retiros(
             dv_tipificacion.errorTitle = "Valor no válido"
 
             ws.add_data_validation(dv_tipificacion)
-            dv_tipificacion.add(f"L6:L{max(fila_datos_fin, 1000)}")
+            dv_tipificacion.add(f"M6:M{max(fila_datos_fin, 1000)}")
 
         # =========================
         # ANCHOS HOJA 1
@@ -709,8 +718,9 @@ def exportar_excel_retiros(
             "I": 22,
             "J": 18,
             "K": 40,
-            "L": 30,
-            "M": 45,
+            "L": 55,
+            "M": 30,
+            "N": 45,
         }
 
         for col, ancho in anchos.items():
