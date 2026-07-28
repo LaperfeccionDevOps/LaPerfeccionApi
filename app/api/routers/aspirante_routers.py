@@ -232,7 +232,22 @@ def listar_aspirantes(
                 CB."FechaIngreso",
                 rp."FechaIngresoHistorica"
             ) AS "FechaIngreso",
-                CL."Nombre" AS "NombreCliente"
+                CL."Nombre" AS "NombreCliente",
+                CASE
+                    WHEN rp."IdEstadoProceso" = 25 THEN TRUE
+                    WHEN rp."FechaIngresoHistorica" IS NOT NULL THEN TRUE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM "ContratacionBasica" CB_HIST
+                        WHERE CB_HIST."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    ) THEN TRUE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM "RetiroLaboral" RL_HIST
+                        WHERE RL_HIST."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    ) THEN TRUE
+                    ELSE FALSE
+                END AS "TuvoContratacion"
             FROM "RegistroPersonal" rp
             LEFT JOIN "EstadoProceso" esp ON rp."IdEstadoProceso" = esp."IdEstadoProceso"
             LEFT JOIN "DatosAdicionales" DA ON DA."IdRegistroPersonal" = rp."IdRegistroPersonal"
