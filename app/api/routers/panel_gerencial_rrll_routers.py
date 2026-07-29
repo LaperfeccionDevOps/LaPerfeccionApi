@@ -398,7 +398,8 @@ def obtener_panel_gerencial_rrll(
     - Abandonos.
     - Motivos y tipificaciones del retiro.
     - Tiempo promedio laborado.
-    - Tiempo promedio de desvinculación.
+    - Tiempo total promedio de desvinculación, desde el Paz y Salvo hasta
+      la finalización definitiva por Nómina.
     - Sede con mayor rotación.
     - Pendientes actuales en RRLL.
 
@@ -477,8 +478,11 @@ def obtener_panel_gerencial_rrll(
                     rl."FechaProceso",
                     rl."FechaRetiro",
                     rl."FechaCierre",
+                    rl."FechaEnvioNomina",
                     rl."FechaCreacion",
                     rl."FechaActualizacion",
+                    rp."IdEstadoProceso" AS id_estado_proceso,
+                    pso.fecha_paz_y_salvo,
 
                     COALESCE(
                         hl.ultima_fecha_ingreso_historial,
@@ -561,6 +565,18 @@ def obtener_panel_gerencial_rrll(
 
                 LEFT JOIN public."RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
+                -- Inicio oficial del proceso completo de desvinculación:
+                -- último Paz y Salvo registrado por Operaciones.
+                LEFT JOIN LATERAL (
+                    SELECT
+                        pso2."FechaCreacion" AS fecha_paz_y_salvo
+                    FROM public."PazYSalvoOperaciones" pso2
+                    WHERE pso2."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                      AND pso2."FechaCreacion" IS NOT NULL
+                    ORDER BY pso2."FechaCreacion" DESC
+                    LIMIT 1
+                ) pso ON TRUE
 
                 LEFT JOIN LATERAL (
                     SELECT
@@ -779,43 +795,93 @@ def obtener_panel_gerencial_rrll(
             cte_retiros_periodo
             + """
             SELECT
+                -- Tiempo total: Paz y Salvo hasta retiro definitivo por Nómina.
                 ROUND(
                     AVG(
                         EXTRACT(
                             EPOCH FROM (
-                                "FechaCierre" - "FechaProceso"
+                                "FechaEnvioNomina" - fecha_paz_y_salvo
+                            )
+                        )
+                    ) FILTER (
+                        WHERE fecha_paz_y_salvo IS NOT NULL
+                          AND "FechaEnvioNomina" IS NOT NULL
+                          AND "FechaEnvioNomina" >= fecha_paz_y_salvo
+                          AND id_estado_proceso = 35
+                    ),
+                    0
+                )::bigint AS promedio_total_segundos,
+
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM (
+                                "FechaEnvioNomina" - fecha_paz_y_salvo
                             )
                         ) / 86400.0
                     ) FILTER (
-                        WHERE "FechaProceso" IS NOT NULL
-                          AND "FechaCierre" IS NOT NULL
-                          AND "FechaCierre" >= "FechaProceso"
-                          AND estado_rrll IN (
-                              'ENVIADO_NOMINA',
-                              'CERRADO'
-                          )
+                        WHERE fecha_paz_y_salvo IS NOT NULL
+                          AND "FechaEnvioNomina" IS NOT NULL
+                          AND "FechaEnvioNomina" >= fecha_paz_y_salvo
+                          AND id_estado_proceso = 35
                     )::numeric,
                     2
                 ) AS promedio_dias,
 
+                -- Etapa RRLL: Paz y Salvo hasta cierre de RRLL.
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM (
+                                "FechaCierre" - fecha_paz_y_salvo
+                            )
+                        )
+                    ) FILTER (
+                        WHERE fecha_paz_y_salvo IS NOT NULL
+                          AND "FechaCierre" IS NOT NULL
+                          AND "FechaCierre" >= fecha_paz_y_salvo
+                    ),
+                    0
+                )::bigint AS promedio_rrll_segundos,
+
+                -- Etapa Nómina: cierre de RRLL hasta retiro definitivo.
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM (
+                                "FechaEnvioNomina" - "FechaCierre"
+                            )
+                        )
+                    ) FILTER (
+                        WHERE "FechaCierre" IS NOT NULL
+                          AND "FechaEnvioNomina" IS NOT NULL
+                          AND "FechaEnvioNomina" >= "FechaCierre"
+                          AND id_estado_proceso = 35
+                    ),
+                    0
+                )::bigint AS promedio_nomina_segundos,
+
                 COUNT(*) FILTER (
-                    WHERE "FechaProceso" IS NOT NULL
-                      AND "FechaCierre" IS NOT NULL
-                      AND "FechaCierre" >= "FechaProceso"
-                      AND estado_rrll IN (
-                          'ENVIADO_NOMINA',
-                          'CERRADO'
-                      )
+                    WHERE fecha_paz_y_salvo IS NOT NULL
+                      AND "FechaEnvioNomina" IS NOT NULL
+                      AND "FechaEnvioNomina" >= fecha_paz_y_salvo
+                      AND id_estado_proceso = 35
                 )::int AS registros_validos,
 
                 COUNT(*) FILTER (
-                    WHERE "FechaProceso" IS NOT NULL
-                      AND "FechaCierre" IS NOT NULL
-                      AND "FechaCierre" < "FechaProceso"
-                      AND estado_rrll IN (
-                          'ENVIADO_NOMINA',
-                          'CERRADO'
-                      )
+                    WHERE fecha_paz_y_salvo IS NULL
+                )::int AS registros_sin_paz_y_salvo,
+
+                COUNT(*) FILTER (
+                    WHERE id_estado_proceso = 35
+                      AND "FechaEnvioNomina" IS NULL
+                )::int AS registros_retirados_sin_fecha_final,
+
+                COUNT(*) FILTER (
+                    WHERE fecha_paz_y_salvo IS NOT NULL
+                      AND "FechaEnvioNomina" IS NOT NULL
+                      AND "FechaEnvioNomina" < fecha_paz_y_salvo
+                      AND id_estado_proceso = 35
                 )::int AS registros_excluidos_fecha_inconsistente
 
             FROM base_retiros;
@@ -974,8 +1040,38 @@ def obtener_panel_gerencial_rrll(
             else 0.0
         )
 
+        tiempo_desvinculacion_total_segundos = (
+            int(fila_tiempo["promedio_total_segundos"] or 0)
+            if fila_tiempo
+            else 0
+        )
+
+        tiempo_gestion_rrll_segundos = (
+            int(fila_tiempo["promedio_rrll_segundos"] or 0)
+            if fila_tiempo
+            else 0
+        )
+
+        tiempo_gestion_nomina_segundos = (
+            int(fila_tiempo["promedio_nomina_segundos"] or 0)
+            if fila_tiempo
+            else 0
+        )
+
         registros_validos_tiempo = (
             int(fila_tiempo["registros_validos"])
+            if fila_tiempo
+            else 0
+        )
+
+        registros_sin_paz_y_salvo = (
+            int(fila_tiempo["registros_sin_paz_y_salvo"])
+            if fila_tiempo
+            else 0
+        )
+
+        registros_retirados_sin_fecha_final = (
+            int(fila_tiempo["registros_retirados_sin_fecha_final"])
             if fila_tiempo
             else 0
         )
@@ -1187,9 +1283,9 @@ def obtener_panel_gerencial_rrll(
                     "id": prioridad,
                     "tipo": "informativo",
                     "prioridad": prioridad,
-                    "indicador": "Tiempo de desvinculación",
+                    "indicador": "Tiempo total de desvinculación",
                     "texto": (
-                        f"El tiempo promedio de desvinculación fue de "
+                        f"El tiempo total promedio de desvinculación fue de "
                         f"{tiempo_desvinculacion:.2f} días, calculado "
                         f"sobre {texto_registros(registros_validos_tiempo)} "
                         "con fechas válidas."
@@ -1244,7 +1340,15 @@ def obtener_panel_gerencial_rrll(
                 "tiempoLaboradoPromedioDias": (
                     tiempo_laborado_promedio_dias
                 ),
+                # Se conserva la llave anterior para compatibilidad
+                # con el frontend actual. Ahora representa el tiempo total.
                 "tiempoDesvinculacion": tiempo_desvinculacion,
+                "tiempoDesvinculacionTotalDias": tiempo_desvinculacion,
+                "tiempoDesvinculacionTotalSegundos": (
+                    tiempo_desvinculacion_total_segundos
+                ),
+                "tiempoGestionRRLLSegundos": tiempo_gestion_rrll_segundos,
+                "tiempoGestionNominaSegundos": tiempo_gestion_nomina_segundos,
             },
             "detalleTiempoLaborado": {
                 "promedioDias": tiempo_laborado_promedio_dias,
@@ -1269,13 +1373,28 @@ def obtener_panel_gerencial_rrll(
                 "fechaFinalCalculo": "FechaRetiro",
             },
             "detalleTiempoDesvinculacion": {
+                "nombreIndicador": "Tiempo total de desvinculación",
                 "promedioDias": tiempo_desvinculacion,
+                "promedioSegundos": tiempo_desvinculacion_total_segundos,
+                "promedioGestionRRLLSegundos": tiempo_gestion_rrll_segundos,
+                "promedioGestionNominaSegundos": tiempo_gestion_nomina_segundos,
                 "registrosValidos": registros_validos_tiempo,
+                "registrosSinPazYSalvo": registros_sin_paz_y_salvo,
+                "registrosRetiradosSinFechaFinal": (
+                    registros_retirados_sin_fecha_final
+                ),
                 "registrosExcluidosFechaInconsistente": (
                     registros_excluidos_tiempo
                 ),
-                "fechaInicialCalculo": "FechaProceso",
-                "fechaFinalCalculo": "FechaCierre",
+                "fechaInicialCalculo": (
+                    "PazYSalvoOperaciones.FechaCreacion del último "
+                    "Paz y Salvo registrado por Operaciones"
+                ),
+                "fechaIntermediaCalculo": "RetiroLaboral.FechaCierre",
+                "fechaFinalCalculo": (
+                    "RetiroLaboral.FechaEnvioNomina al finalizar Nómina "
+                    "y quedar el trabajador en estado Retirado"
+                ),
             },
             "resumenEjecutivo": resumen_ejecutivo,
             "sedeMayorRotacion": sede_mayor_rotacion,
