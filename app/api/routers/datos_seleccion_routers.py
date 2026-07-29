@@ -339,6 +339,715 @@ def obtener_dashboard_indicadores_contratacion(
         ],
     }
 
+# ============================================================
+# DASHBOARD EXCLUSIVO DE CONTRATACIÓN
+# ============================================================
+# Este bloque es independiente del dashboard de Selección.
+#
+# No modifica:
+# - Flujo de contratación
+# - Endpoint /api/contratado
+# - Endpoint /api/rechazo-contratacion
+# - Reporte Synergy
+# - Excel
+# - Drive
+# - Google Sheet
+#
+# Criterios temporales de la consulta general:
+# - Registrados: RegistroPersonal.FechaCreacion.
+# - Avanzan: fecha real del movimiento al estado 24.
+# - Contratados: fecha real del movimiento al estado 25 por botón C.
+# - Tiempo promedio: contrataciones finalizadas en el periodo consultado.
+#
+# Consulta individual:
+# - El usuario busca visualmente por nombre o identificación.
+# - El frontend conserva internamente IdRegistroPersonal.
+# - El detalle individual consulta el historial completo del trabajador.
+# ============================================================
+
+
+def _formatear_duracion_segundos(total_segundos: Optional[int]) -> Optional[str]:
+    """Convierte segundos a una duración legible en español."""
+    if total_segundos is None:
+        return None
+
+    total_segundos = max(int(total_segundos), 0)
+    dias, resto = divmod(total_segundos, 86400)
+    horas, resto = divmod(resto, 3600)
+    minutos, segundos = divmod(resto, 60)
+
+    partes = []
+
+    if dias > 0:
+        partes.append(f"{dias} día" if dias == 1 else f"{dias} días")
+
+    if horas > 0:
+        partes.append(f"{horas} hora" if horas == 1 else f"{horas} horas")
+
+    if minutos > 0:
+        partes.append(
+            f"{minutos} minuto" if minutos == 1 else f"{minutos} minutos"
+        )
+
+    # En tiempos de varios días se prioriza una lectura ejecutiva.
+    # Para tiempos menores a un día se conservan también los segundos.
+    if dias == 0 and (segundos > 0 or not partes):
+        partes.append(
+            f"{segundos} segundo" if segundos == 1 else f"{segundos} segundos"
+        )
+
+    return ", ".join(partes)
+
+
+def _nombre_estado_proceso(id_estado: Optional[int]) -> str:
+    estados = {
+        18: "Nuevo",
+        19: "Entrevista",
+        20: "Entrevista jefe inmediato",
+        21: "Exámenes",
+        22: "Seguridad",
+        24: "Avanza a contratación",
+        25: "Contratado",
+        26: "Referenciación",
+        27: "Desiste del proceso",
+        28: "Rechazado",
+        30: "Abierto",
+        34: "Pendiente de contratación",
+    }
+    return estados.get(id_estado, f"Estado {id_estado}" if id_estado else "Sin estado")
+
+
+@router.get("/buscar-trabajadores-contratacion")
+def buscar_trabajadores_dashboard_contratacion(
+    texto_busqueda: str,
+    limite: int = 20,
+    db: Session = Depends(get_db),
+):
+    """
+    Busca candidatos por nombre, apellido o número de identificación.
+
+    El IdRegistroPersonal se devuelve únicamente para uso interno del frontend.
+    En la interfaz se debe mostrar nombre completo y número de identificación.
+    """
+    texto_limpio = (texto_busqueda or "").strip()
+
+    if len(texto_limpio) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Escriba al menos 2 caracteres para buscar.",
+        )
+
+    limite_seguro = min(max(limite, 1), 50)
+    patron = f"%{texto_limpio}%"
+
+    rows = db.execute(
+        text("""
+            SELECT
+                rp."IdRegistroPersonal" AS id_registro_personal,
+                TRIM(
+                    CONCAT_WS(
+                        ' ',
+                        NULLIF(TRIM(rp."Nombres"), ''),
+                        NULLIF(TRIM(rp."Apellidos"), '')
+                    )
+                ) AS nombre_completo,
+                rp."NumeroIdentificacion"::text AS numero_identificacion,
+                rp."IdEstadoProceso" AS id_estado_proceso
+            FROM public."RegistroPersonal" rp
+            WHERE
+                NOT EXISTS (
+                    SELECT 1
+                    FROM public."HistorialLaboral" hl
+                    WHERE
+                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
+                )
+                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
+                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
+                AND COALESCE(rp."UsuarioActualizacion", '')
+                    <> 'ajuste_no_activos_maestro_2026_06_22'
+                AND (
+                    rp."NumeroIdentificacion"::text ILIKE :patron
+                    OR CONCAT_WS(
+                        ' ',
+                        COALESCE(rp."Nombres", ''),
+                        COALESCE(rp."Apellidos", '')
+                    ) ILIKE :patron
+                    OR COALESCE(rp."Nombres", '') ILIKE :patron
+                    OR COALESCE(rp."Apellidos", '') ILIKE :patron
+                )
+            ORDER BY
+                CASE
+                    WHEN rp."NumeroIdentificacion"::text = :texto_exacto THEN 0
+                    ELSE 1
+                END,
+                nombre_completo ASC,
+                rp."IdRegistroPersonal" DESC
+            LIMIT :limite;
+        """),
+        {
+            "patron": patron,
+            "texto_exacto": texto_limpio,
+            "limite": limite_seguro,
+        },
+    ).mappings().all()
+
+    resultados = []
+    for row in rows:
+        item = dict(row)
+        item["estado_actual"] = _nombre_estado_proceso(
+            item.get("id_estado_proceso")
+        )
+        resultados.append(item)
+
+    return {
+        "texto_busqueda": texto_limpio,
+        "total_resultados": len(resultados),
+        "resultados": resultados,
+    }
+
+
+def _obtener_dashboard_contratacion_individual(
+    id_registro_personal: int,
+    db: Session,
+):
+    trabajador = db.execute(
+        text("""
+            SELECT
+                rp."IdRegistroPersonal" AS id_registro_personal,
+                TRIM(
+                    CONCAT_WS(
+                        ' ',
+                        NULLIF(TRIM(rp."Nombres"), ''),
+                        NULLIF(TRIM(rp."Apellidos"), '')
+                    )
+                ) AS nombre_completo,
+                rp."NumeroIdentificacion"::text AS numero_identificacion,
+                rp."IdEstadoProceso" AS id_estado_proceso,
+                rp."FechaCreacion" AS fecha_registro_seleccion
+            FROM public."RegistroPersonal" rp
+            WHERE
+                rp."IdRegistroPersonal" = :id_registro_personal
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM public."HistorialLaboral" hl
+                    WHERE
+                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
+                )
+                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
+                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
+                AND COALESCE(rp."UsuarioActualizacion", '')
+                    <> 'ajuste_no_activos_maestro_2026_06_22';
+        """),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().first()
+
+    if not trabajador:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No se encontró el trabajador o el registro está excluido "
+                "por corresponder a información migrada."
+            ),
+        )
+
+    trazabilidad = db.execute(
+        text("""
+            WITH fecha_25 AS (
+                SELECT MIN(hec."FechaMovimiento") AS fecha_estado_25
+                FROM public."HistorialEstadoContratacion" hec
+                WHERE
+                    hec."IdRegistroPersonal" = :id_registro_personal
+                    AND hec."EstadoNuevo" = 25
+                    AND hec."OrigenMovimiento" = 'BOTON_C'
+                    AND hec."Modulo" = 'CONTRATACION'
+            ),
+            fecha_24 AS (
+                SELECT MAX(hec."FechaMovimiento") AS fecha_estado_24
+                FROM public."HistorialEstadoContratacion" hec
+                CROSS JOIN fecha_25 f25
+                WHERE
+                    hec."IdRegistroPersonal" = :id_registro_personal
+                    AND hec."EstadoNuevo" = 24
+                    AND hec."OrigenMovimiento" = 'CAMBIO_ESTADO'
+                    AND hec."Modulo" = 'SELECCION'
+                    AND (
+                        f25.fecha_estado_25 IS NULL
+                        OR hec."FechaMovimiento" <= f25.fecha_estado_25
+                    )
+            )
+            SELECT
+                f24.fecha_estado_24,
+                f25.fecha_estado_25,
+                CASE
+                    WHEN f24.fecha_estado_24 IS NOT NULL
+                         AND f25.fecha_estado_25 IS NOT NULL
+                    THEN EXTRACT(
+                        EPOCH FROM (f25.fecha_estado_25 - f24.fecha_estado_24)
+                    )
+                    ELSE NULL
+                END AS tiempo_segundos
+            FROM fecha_24 f24
+            CROSS JOIN fecha_25 f25;
+        """),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().first()
+
+    rechazo = db.execute(
+        text("""
+            SELECT
+                NULLIF(TRIM(MAX(orc."ObservacionesRechazo")), '') AS motivo_rechazo
+            FROM public."ObsRechazoContratacion" orc
+            WHERE orc."IdRegistroPersonal" = :id_registro_personal;
+        """),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().first()
+
+    datos_trabajador = dict(trabajador)
+    fecha_estado_24 = trazabilidad.get("fecha_estado_24") if trazabilidad else None
+    fecha_estado_25 = trazabilidad.get("fecha_estado_25") if trazabilidad else None
+    tiempo_segundos_raw = trazabilidad.get("tiempo_segundos") if trazabilidad else None
+    tiempo_segundos = (
+        int(round(float(tiempo_segundos_raw)))
+        if tiempo_segundos_raw is not None
+        else None
+    )
+
+    id_estado_actual = datos_trabajador.get("id_estado_proceso")
+    motivo_rechazo = rechazo.get("motivo_rechazo") if rechazo else None
+    fue_rechazado = id_estado_actual == 28 or bool(motivo_rechazo)
+
+    return {
+        "modo_consulta": "individual",
+        "trabajador": {
+            "id_registro_personal": datos_trabajador.get("id_registro_personal"),
+            "nombre_completo": datos_trabajador.get("nombre_completo"),
+            "numero_identificacion": datos_trabajador.get("numero_identificacion"),
+            "id_estado_actual": id_estado_actual,
+            "estado_actual": _nombre_estado_proceso(id_estado_actual),
+        },
+        "registro_seleccion": {
+            "existe": datos_trabajador.get("fecha_registro_seleccion") is not None,
+            "fecha": datos_trabajador.get("fecha_registro_seleccion"),
+        },
+        "avance_contratacion": {
+            "existe": fecha_estado_24 is not None,
+            "fecha": fecha_estado_24,
+        },
+        "contratacion": {
+            "existe": fecha_estado_25 is not None,
+            "fecha": fecha_estado_25,
+            "confirmada_por_boton_c": fecha_estado_25 is not None,
+        },
+        "rechazo": {
+            "existe": fue_rechazado,
+            "motivo": motivo_rechazo,
+        },
+        "tiempo_contratacion": {
+            "total_segundos": tiempo_segundos,
+            "total_minutos": (
+                round(tiempo_segundos / 60, 2)
+                if tiempo_segundos is not None
+                else None
+            ),
+            "formateado": _formatear_duracion_segundos(tiempo_segundos),
+            "disponible": tiempo_segundos is not None,
+            "fecha_inicio": fecha_estado_24,
+            "fecha_fin": fecha_estado_25,
+            "fuente_inicio": "Estado 24 - CAMBIO_ESTADO - SELECCION",
+            "fuente_fin": "Estado 25 - BOTON_C - CONTRATACION",
+            "mensaje": (
+                "Tiempo real del trabajador entre el avance a contratación "
+                "y la confirmación mediante el botón C."
+                if tiempo_segundos is not None
+                else
+                "El trabajador todavía no tiene una trazabilidad completa "
+                "entre los estados 24 y 25 mediante el botón C."
+            ),
+        },
+        "linea_tiempo": [
+            {
+                "evento": "Registro en Selección",
+                "completado": datos_trabajador.get("fecha_registro_seleccion") is not None,
+                "fecha": datos_trabajador.get("fecha_registro_seleccion"),
+            },
+            {
+                "evento": "Avanza a Contratación",
+                "completado": fecha_estado_24 is not None,
+                "fecha": fecha_estado_24,
+            },
+            {
+                "evento": "Contratado",
+                "completado": fecha_estado_25 is not None,
+                "fecha": fecha_estado_25,
+            },
+        ],
+        "exclusiones": {
+            "activo_migrado_historial_laboral": True,
+            "usuarios_migracion": True,
+            "ajuste_no_activos_maestro": True,
+        },
+    }
+
+
+@router.get("/dashboard-contratacion")
+def obtener_dashboard_contratacion(
+    anio: Optional[int] = None,
+    mes: Optional[int] = None,
+    id_registro_personal: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Dashboard independiente para el módulo de Contratación.
+
+    Consulta general:
+    - Registrados por Selección: RegistroPersonal.FechaCreacion.
+    - Avanzan a Contratación: movimiento al estado 24.
+    - Contratados: movimiento al estado 25 mediante el botón C.
+    - Tiempo promedio: diferencia 24 a 25 de los casos contratados
+      dentro del periodo consultado.
+
+    Consulta individual:
+    - Se recibe IdRegistroPersonal internamente después de que el usuario
+      selecciona un resultado buscado por nombre o identificación.
+    - Se consulta el historial completo del trabajador, sin limitar sus
+      eventos por año o mes.
+    """
+    if mes is not None and (mes < 1 or mes > 12):
+        raise HTTPException(
+            status_code=400,
+            detail="El mes debe estar entre 1 y 12.",
+        )
+
+    if anio is not None and anio < 2000:
+        raise HTTPException(
+            status_code=400,
+            detail="El año consultado no es válido.",
+        )
+
+    if id_registro_personal is not None:
+        if id_registro_personal <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="El IdRegistroPersonal consultado no es válido.",
+            )
+        return _obtener_dashboard_contratacion_individual(
+            id_registro_personal=id_registro_personal,
+            db=db,
+        )
+
+    resultado = db.execute(
+        text("""
+            WITH universo_base AS (
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."IdEstadoProceso",
+                    rp."FechaCreacion",
+                    rp."UsuarioActualizacion"
+                FROM public."RegistroPersonal" rp
+                WHERE
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM public."HistorialLaboral" hl
+                        WHERE
+                            hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND UPPER(
+                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                            ) = 'ACTIVO MIGRADO'
+                    )
+                    AND LOWER(
+                        COALESCE(rp."UsuarioActualizacion", '')
+                    ) NOT LIKE '%migracion%'
+                    AND LOWER(
+                        COALESCE(rp."UsuarioActualizacion", '')
+                    ) NOT LIKE '%migrado%'
+                    AND COALESCE(rp."UsuarioActualizacion", '')
+                        <> 'ajuste_no_activos_maestro_2026_06_22'
+            ),
+            registrados_periodo AS (
+                SELECT ub."IdRegistroPersonal"
+                FROM universo_base ub
+                WHERE
+                    (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM ub."FechaCreacion") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM ub."FechaCreacion") = :mes
+                    )
+            ),
+            movimientos_24_periodo AS (
+                SELECT DISTINCT hec."IdRegistroPersonal"
+                FROM public."HistorialEstadoContratacion" hec
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
+                WHERE
+                    hec."EstadoNuevo" = 24
+                    AND hec."OrigenMovimiento" = 'CAMBIO_ESTADO'
+                    AND hec."Modulo" = 'SELECCION'
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
+                    )
+            ),
+            movimientos_25_periodo AS (
+                SELECT
+                    hec25."IdRegistroPersonal",
+                    hec25."FechaMovimiento" AS fecha_estado_25,
+                    inicio.fecha_estado_24
+                FROM public."HistorialEstadoContratacion" hec25
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec25."IdRegistroPersonal"
+                INNER JOIN LATERAL (
+                    SELECT MAX(hec24."FechaMovimiento") AS fecha_estado_24
+                    FROM public."HistorialEstadoContratacion" hec24
+                    WHERE
+                        hec24."IdRegistroPersonal" = hec25."IdRegistroPersonal"
+                        AND hec24."EstadoNuevo" = 24
+                        AND hec24."OrigenMovimiento" = 'CAMBIO_ESTADO'
+                        AND hec24."Modulo" = 'SELECCION'
+                        AND hec24."FechaMovimiento" <= hec25."FechaMovimiento"
+                ) inicio ON inicio.fecha_estado_24 IS NOT NULL
+                WHERE
+                    hec25."EstadoNuevo" = 25
+                    AND hec25."OrigenMovimiento" = 'BOTON_C'
+                    AND hec25."Modulo" = 'CONTRATACION'
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM hec25."FechaMovimiento") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM hec25."FechaMovimiento") = :mes
+                    )
+            ),
+            contrataciones_periodo AS (
+                SELECT DISTINCT ON ("IdRegistroPersonal")
+                    "IdRegistroPersonal",
+                    fecha_estado_24,
+                    fecha_estado_25
+                FROM movimientos_25_periodo
+                ORDER BY "IdRegistroPersonal", fecha_estado_25 ASC
+            ),
+            rechazos_periodo AS (
+                SELECT ub."IdRegistroPersonal"
+                FROM universo_base ub
+                WHERE
+                    ub."IdEstadoProceso" = 28
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM ub."FechaCreacion") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM ub."FechaCreacion") = :mes
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM public."ObsRechazoContratacion" orc
+                        WHERE
+                            orc."IdRegistroPersonal" = ub."IdRegistroPersonal"
+                    )
+            )
+            SELECT
+                (SELECT COUNT(*) FROM registrados_periodo)
+                    AS registrados_seleccion,
+                (SELECT COUNT(*) FROM movimientos_24_periodo)
+                    AS avanzan_contratacion,
+                (SELECT COUNT(*) FROM contrataciones_periodo)
+                    AS contratados,
+                (
+                    SELECT AVG(
+                        EXTRACT(EPOCH FROM (fecha_estado_25 - fecha_estado_24))
+                    )
+                    FROM contrataciones_periodo
+                ) AS promedio_segundos,
+                (SELECT COUNT(*) FROM rechazos_periodo)
+                    AS rechazados_contratacion;
+        """),
+        {"anio": anio, "mes": mes},
+    ).mappings().first()
+
+    registrados_seleccion = int(
+        resultado.get("registrados_seleccion") or 0
+    )
+    avanzan_contratacion = int(
+        resultado.get("avanzan_contratacion") or 0
+    )
+    contratados = int(resultado.get("contratados") or 0)
+    rechazados_contratacion = int(
+        resultado.get("rechazados_contratacion") or 0
+    )
+
+    promedio_segundos_raw = resultado.get("promedio_segundos")
+    promedio_segundos = (
+        int(round(float(promedio_segundos_raw)))
+        if promedio_segundos_raw is not None
+        else None
+    )
+    promedio_minutos = (
+        round(promedio_segundos / 60, 2)
+        if promedio_segundos is not None
+        else None
+    )
+    promedio_formateado = _formatear_duracion_segundos(promedio_segundos)
+
+    motivos_rows = db.execute(
+        text("""
+            WITH universo_rechazos AS (
+                SELECT rp."IdRegistroPersonal"
+                FROM public."RegistroPersonal" rp
+                WHERE
+                    rp."IdEstadoProceso" = 28
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM public."HistorialLaboral" hl
+                        WHERE
+                            hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND UPPER(
+                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                            ) = 'ACTIVO MIGRADO'
+                    )
+                    AND LOWER(
+                        COALESCE(rp."UsuarioActualizacion", '')
+                    ) NOT LIKE '%migracion%'
+                    AND LOWER(
+                        COALESCE(rp."UsuarioActualizacion", '')
+                    ) NOT LIKE '%migrado%'
+                    AND COALESCE(rp."UsuarioActualizacion", '')
+                        <> 'ajuste_no_activos_maestro_2026_06_22'
+            )
+            SELECT
+                COALESCE(
+                    NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
+                    'Sin observación'
+                ) AS motivo,
+                COUNT(DISTINCT orc."IdRegistroPersonal") AS cantidad
+            FROM public."ObsRechazoContratacion" orc
+            INNER JOIN universo_rechazos ur
+                ON ur."IdRegistroPersonal" = orc."IdRegistroPersonal"
+            GROUP BY
+                COALESCE(
+                    NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
+                    'Sin observación'
+                )
+            ORDER BY cantidad DESC, motivo ASC;
+        """),
+        {"anio": anio, "mes": mes},
+    ).mappings().all()
+
+    motivos_rechazo_contratacion = []
+    for motivo_row in motivos_rows:
+        cantidad = int(motivo_row.get("cantidad") or 0)
+        porcentaje = (
+            round((cantidad / rechazados_contratacion) * 100, 2)
+            if rechazados_contratacion > 0
+            else 0
+        )
+        motivos_rechazo_contratacion.append({
+            "motivo": motivo_row.get("motivo"),
+            "cantidad": cantidad,
+            "porcentaje": porcentaje,
+        })
+
+    porcentaje_contratados_sobre_registrados = (
+        round((contratados / registrados_seleccion) * 100, 2)
+        if registrados_seleccion > 0
+        else 0
+    )
+    porcentaje_contratados_sobre_avanzan = (
+        round((contratados / avanzan_contratacion) * 100, 2)
+        if avanzan_contratacion > 0
+        else 0
+    )
+
+    return {
+        "modo_consulta": "general",
+        "filtros": {"anio": anio, "mes": mes},
+        "criterio_fecha": {
+            "registrados_seleccion": "RegistroPersonal.FechaCreacion",
+            "avanzan_contratacion": (
+                "HistorialEstadoContratacion.FechaMovimiento del estado 24"
+            ),
+            "contratados": (
+                "HistorialEstadoContratacion.FechaMovimiento "
+                "del estado 25 por BOTON_C"
+            ),
+            "tiempo_contratacion": (
+                "Casos cuyo estado 25 por BOTON_C ocurrió "
+                "en el periodo consultado"
+            ),
+        },
+        "registrados_seleccion": registrados_seleccion,
+        "comparativo_registrados_contratados": {
+            "registrados_seleccion": registrados_seleccion,
+            "contratados": contratados,
+            "porcentaje_contratados": porcentaje_contratados_sobre_registrados,
+            "nota": "Cada valor usa la fecha real de su propio evento.",
+        },
+        "comparativo_avanzan_contratados": {
+            "avanzan_contratacion": avanzan_contratacion,
+            "contratados": contratados,
+            "porcentaje_contratados": porcentaje_contratados_sobre_avanzan,
+            "fuente": "HistorialEstadoContratacion",
+            "nota": (
+                "Avanzan se filtra por fecha del estado 24 y "
+                "contratados por fecha del estado 25."
+            ),
+        },
+        "rechazados": {
+            "total": rechazados_contratacion,
+            "fuente": "ObsRechazoContratacion + estado actual 28",
+            "motivos": motivos_rechazo_contratacion,
+            "pendiente_fuente_contratacion": False,
+            "filtro_fecha": (
+                "Temporalmente se usa RegistroPersonal.FechaCreacion, "
+                "porque ObsRechazoContratacion.FechaRechazo no contiene "
+                "una fecha completa."
+            ),
+        },
+        "tiempo_contratacion": {
+            "promedio_minutos": promedio_minutos,
+            "promedio_segundos": promedio_segundos,
+            "promedio_formateado": promedio_formateado,
+            "casos_medidos": contratados,
+            "disponible": promedio_segundos is not None,
+            "fuente_inicio": "Estado 24 - CAMBIO_ESTADO - SELECCION",
+            "fuente_fin": "Estado 25 - BOTON_C - CONTRATACION",
+            "criterio_periodo": (
+                "Fecha del movimiento al estado 25 mediante BOTON_C"
+            ),
+            "mensaje": (
+                "Tiempo promedio real entre el avance a contratación "
+                "y la confirmación mediante el botón C."
+                if promedio_segundos is not None
+                else
+                "No existen casos completos con trazabilidad 24 a 25 "
+                "finalizados en el periodo seleccionado."
+            ),
+        },
+        "exclusiones": {
+            "activo_migrado_historial_laboral": True,
+            "usuarios_migracion": True,
+            "ajuste_no_activos_maestro": True,
+        },
+    }
+
+
 @router.get("/reporte-excel")
 def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
     rows = db.execute(text("""

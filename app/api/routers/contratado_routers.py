@@ -46,21 +46,41 @@ class ContratadoUpdate(BaseModel):
 
 @router.put("/contratado")
 def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
-    existe = db.execute(
-        text('SELECT 1 FROM public."RegistroPersonal" WHERE "IdRegistroPersonal" = :id'),
-        {"id": payload.IdRegistroPersonal},
-    ).fetchone()
-
-    if not existe:
-        raise HTTPException(
-            status_code=404,
-            detail="IdRegistroPersonal no existe en RegistroPersonal."
-        )
-
     try:
         logger.info("=== INICIO /api/contratado ===")
         logger.info(f"IdRegistroPersonal: {payload.IdRegistroPersonal}")
 
+        # ------------------------------------------------------------
+        # 1. Consultar y bloquear el registro para obtener el estado
+        #    anterior real dentro de la misma transacción.
+        # ------------------------------------------------------------
+        registro_actual = db.execute(
+            text("""
+                SELECT
+                    "IdRegistroPersonal",
+                    "IdEstadoProceso"
+                FROM public."RegistroPersonal"
+                WHERE "IdRegistroPersonal" = :id
+                FOR UPDATE;
+            """),
+            {"id": payload.IdRegistroPersonal},
+        ).mappings().first()
+
+        if not registro_actual:
+            raise HTTPException(
+                status_code=404,
+                detail="IdRegistroPersonal no existe en RegistroPersonal."
+            )
+
+        estado_anterior = registro_actual.get("IdEstadoProceso")
+
+        logger.info(f"Estado anterior: {estado_anterior}")
+        logger.info(f"Estado nuevo: {ESTADO_CONTRATADO}")
+
+        # ------------------------------------------------------------
+        # 2. Actualizar el estado a CONTRATADO.
+        #    Se conserva la lógica actual del botón C.
+        # ------------------------------------------------------------
         updated = db.execute(
             text("""
                 UPDATE public."RegistroPersonal"
@@ -76,9 +96,73 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
 
         logger.info(f"Resultado UPDATE: {updated}")
 
+        # ------------------------------------------------------------
+        # 3. Registrar la trazabilidad del botón C.
+        #
+        #    Solo se inserta cuando realmente existe una transición
+        #    hacia el estado 25. Si ya estaba en 25, no duplica historial.
+        # ------------------------------------------------------------
+        historial_contratacion_registrado = False
+
+        if estado_anterior != ESTADO_CONTRATADO:
+            historial = db.execute(
+                text("""
+                    INSERT INTO public."HistorialEstadoContratacion"
+                    (
+                        "IdRegistroPersonal",
+                        "EstadoAnterior",
+                        "EstadoNuevo",
+                        "FechaMovimiento",
+                        "UsuarioMovimiento",
+                        "OrigenMovimiento",
+                        "Modulo"
+                    )
+                    VALUES
+                    (
+                        :id_registro,
+                        :estado_anterior,
+                        :estado_nuevo,
+                        NOW(),
+                        :usuario_movimiento,
+                        :origen_movimiento,
+                        :modulo
+                    )
+                    RETURNING
+                        "IdHistorialEstadoContratacion",
+                        "IdRegistroPersonal",
+                        "EstadoAnterior",
+                        "EstadoNuevo",
+                        "FechaMovimiento",
+                        "UsuarioMovimiento",
+                        "OrigenMovimiento",
+                        "Modulo";
+                """),
+                {
+                    "id_registro": payload.IdRegistroPersonal,
+                    "estado_anterior": estado_anterior,
+                    "estado_nuevo": ESTADO_CONTRATADO,
+                    "usuario_movimiento": "contratacion",
+                    "origen_movimiento": "BOTON_C",
+                    "modulo": "CONTRATACION",
+                },
+            ).mappings().first()
+
+            historial_contratacion_registrado = historial is not None
+            logger.info(f"Historial contratación registrado: {historial}")
+        else:
+            logger.info(
+                "No se registra historial porque el aspirante ya estaba en estado 25."
+            )
+
+        # UPDATE de RegistroPersonal e INSERT del historial quedan
+        # confirmados juntos en la misma transacción.
         db.commit()
         logger.info("Commit BD exitoso")
 
+        # ------------------------------------------------------------
+        # 4. Flujo existente de Synergy, Excel y Google Sheet.
+        #    No se modifica su comportamiento.
+        # ------------------------------------------------------------
         hoy = datetime.now().date()
         hace_800_dias = hoy - timedelta(days=800)
         fecha_fin_reporte = hoy + timedelta(days=90)
@@ -118,13 +202,14 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         archivo_drive = None
         nombre_archivo = None
         archivo_sheet = None
-    
 
         if ruta_archivo:
             nombre_archivo = ruta_archivo.split("\\")[-1].split("/")[-1]
             logger.info(f"Nombre archivo: {nombre_archivo}")
 
-            logger.info("Saltando subida de Excel a Drive temporalmente para no bloquear Sheet")
+            logger.info(
+                "Saltando subida de Excel a Drive temporalmente para no bloquear Sheet"
+            )
             archivo_drive = None
 
         logger.info("Sincronizando Google Sheet")
@@ -136,6 +221,9 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         return {
             "message": "Aspirante marcado como CONTRATADO.",
             "data": updated,
+            "historialContratacionRegistrado": historial_contratacion_registrado,
+            "estadoAnterior": estado_anterior,
+            "nuevoEstado": ESTADO_CONTRATADO,
             "archivoGenerado": nombre_archivo,
             "archivoDrive": {
                 "id": archivo_drive["id"] if archivo_drive else None,
@@ -148,6 +236,10 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
                 "webViewLink": archivo_sheet["webViewLink"] if archivo_sheet else None,
             }
         }
+
+    except HTTPException:
+        db.rollback()
+        raise
 
     except Exception as e:
         logger.error("=== ERROR EN /api/contratado ===")
