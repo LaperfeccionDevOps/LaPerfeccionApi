@@ -597,9 +597,60 @@ def _obtener_dashboard_contratacion_individual(
     rechazo = db.execute(
         text("""
             SELECT
-                NULLIF(TRIM(MAX(orc."ObservacionesRechazo")), '') AS motivo_rechazo
-            FROM public."ObsRechazoContratacion" orc
-            WHERE orc."IdRegistroPersonal" = :id_registro_personal;
+                hec."FechaMovimiento" AS fecha_rechazo,
+                hec."UsuarioMovimiento" AS usuario_rechazo,
+                hec."OrigenMovimiento" AS origen_movimiento,
+                CASE
+                    WHEN hec."OrigenMovimiento" = 'BOTON_NC'
+                    THEN COALESCE(
+                        NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
+                        'Sin observación'
+                    )
+                    WHEN hec."OrigenMovimiento" = 'HISTORICO_MOTIVO_CIERRE'
+                    THEN COALESCE(
+                        NULLIF(TRIM(mcp."MotivoCierre"), ''),
+                        'Sin motivo de cierre'
+                    )
+                    ELSE 'Sin motivo'
+                END AS motivo_rechazo
+            FROM public."HistorialEstadoContratacion" hec
+            LEFT JOIN LATERAL (
+                SELECT orc_detalle."ObservacionesRechazo"
+                FROM public."ObsRechazoContratacion" orc_detalle
+                WHERE
+                    orc_detalle."IdRegistroPersonal"
+                        = hec."IdRegistroPersonal"
+                ORDER BY
+                    orc_detalle."IdObsRechazoContratacion" DESC
+                LIMIT 1
+            ) orc ON hec."OrigenMovimiento" = 'BOTON_NC'
+            LEFT JOIN LATERAL (
+                SELECT mcp_detalle."MotivoCierre"
+                FROM public."MotivoCierreProceso" mcp_detalle
+                WHERE
+                    mcp_detalle."IdRegistroPersonal"
+                        = hec."IdRegistroPersonal"
+                ORDER BY
+                    COALESCE(
+                        mcp_detalle."FechaActualizacion",
+                        mcp_detalle."FechaCreacion"
+                    ) DESC,
+                    mcp_detalle."IdMotivoCierre" DESC
+                LIMIT 1
+            ) mcp
+                ON hec."OrigenMovimiento" = 'HISTORICO_MOTIVO_CIERRE'
+            WHERE
+                hec."IdRegistroPersonal" = :id_registro_personal
+                AND hec."EstadoNuevo" = 28
+                AND hec."OrigenMovimiento" IN (
+                    'BOTON_NC',
+                    'HISTORICO_MOTIVO_CIERRE'
+                )
+                AND hec."Modulo" = 'CONTRATACION'
+            ORDER BY
+                hec."FechaMovimiento" DESC,
+                hec."IdHistorialEstadoContratacion" DESC
+            LIMIT 1;
         """),
         {"id_registro_personal": id_registro_personal},
     ).mappings().first()
@@ -615,8 +666,13 @@ def _obtener_dashboard_contratacion_individual(
     )
 
     id_estado_actual = datos_trabajador.get("id_estado_proceso")
+    fecha_rechazo = rechazo.get("fecha_rechazo") if rechazo else None
+    usuario_rechazo = rechazo.get("usuario_rechazo") if rechazo else None
+    origen_movimiento_rechazo = (
+        rechazo.get("origen_movimiento") if rechazo else None
+    )
     motivo_rechazo = rechazo.get("motivo_rechazo") if rechazo else None
-    fue_rechazado = id_estado_actual == 28 or bool(motivo_rechazo)
+    fue_rechazado = rechazo is not None
 
     return {
         "modo_consulta": "individual",
@@ -642,7 +698,11 @@ def _obtener_dashboard_contratacion_individual(
         },
         "rechazo": {
             "existe": fue_rechazado,
+            "fecha": fecha_rechazo,
+            "usuario": usuario_rechazo,
+            "origen_movimiento": origen_movimiento_rechazo,
             "motivo": motivo_rechazo,
+            "fuente": "HistorialEstadoContratacion",
         },
         "tiempo_contratacion": {
             "total_segundos": tiempo_segundos,
@@ -681,6 +741,14 @@ def _obtener_dashboard_contratacion_individual(
                 "evento": "Contratado",
                 "completado": fecha_estado_25 is not None,
                 "fecha": fecha_estado_25,
+            },
+            {
+                "evento": "Rechazado en Contratación",
+                "completado": fue_rechazado,
+                "fecha": fecha_rechazo,
+                "usuario": usuario_rechazo,
+                "origen_movimiento": origen_movimiento_rechazo,
+                "motivo": motivo_rechazo,
             },
         ],
         "exclusiones": {
@@ -769,7 +837,9 @@ def obtener_dashboard_contratacion(
                 SELECT ub."IdRegistroPersonal"
                 FROM universo_base ub
                 WHERE
-                    (
+                    ub."FechaCreacion"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                    AND (
                         :anio IS NULL
                         OR EXTRACT(YEAR FROM ub."FechaCreacion") = :anio
                     )
@@ -787,6 +857,8 @@ def obtener_dashboard_contratacion(
                     hec."EstadoNuevo" = 24
                     AND hec."OrigenMovimiento" = 'CAMBIO_ESTADO'
                     AND hec."Modulo" = 'SELECCION'
+                    AND hec."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
                     AND (
                         :anio IS NULL
                         OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
@@ -818,6 +890,8 @@ def obtener_dashboard_contratacion(
                     hec25."EstadoNuevo" = 25
                     AND hec25."OrigenMovimiento" = 'BOTON_C'
                     AND hec25."Modulo" = 'CONTRATACION'
+                    AND hec25."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
                     AND (
                         :anio IS NULL
                         OR EXTRACT(YEAR FROM hec25."FechaMovimiento") = :anio
@@ -836,24 +910,35 @@ def obtener_dashboard_contratacion(
                 ORDER BY "IdRegistroPersonal", fecha_estado_25 ASC
             ),
             rechazos_periodo AS (
-                SELECT ub."IdRegistroPersonal"
-                FROM universo_base ub
+                SELECT DISTINCT ON (hec."IdRegistroPersonal")
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento",
+                    hec."UsuarioMovimiento",
+                    hec."OrigenMovimiento"
+                FROM public."HistorialEstadoContratacion" hec
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
                 WHERE
-                    ub."IdEstadoProceso" = 28
+                    hec."EstadoNuevo" = 28
+                    AND hec."OrigenMovimiento" IN (
+                        'BOTON_NC',
+                        'HISTORICO_MOTIVO_CIERRE'
+                    )
+                    AND hec."Modulo" = 'CONTRATACION'
+                    AND hec."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
                     AND (
                         :anio IS NULL
-                        OR EXTRACT(YEAR FROM ub."FechaCreacion") = :anio
+                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
                     )
                     AND (
                         :mes IS NULL
-                        OR EXTRACT(MONTH FROM ub."FechaCreacion") = :mes
+                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
                     )
-                    AND EXISTS (
-                        SELECT 1
-                        FROM public."ObsRechazoContratacion" orc
-                        WHERE
-                            orc."IdRegistroPersonal" = ub."IdRegistroPersonal"
-                    )
+                ORDER BY
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" DESC,
+                    hec."IdHistorialEstadoContratacion" DESC
             )
             SELECT
                 (SELECT COUNT(*) FROM registrados_periodo)
@@ -900,20 +985,13 @@ def obtener_dashboard_contratacion(
 
     motivos_rows = db.execute(
         text("""
-            WITH universo_rechazos AS (
-                SELECT rp."IdRegistroPersonal"
+            WITH universo_base AS (
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."UsuarioActualizacion"
                 FROM public."RegistroPersonal" rp
                 WHERE
-                    rp."IdEstadoProceso" = 28
-                    AND (
-                        :anio IS NULL
-                        OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio
-                    )
-                    AND (
-                        :mes IS NULL
-                        OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes
-                    )
-                    AND NOT EXISTS (
+                    NOT EXISTS (
                         SELECT 1
                         FROM public."HistorialLaboral" hl
                         WHERE
@@ -930,21 +1008,88 @@ def obtener_dashboard_contratacion(
                     ) NOT LIKE '%migrado%'
                     AND COALESCE(rp."UsuarioActualizacion", '')
                         <> 'ajuste_no_activos_maestro_2026_06_22'
+            ),
+            rechazos_periodo AS (
+                SELECT DISTINCT ON (hec."IdRegistroPersonal")
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento",
+                    hec."UsuarioMovimiento",
+                    hec."OrigenMovimiento"
+                FROM public."HistorialEstadoContratacion" hec
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
+                WHERE
+                    hec."EstadoNuevo" = 28
+                    AND hec."OrigenMovimiento" IN (
+                        'BOTON_NC',
+                        'HISTORICO_MOTIVO_CIERRE'
+                    )
+                    AND hec."Modulo" = 'CONTRATACION'
+                    AND hec."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
+                    )
+                ORDER BY
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" DESC,
+                    hec."IdHistorialEstadoContratacion" DESC
+            ),
+            rechazos_con_motivo AS (
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."OrigenMovimiento",
+                    CASE
+                        WHEN rp."OrigenMovimiento" = 'BOTON_NC'
+                        THEN COALESCE(
+                            NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
+                            'Sin observación'
+                        )
+                        WHEN rp."OrigenMovimiento"
+                            = 'HISTORICO_MOTIVO_CIERRE'
+                        THEN COALESCE(
+                            NULLIF(TRIM(mcp."MotivoCierre"), ''),
+                            'Sin motivo de cierre'
+                        )
+                        ELSE 'Sin motivo'
+                    END AS motivo
+                FROM rechazos_periodo rp
+                LEFT JOIN LATERAL (
+                    SELECT orc_detalle."ObservacionesRechazo"
+                    FROM public."ObsRechazoContratacion" orc_detalle
+                    WHERE
+                        orc_detalle."IdRegistroPersonal"
+                            = rp."IdRegistroPersonal"
+                    ORDER BY
+                        orc_detalle."IdObsRechazoContratacion" DESC
+                    LIMIT 1
+                ) orc ON rp."OrigenMovimiento" = 'BOTON_NC'
+                LEFT JOIN LATERAL (
+                    SELECT mcp_detalle."MotivoCierre"
+                    FROM public."MotivoCierreProceso" mcp_detalle
+                    WHERE
+                        mcp_detalle."IdRegistroPersonal"
+                            = rp."IdRegistroPersonal"
+                    ORDER BY
+                        COALESCE(
+                            mcp_detalle."FechaActualizacion",
+                            mcp_detalle."FechaCreacion"
+                        ) DESC,
+                        mcp_detalle."IdMotivoCierre" DESC
+                    LIMIT 1
+                ) mcp
+                    ON rp."OrigenMovimiento" = 'HISTORICO_MOTIVO_CIERRE'
             )
             SELECT
-                COALESCE(
-                    NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
-                    'Sin observación'
-                ) AS motivo,
-                COUNT(DISTINCT orc."IdRegistroPersonal") AS cantidad
-            FROM public."ObsRechazoContratacion" orc
-            INNER JOIN universo_rechazos ur
-                ON ur."IdRegistroPersonal" = orc."IdRegistroPersonal"
-            GROUP BY
-                COALESCE(
-                    NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
-                    'Sin observación'
-                )
+                motivo,
+                COUNT(*) AS cantidad
+            FROM rechazos_con_motivo
+            GROUP BY motivo
             ORDER BY cantidad DESC, motivo ASC;
         """),
         {"anio": anio, "mes": mes},
@@ -978,6 +1123,7 @@ def obtener_dashboard_contratacion(
     return {
         "modo_consulta": "general",
         "filtros": {"anio": anio, "mes": mes},
+        "fecha_inicio_aplicativo": "2026-03-01",
         "criterio_fecha": {
             "registrados_seleccion": "RegistroPersonal.FechaCreacion",
             "avanzan_contratacion": (
@@ -986,6 +1132,10 @@ def obtener_dashboard_contratacion(
             "contratados": (
                 "HistorialEstadoContratacion.FechaMovimiento "
                 "del estado 25 por BOTON_C"
+            ),
+            "rechazados_contratacion": (
+                "HistorialEstadoContratacion.FechaMovimiento "
+                "del estado 28 por BOTON_NC o HISTORICO_MOTIVO_CIERRE"
             ),
             "tiempo_contratacion": (
                 "Casos cuyo estado 25 por BOTON_C ocurrió "
@@ -1011,14 +1161,16 @@ def obtener_dashboard_contratacion(
         },
         "rechazados": {
             "total": rechazados_contratacion,
-            "fuente": "ObsRechazoContratacion + estado actual 28",
+            "fuente": "HistorialEstadoContratacion",
             "motivos": motivos_rechazo_contratacion,
             "pendiente_fuente_contratacion": False,
             "filtro_fecha": (
-                "Temporalmente se usa RegistroPersonal.FechaCreacion, "
-                "porque ObsRechazoContratacion.FechaRechazo no contiene "
-                "una fecha completa."
+                "HistorialEstadoContratacion.FechaMovimiento"
             ),
+            "origenes_incluidos": [
+                "BOTON_NC",
+                "HISTORICO_MOTIVO_CIERRE",
+            ],
         },
         "tiempo_contratacion": {
             "promedio_minutos": promedio_minutos,
@@ -1041,6 +1193,8 @@ def obtener_dashboard_contratacion(
             ),
         },
         "exclusiones": {
+            "fecha_anterior_inicio_aplicativo": True,
+            "fecha_inicio_aplicativo": "2026-03-01",
             "activo_migrado_historial_laboral": True,
             "usuarios_migracion": True,
             "ajuste_no_activos_maestro": True,
