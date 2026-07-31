@@ -458,14 +458,25 @@ def buscar_trabajadores_dashboard_contratacion(
                 ) AS nombre_completo,
                 rp."NumeroIdentificacion"::text AS numero_identificacion,
                 rp."IdEstadoProceso" AS id_estado_proceso,
-                EXISTS (
-                    SELECT 1
-                    FROM public."HistorialLaboral" hl
-                    WHERE
-                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                        AND UPPER(
-                            TRIM(COALESCE(hl."TipoVinculacion", ''))
-                        ) = 'ACTIVO MIGRADO'
+                (
+                    EXISTS (
+                        SELECT 1
+                        FROM public."HistorialLaboral" hl
+                        WHERE
+                            hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND UPPER(
+                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                            ) = 'ACTIVO MIGRADO'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM public."ContratacionBasica" cb
+                        WHERE
+                            cb."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND cb."FechaIngreso" IS NOT NULL
+                            AND cb."FechaIngreso"::date
+                                < rp."FechaCreacion"::date
+                    )
                 ) AS es_activo_migrado
             FROM public."RegistroPersonal" rp
             WHERE
@@ -554,14 +565,32 @@ def _obtener_dashboard_contratacion_individual(
                 rp."IdEstadoProceso" AS id_estado_proceso,
                 rp."FechaCreacion" AS fecha_registro_seleccion,
                 rp."UsuarioActualizacion" AS usuario_actualizacion,
-                EXISTS (
-                    SELECT 1
-                    FROM public."HistorialLaboral" hl
+                (
+                    SELECT MIN(cb."FechaIngreso")::timestamptz
+                    FROM public."ContratacionBasica" cb
                     WHERE
-                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                        AND UPPER(
-                            TRIM(COALESCE(hl."TipoVinculacion", ''))
-                        ) = 'ACTIVO MIGRADO'
+                        cb."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND cb."FechaIngreso" IS NOT NULL
+                ) AS fecha_ingreso_contratacion_basica,
+                (
+                    EXISTS (
+                        SELECT 1
+                        FROM public."HistorialLaboral" hl
+                        WHERE
+                            hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND UPPER(
+                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                            ) = 'ACTIVO MIGRADO'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM public."ContratacionBasica" cb
+                        WHERE
+                            cb."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND cb."FechaIngreso" IS NOT NULL
+                            AND cb."FechaIngreso"::date
+                                < rp."FechaCreacion"::date
+                    )
                 ) AS es_activo_migrado
             FROM public."RegistroPersonal" rp
             WHERE
@@ -763,6 +792,22 @@ def _obtener_dashboard_contratacion_individual(
         datos_trabajador.get("es_activo_migrado")
     )
 
+    fecha_ingreso_historica = datos_trabajador.get(
+        "fecha_ingreso_contratacion_basica"
+    )
+
+    # En un trabajador histórico, los movimientos 24 y 25 reconstruidos
+    # posteriormente no representan su proceso real dentro del aplicativo.
+    # Por eso se conserva la fecha real de ContratacionBasica, se elimina
+    # el avance ficticio y no se calcula tiempo de contratación.
+    if es_activo_migrado:
+        fecha_estado_24 = None
+        tiempo_segundos = None
+
+        if fecha_ingreso_historica is not None:
+            fecha_estado_25 = fecha_ingreso_historica
+            fuente_fecha_contratacion = "CONTRATACION_BASICA"
+
     fecha_rechazo = (
         rechazo.get("fecha_rechazo")
         if rechazo
@@ -822,7 +867,12 @@ def _obtener_dashboard_contratacion_individual(
             "ni en ContratacionBasica."
         )
 
-    if tiempo_segundos is not None:
+    if es_activo_migrado:
+        mensaje_tiempo = (
+            "No se calcula porque el trabajador corresponde a información "
+            "histórica y no recorrió dentro del aplicativo el flujo 24 a 25."
+        )
+    elif tiempo_segundos is not None:
         mensaje_tiempo = (
             "Tiempo real del trabajador entre el avance a contratación "
             "y su fecha de contratación."
@@ -876,8 +926,15 @@ def _obtener_dashboard_contratacion_individual(
         },
 
         "avance_contratacion": {
-            "existe": fecha_estado_24 is not None,
-            "fecha": fecha_estado_24,
+            "existe": (
+                fecha_estado_24 is not None
+                and not es_activo_migrado
+            ),
+            "fecha": (
+                fecha_estado_24
+                if not es_activo_migrado
+                else None
+            ),
             "fuente": (
                 "HistorialEstadoContratacion"
                 if fecha_estado_24 is not None
@@ -906,16 +963,26 @@ def _obtener_dashboard_contratacion_individual(
         },
 
         "tiempo_contratacion": {
-            "total_segundos": tiempo_segundos,
+            "total_segundos": (
+                tiempo_segundos
+                if not es_activo_migrado
+                else None
+            ),
             "total_minutos": (
                 round(tiempo_segundos / 60, 2)
                 if tiempo_segundos is not None
+                and not es_activo_migrado
                 else None
             ),
-            "formateado": _formatear_duracion_segundos(
-                tiempo_segundos
+            "formateado": (
+                _formatear_duracion_segundos(tiempo_segundos)
+                if not es_activo_migrado
+                else None
             ),
-            "disponible": tiempo_segundos is not None,
+            "disponible": (
+                tiempo_segundos is not None
+                and not es_activo_migrado
+            ),
             "fecha_inicio": fecha_estado_24,
             "fecha_fin": fecha_estado_25,
             "fuente_inicio": (
@@ -1002,11 +1069,20 @@ def obtener_dashboard_contratacion(
       únicamente personas con movimiento real desde el estado 24
       al estado 28. Quienes permanecen en estado 24 no se cuentan
       como rechazados.
-    - Pendientes de Contratación:
-      personas que avanzaron al estado 24 dentro del periodo consultado
-      y cuyo estado actual continúa siendo 24.
+    - Cohorte del periodo:
+      personas que avanzaron al estado 24 dentro del periodo consultado.
+      Su resultado se evalúa al cierre del periodo seleccionado.
+    - Contratados de la cohorte:
+      integrantes de la cohorte que llegaron al estado 25 antes del corte.
+    - Rechazados de la cohorte:
+      integrantes de la cohorte que pasaron del estado 24 al 28 antes del corte.
+    - Pendientes de la cohorte:
+      integrantes sin decisión final 25 o 28 antes del corte.
+    - Contrataciones finalizadas en el periodo:
+      movimientos reales al estado 25 ocurridos dentro del periodo,
+      aunque el avance al estado 24 haya sucedido en un periodo anterior.
     - Tiempo promedio:
-      únicamente casos con trazabilidad real completa entre estados 24 y 25.
+      contrataciones finalizadas en el periodo con trazabilidad real 24 a 25.
 
     No se reconstruyen movimientos históricos en la base de datos.
     Los casos legacy provenientes de Achill y los registros de prueba
@@ -1057,7 +1133,37 @@ def obtener_dashboard_contratacion(
 
     resultado = db.execute(
         text("""
-            WITH universo_base AS (
+            WITH parametros_periodo AS (
+                SELECT
+                    CASE
+                        WHEN :anio IS NOT NULL AND :mes IS NOT NULL
+                        THEN (
+                            MAKE_TIMESTAMPTZ(
+                                :anio,
+                                :mes,
+                                1,
+                                0,
+                                0,
+                                0,
+                                'America/Bogota'
+                            ) + INTERVAL '1 month'
+                        )
+                        WHEN :anio IS NOT NULL
+                        THEN (
+                            MAKE_TIMESTAMPTZ(
+                                :anio,
+                                1,
+                                1,
+                                0,
+                                0,
+                                0,
+                                'America/Bogota'
+                            ) + INTERVAL '1 year'
+                        )
+                        ELSE CURRENT_TIMESTAMP
+                    END AS fecha_corte
+            ),
+            universo_base AS (
                 SELECT
                     rp."IdRegistroPersonal",
                     rp."IdEstadoProceso",
@@ -1247,44 +1353,61 @@ def obtener_dashboard_contratacion(
                     "IdRegistroPersonal",
                     fecha_avance ASC
             ),
-            pendientes_contratacion_periodo AS (
+            decisiones_cohorte AS (
                 SELECT
-                    ap."IdRegistroPersonal"
+                    ap."IdRegistroPersonal",
+                    ap.fecha_avance,
+                    ap.fuente_avance,
+                    CASE
+                        WHEN ap.fuente_avance
+                            = 'CONTRATACION_REAL_SIN_HISTORIAL'
+                        THEN 25
+                        ELSE decision."EstadoNuevo"
+                    END AS estado_decision,
+                    CASE
+                        WHEN ap.fuente_avance
+                            = 'CONTRATACION_REAL_SIN_HISTORIAL'
+                        THEN ap.fecha_avance
+                        ELSE decision."FechaMovimiento"
+                    END AS fecha_decision
                 FROM avances_periodo ap
-                INNER JOIN universo_base ub
-                    ON ub."IdRegistroPersonal" = ap."IdRegistroPersonal"
-                WHERE ub."IdEstadoProceso" = 24
+                CROSS JOIN parametros_periodo pp
+                LEFT JOIN LATERAL (
+                    SELECT
+                        hec."EstadoNuevo",
+                        hec."FechaMovimiento"
+                    FROM public."HistorialEstadoContratacion" hec
+                    WHERE
+                        hec."IdRegistroPersonal" = ap."IdRegistroPersonal"
+                        AND hec."FechaMovimiento" >= ap.fecha_avance
+                        AND hec."FechaMovimiento" < pp.fecha_corte
+                        AND (
+                            hec."EstadoNuevo" = 25
+                            OR (
+                                hec."EstadoAnterior" = 24
+                                AND hec."EstadoNuevo" = 28
+                            )
+                        )
+                    ORDER BY
+                        hec."FechaMovimiento" ASC,
+                        hec."IdHistorialEstadoContratacion" ASC
+                    LIMIT 1
+                ) decision ON TRUE
             ),
-            rechazos_periodo AS (
-                SELECT DISTINCT ON (hec28."IdRegistroPersonal")
-                    hec28."IdRegistroPersonal",
-                    hec28."FechaMovimiento" AS fecha_rechazo,
-                    hec28."UsuarioMovimiento" AS usuario_rechazo,
-                    hec28."OrigenMovimiento" AS origen_movimiento
-                FROM public."HistorialEstadoContratacion" hec28
-                INNER JOIN universo_base ub
-                    ON ub."IdRegistroPersonal" = hec28."IdRegistroPersonal"
-                WHERE
-                    hec28."EstadoAnterior" = 24
-                    AND hec28."EstadoNuevo" = 28
-                    AND hec28."FechaMovimiento"
-                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
-                    AND (
-                        :anio IS NULL
-                        OR EXTRACT(
-                            YEAR FROM hec28."FechaMovimiento"
-                        ) = :anio
-                    )
-                    AND (
-                        :mes IS NULL
-                        OR EXTRACT(
-                            MONTH FROM hec28."FechaMovimiento"
-                        ) = :mes
-                    )
-                ORDER BY
-                    hec28."IdRegistroPersonal",
-                    hec28."FechaMovimiento" DESC,
-                    hec28."IdHistorialEstadoContratacion" DESC
+            contratados_cohorte AS (
+                SELECT "IdRegistroPersonal"
+                FROM decisiones_cohorte
+                WHERE estado_decision = 25
+            ),
+            rechazados_cohorte AS (
+                SELECT "IdRegistroPersonal", fecha_decision AS fecha_rechazo
+                FROM decisiones_cohorte
+                WHERE estado_decision = 28
+            ),
+            pendientes_contratacion_periodo AS (
+                SELECT "IdRegistroPersonal"
+                FROM decisiones_cohorte
+                WHERE estado_decision IS NULL
             ),
             casos_tiempo_medible AS (
                 SELECT
@@ -1302,7 +1425,9 @@ def obtener_dashboard_contratacion(
                 (SELECT COUNT(*) FROM avances_periodo)
                     AS avanzan_contratacion,
                 (SELECT COUNT(*) FROM contrataciones_periodo)
-                    AS contratados,
+                    AS contrataciones_finalizadas_periodo,
+                (SELECT COUNT(*) FROM contratados_cohorte)
+                    AS contratados_cohorte,
                 (SELECT COUNT(*) FROM pendientes_contratacion_periodo)
                     AS pendientes_contratacion,
                 (
@@ -1317,7 +1442,7 @@ def obtener_dashboard_contratacion(
                 ) AS promedio_segundos,
                 (SELECT COUNT(*) FROM casos_tiempo_medible)
                     AS casos_tiempo_medidos,
-                (SELECT COUNT(*) FROM rechazos_periodo)
+                (SELECT COUNT(*) FROM rechazados_cohorte)
                     AS rechazados_contratacion,
                 (
                     SELECT COUNT(*)
@@ -1342,7 +1467,12 @@ def obtener_dashboard_contratacion(
     avanzan_contratacion = int(
         resultado.get("avanzan_contratacion") or 0
     )
-    contratados = int(resultado.get("contratados") or 0)
+    contrataciones_finalizadas_periodo = int(
+        resultado.get("contrataciones_finalizadas_periodo") or 0
+    )
+    contratados_cohorte = int(
+        resultado.get("contratados_cohorte") or 0
+    )
     pendientes_contratacion = int(
         resultado.get("pendientes_contratacion") or 0
     )
@@ -1371,7 +1501,37 @@ def obtener_dashboard_contratacion(
 
     motivos_rows = db.execute(
         text("""
-            WITH universo_base AS (
+            WITH parametros_periodo AS (
+                SELECT
+                    CASE
+                        WHEN :anio IS NOT NULL AND :mes IS NOT NULL
+                        THEN (
+                            MAKE_TIMESTAMPTZ(
+                                :anio,
+                                :mes,
+                                1,
+                                0,
+                                0,
+                                0,
+                                'America/Bogota'
+                            ) + INTERVAL '1 month'
+                        )
+                        WHEN :anio IS NOT NULL
+                        THEN (
+                            MAKE_TIMESTAMPTZ(
+                                :anio,
+                                1,
+                                1,
+                                0,
+                                0,
+                                0,
+                                'America/Bogota'
+                            ) + INTERVAL '1 year'
+                        )
+                        ELSE CURRENT_TIMESTAMP
+                    END AS fecha_corte
+            ),
+            universo_base AS (
                 SELECT
                     rp."IdRegistroPersonal",
                     rp."NumeroIdentificacion"::text
@@ -1397,9 +1557,11 @@ def obtener_dashboard_contratacion(
                     AND COALESCE(rp."UsuarioActualizacion", '')
                         <> 'ajuste_no_activos_maestro_2026_06_22'
             ),
-            avances_periodo AS (
-                SELECT DISTINCT
-                    hec."IdRegistroPersonal"
+            avances_historial_periodo AS (
+                SELECT DISTINCT ON (hec."IdRegistroPersonal")
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" AS fecha_avance,
+                    'HISTORIAL_ESTADO_24'::text AS fuente_avance
                 FROM public."HistorialEstadoContratacion" hec
                 INNER JOIN universo_base ub
                     ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
@@ -1415,30 +1577,17 @@ def obtener_dashboard_contratacion(
                         :mes IS NULL
                         OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
                     )
+                ORDER BY
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" ASC,
+                    hec."IdHistorialEstadoContratacion" ASC
             ),
-            contrataciones_periodo AS (
-                SELECT DISTINCT
-                    hec."IdRegistroPersonal"
-                FROM public."HistorialEstadoContratacion" hec
-                INNER JOIN universo_base ub
-                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
-                WHERE
-                    hec."EstadoNuevo" = 25
-                    AND hec."FechaMovimiento"
-                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
-                    AND (
-                        :anio IS NULL
-                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
-                    )
-                    AND (
-                        :mes IS NULL
-                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
-                    )
-
-                UNION
-
-                SELECT DISTINCT
-                    ub."IdRegistroPersonal"
+            avances_sin_historial_periodo AS (
+                SELECT DISTINCT ON (ub."IdRegistroPersonal")
+                    ub."IdRegistroPersonal",
+                    cb."FechaIngreso"::timestamptz AS fecha_avance,
+                    'CONTRATACION_REAL_SIN_HISTORIAL'::text
+                        AS fuente_avance
                 FROM universo_base ub
                 INNER JOIN public."ContratacionBasica" cb
                     ON cb."IdRegistroPersonal" = ub."IdRegistroPersonal"
@@ -1453,6 +1602,14 @@ def obtener_dashboard_contratacion(
                     )
                     AND cb."FechaIngreso" IS NOT NULL
                     AND cb."FechaIngreso"::date >= DATE '2026-03-01'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM public."HistorialEstadoContratacion" hec25
+                        WHERE
+                            hec25."IdRegistroPersonal"
+                                = ub."IdRegistroPersonal"
+                            AND hec25."EstadoNuevo" = 25
+                    )
                     AND (
                         :anio IS NULL
                         OR EXTRACT(YEAR FROM cb."FechaIngreso") = :anio
@@ -1461,34 +1618,60 @@ def obtener_dashboard_contratacion(
                         :mes IS NULL
                         OR EXTRACT(MONTH FROM cb."FechaIngreso") = :mes
                     )
+                ORDER BY
+                    ub."IdRegistroPersonal",
+                    cb."FechaIngreso" ASC
+            ),
+            avances_periodo AS (
+                SELECT DISTINCT ON ("IdRegistroPersonal")
+                    "IdRegistroPersonal",
+                    fecha_avance,
+                    fuente_avance
+                FROM (
+                    SELECT * FROM avances_historial_periodo
+                    UNION ALL
+                    SELECT * FROM avances_sin_historial_periodo
+                ) avances_unificados
+                ORDER BY
+                    "IdRegistroPersonal",
+                    fecha_avance ASC
+            ),
+            decisiones_cohorte AS (
+                SELECT
+                    ap."IdRegistroPersonal",
+                    CASE
+                        WHEN ap.fuente_avance
+                            = 'CONTRATACION_REAL_SIN_HISTORIAL'
+                        THEN 25
+                        ELSE decision."EstadoNuevo"
+                    END AS estado_decision
+                FROM avances_periodo ap
+                CROSS JOIN parametros_periodo pp
+                LEFT JOIN LATERAL (
+                    SELECT
+                        hec."EstadoNuevo"
+                    FROM public."HistorialEstadoContratacion" hec
+                    WHERE
+                        hec."IdRegistroPersonal" = ap."IdRegistroPersonal"
+                        AND hec."FechaMovimiento" >= ap.fecha_avance
+                        AND hec."FechaMovimiento" < pp.fecha_corte
+                        AND (
+                            hec."EstadoNuevo" = 25
+                            OR (
+                                hec."EstadoAnterior" = 24
+                                AND hec."EstadoNuevo" = 28
+                            )
+                        )
+                    ORDER BY
+                        hec."FechaMovimiento" ASC,
+                        hec."IdHistorialEstadoContratacion" ASC
+                    LIMIT 1
+                ) decision ON TRUE
             ),
             rechazados_periodo AS (
-                SELECT DISTINCT ON (hec28."IdRegistroPersonal")
-                    hec28."IdRegistroPersonal"
-                FROM public."HistorialEstadoContratacion" hec28
-                INNER JOIN universo_base ub
-                    ON ub."IdRegistroPersonal" = hec28."IdRegistroPersonal"
-                WHERE
-                    hec28."EstadoAnterior" = 24
-                    AND hec28."EstadoNuevo" = 28
-                    AND hec28."FechaMovimiento"
-                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
-                    AND (
-                        :anio IS NULL
-                        OR EXTRACT(
-                            YEAR FROM hec28."FechaMovimiento"
-                        ) = :anio
-                    )
-                    AND (
-                        :mes IS NULL
-                        OR EXTRACT(
-                            MONTH FROM hec28."FechaMovimiento"
-                        ) = :mes
-                    )
-                ORDER BY
-                    hec28."IdRegistroPersonal",
-                    hec28."FechaMovimiento" DESC,
-                    hec28."IdHistorialEstadoContratacion" DESC
+                SELECT "IdRegistroPersonal"
+                FROM decisiones_cohorte
+                WHERE estado_decision = 28
             ),
             rechazos_con_motivo AS (
                 SELECT
@@ -1558,14 +1741,36 @@ def obtener_dashboard_contratacion(
         })
 
     porcentaje_contratados_sobre_registrados = (
-        round((contratados / registrados_seleccion) * 100, 2)
+        round(
+            (
+                contrataciones_finalizadas_periodo
+                / registrados_seleccion
+            ) * 100,
+            2,
+        )
         if registrados_seleccion > 0
         else 0
     )
     porcentaje_contratados_sobre_avanzan = (
-        round((contratados / avanzan_contratacion) * 100, 2)
+        round(
+            (contratados_cohorte / avanzan_contratacion) * 100,
+            2,
+        )
         if avanzan_contratacion > 0
         else 0
+    )
+
+    suma_resultados_cohorte = (
+        contratados_cohorte
+        + rechazados_contratacion
+        + pendientes_contratacion
+    )
+    cohorte_consistente = (
+        suma_resultados_cohorte == avanzan_contratacion
+    )
+    contratados_periodos_anteriores = max(
+        contrataciones_finalizadas_periodo - contratados_cohorte,
+        0,
     )
 
     return {
@@ -1583,12 +1788,12 @@ def obtener_dashboard_contratacion(
                 "sin historial se usa ContratacionBasica.FechaIngreso"
             ),
             "rechazados_contratacion": (
-                "Fecha del movimiento real desde el estado 24 "
-                "al estado 28"
+                "Personas de la cohorte cuya primera decisión final "
+                "antes del corte fue la transición 24 a 28"
             ),
             "pendientes_contratacion": (
-                "Fecha del avance al estado 24 dentro del periodo; "
-                "el estado actual debe continuar siendo 24"
+                "Personas de la cohorte sin decisión 25 o 28 "
+                "antes del cierre del periodo"
             ),
             "tiempo_contratacion": (
                 "Solo casos con fechas reales de estados 24 y 25"
@@ -1597,32 +1802,52 @@ def obtener_dashboard_contratacion(
         "registrados_seleccion": registrados_seleccion,
         "comparativo_registrados_contratados": {
             "registrados_seleccion": registrados_seleccion,
-            "contratados": contratados,
+            "contratados": contrataciones_finalizadas_periodo,
             "porcentaje_contratados": porcentaje_contratados_sobre_registrados,
             "nota": "Cada valor usa la fecha real disponible de su evento.",
         },
         "comparativo_avanzan_contratados": {
             "avanzan_contratacion": avanzan_contratacion,
-            "contratados": contratados,
+            "contratados": contratados_cohorte,
             "porcentaje_contratados": porcentaje_contratados_sobre_avanzan,
             "fuente": (
                 "HistorialEstadoContratacion y ContratacionBasica "
                 "para seis excepciones verificadas"
             ),
             "nota": (
-                "Todo contratado real cuenta como avanzado. "
-                "Los pendientes se identifican por estado actual 24."
+                "Este comparativo usa una sola cohorte: personas que "
+                "avanzaron dentro del periodo. Su resultado se evalúa "
+                "al cierre del periodo seleccionado."
             ),
+        },
+        "contrataciones_finalizadas_periodo": {
+            "total": contrataciones_finalizadas_periodo,
+            "de_cohorte_periodo": contratados_cohorte,
+            "provenientes_periodos_anteriores": (
+                contratados_periodos_anteriores
+            ),
+            "nota": (
+                "El total incluye todas las contrataciones terminadas "
+                "en el periodo, aunque el avance haya ocurrido antes."
+            ),
+        },
+        "auditoria_cohorte": {
+            "avanzan": avanzan_contratacion,
+            "contratados": contratados_cohorte,
+            "rechazados": rechazados_contratacion,
+            "pendientes": pendientes_contratacion,
+            "suma_resultados": suma_resultados_cohorte,
+            "es_consistente": cohorte_consistente,
         },
         "pendientes_contratacion": {
             "total": pendientes_contratacion,
             "fuente": (
-                "RegistroPersonal.IdEstadoProceso = 24, limitado a personas "
-                "que avanzaron dentro del periodo consultado"
+                "Cohorte de personas que avanzaron en el periodo y no "
+                "tenían decisión 25 o 28 antes del corte"
             ),
             "criterio": (
-                "Trabajadores que avanzaron a Contratación y todavía no "
-                "tienen decisión final mediante C o NC"
+                "Trabajadores de la cohorte sin decisión final al cierre "
+                "del periodo consultado"
             ),
             "estado_actual": 24,
             "modifica_base_datos": False,
@@ -1635,7 +1860,8 @@ def obtener_dashboard_contratacion(
             "motivos": motivos_rechazo_contratacion,
             "pendiente_fuente_contratacion": False,
             "filtro_fecha": (
-                "Fecha del movimiento al estado 28 dentro del periodo"
+                "Avance al estado 24 dentro del periodo y decisión "
+                "al estado 28 antes del corte"
             ),
             "origenes_incluidos": [
                 "ESTADO_ANTERIOR_24",
