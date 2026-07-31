@@ -783,6 +783,9 @@ def obtener_dashboard_contratacion(
       únicamente personas con movimiento real desde el estado 24
       al estado 28. Quienes permanecen en estado 24 no se cuentan
       como rechazados.
+    - Pendientes de Contratación:
+      personas que avanzaron al estado 24 dentro del periodo consultado
+      y cuyo estado actual continúa siendo 24.
     - Tiempo promedio:
       únicamente casos con trazabilidad real completa entre estados 24 y 25.
 
@@ -1025,6 +1028,14 @@ def obtener_dashboard_contratacion(
                     "IdRegistroPersonal",
                     fecha_avance ASC
             ),
+            pendientes_contratacion_periodo AS (
+                SELECT
+                    ap."IdRegistroPersonal"
+                FROM avances_periodo ap
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = ap."IdRegistroPersonal"
+                WHERE ub."IdEstadoProceso" = 24
+            ),
             rechazos_periodo AS (
                 SELECT DISTINCT ON (hec28."IdRegistroPersonal")
                     hec28."IdRegistroPersonal",
@@ -1073,6 +1084,8 @@ def obtener_dashboard_contratacion(
                     AS avanzan_contratacion,
                 (SELECT COUNT(*) FROM contrataciones_periodo)
                     AS contratados,
+                (SELECT COUNT(*) FROM pendientes_contratacion_periodo)
+                    AS pendientes_contratacion,
                 (
                     SELECT AVG(
                         EXTRACT(
@@ -1111,6 +1124,9 @@ def obtener_dashboard_contratacion(
         resultado.get("avanzan_contratacion") or 0
     )
     contratados = int(resultado.get("contratados") or 0)
+    pendientes_contratacion = int(
+        resultado.get("pendientes_contratacion") or 0
+    )
     contratados_sin_historial = int(
         resultado.get("contratados_sin_historial") or 0
     )
@@ -1351,6 +1367,10 @@ def obtener_dashboard_contratacion(
                 "Fecha del movimiento real desde el estado 24 "
                 "al estado 28"
             ),
+            "pendientes_contratacion": (
+                "Fecha del avance al estado 24 dentro del periodo; "
+                "el estado actual debe continuar siendo 24"
+            ),
             "tiempo_contratacion": (
                 "Solo casos con fechas reales de estados 24 y 25"
             ),
@@ -1372,8 +1392,21 @@ def obtener_dashboard_contratacion(
             ),
             "nota": (
                 "Todo contratado real cuenta como avanzado. "
-                "No se crea una categoría permanente de pendientes."
+                "Los pendientes se identifican por estado actual 24."
             ),
+        },
+        "pendientes_contratacion": {
+            "total": pendientes_contratacion,
+            "fuente": (
+                "RegistroPersonal.IdEstadoProceso = 24, limitado a personas "
+                "que avanzaron dentro del periodo consultado"
+            ),
+            "criterio": (
+                "Trabajadores que avanzaron a Contratación y todavía no "
+                "tienen decisión final mediante C o NC"
+            ),
+            "estado_actual": 24,
+            "modifica_base_datos": False,
         },
         "rechazados": {
             "total": rechazados_contratacion,
