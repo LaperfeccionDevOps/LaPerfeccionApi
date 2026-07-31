@@ -424,10 +424,15 @@ def buscar_trabajadores_dashboard_contratacion(
     db: Session = Depends(get_db),
 ):
     """
-    Busca candidatos por nombre, apellido o número de identificación.
+    Busca cualquier trabajador por nombre, apellido o identificación.
 
-    El IdRegistroPersonal se devuelve únicamente para uso interno del frontend.
-    En la interfaz se debe mostrar nombre completo y número de identificación.
+    Esta consulta individual permite encontrar trabajadores creados:
+    - Por el flujo normal del aplicativo.
+    - Por migración histórica.
+    - Por ajustes administrativos posteriores.
+
+    Los filtros de exclusión de migración se conservan únicamente en
+    los indicadores generales del dashboard de Contratación.
     """
     texto_limpio = (texto_busqueda or "").strip()
 
@@ -452,21 +457,19 @@ def buscar_trabajadores_dashboard_contratacion(
                     )
                 ) AS nombre_completo,
                 rp."NumeroIdentificacion"::text AS numero_identificacion,
-                rp."IdEstadoProceso" AS id_estado_proceso
-            FROM public."RegistroPersonal" rp
-            WHERE
-                NOT EXISTS (
+                rp."IdEstadoProceso" AS id_estado_proceso,
+                EXISTS (
                     SELECT 1
                     FROM public."HistorialLaboral" hl
                     WHERE
                         hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                        AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
-                )
-                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
-                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
-                AND COALESCE(rp."UsuarioActualizacion", '')
-                    <> 'ajuste_no_activos_maestro_2026_06_22'
-                AND (
+                        AND UPPER(
+                            TRIM(COALESCE(hl."TipoVinculacion", ''))
+                        ) = 'ACTIVO MIGRADO'
+                ) AS es_activo_migrado
+            FROM public."RegistroPersonal" rp
+            WHERE
+                (
                     rp."NumeroIdentificacion"::text ILIKE :patron
                     OR CONCAT_WS(
                         ' ',
@@ -478,7 +481,8 @@ def buscar_trabajadores_dashboard_contratacion(
                 )
             ORDER BY
                 CASE
-                    WHEN rp."NumeroIdentificacion"::text = :texto_exacto THEN 0
+                    WHEN rp."NumeroIdentificacion"::text = :texto_exacto
+                    THEN 0
                     ELSE 1
                 END,
                 nombre_completo ASC,
@@ -493,11 +497,20 @@ def buscar_trabajadores_dashboard_contratacion(
     ).mappings().all()
 
     resultados = []
+
     for row in rows:
         item = dict(row)
+
         item["estado_actual"] = _nombre_estado_proceso(
             item.get("id_estado_proceso")
         )
+
+        item["origen_registro"] = (
+            "Migración histórica"
+            if item.get("es_activo_migrado")
+            else "Aplicativo"
+        )
+
         resultados.append(item)
 
     return {
@@ -511,6 +524,21 @@ def _obtener_dashboard_contratacion_individual(
     id_registro_personal: int,
     db: Session,
 ):
+    """
+    Consulta individual de cualquier trabajador.
+
+    A diferencia de los indicadores generales, esta consulta no excluye:
+    - Trabajadores migrados.
+    - Usuarios con etiquetas de migración.
+    - Registros de ajustes administrativos.
+
+    La fecha de contratación se obtiene en este orden:
+    1. HistorialEstadoContratacion, estado 25.
+    2. ContratacionBasica.FechaIngreso como respaldo.
+
+    Esta función solo consulta información y no modifica la base de datos.
+    """
+
     trabajador = db.execute(
         text("""
             SELECT
@@ -524,74 +552,103 @@ def _obtener_dashboard_contratacion_individual(
                 ) AS nombre_completo,
                 rp."NumeroIdentificacion"::text AS numero_identificacion,
                 rp."IdEstadoProceso" AS id_estado_proceso,
-                rp."FechaCreacion" AS fecha_registro_seleccion
-            FROM public."RegistroPersonal" rp
-            WHERE
-                rp."IdRegistroPersonal" = :id_registro_personal
-                AND NOT EXISTS (
+                rp."FechaCreacion" AS fecha_registro_seleccion,
+                rp."UsuarioActualizacion" AS usuario_actualizacion,
+                EXISTS (
                     SELECT 1
                     FROM public."HistorialLaboral" hl
                     WHERE
                         hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                        AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
-                )
-                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
-                AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
-                AND COALESCE(rp."UsuarioActualizacion", '')
-                    <> 'ajuste_no_activos_maestro_2026_06_22';
+                        AND UPPER(
+                            TRIM(COALESCE(hl."TipoVinculacion", ''))
+                        ) = 'ACTIVO MIGRADO'
+                ) AS es_activo_migrado
+            FROM public."RegistroPersonal" rp
+            WHERE
+                rp."IdRegistroPersonal" = :id_registro_personal;
         """),
-        {"id_registro_personal": id_registro_personal},
+        {
+            "id_registro_personal": id_registro_personal,
+        },
     ).mappings().first()
 
     if not trabajador:
         raise HTTPException(
             status_code=404,
-            detail=(
-                "No se encontró el trabajador o el registro está excluido "
-                "por corresponder a información migrada."
-            ),
+            detail="No se encontró el trabajador consultado.",
         )
 
     trazabilidad = db.execute(
         text("""
-            WITH fecha_25 AS (
-                SELECT MIN(hec."FechaMovimiento") AS fecha_estado_25
+            WITH fecha_25_historial AS (
+                SELECT
+                    MIN(hec."FechaMovimiento") AS fecha_estado_25
                 FROM public."HistorialEstadoContratacion" hec
                 WHERE
                     hec."IdRegistroPersonal" = :id_registro_personal
                     AND hec."EstadoNuevo" = 25
-                    AND hec."OrigenMovimiento" = 'BOTON_C'
-                    AND hec."Modulo" = 'CONTRATACION'
+            ),
+            fecha_contratacion_basica AS (
+                SELECT
+                    MIN(cb."FechaIngreso")::timestamptz
+                        AS fecha_ingreso_contratacion
+                FROM public."ContratacionBasica" cb
+                WHERE
+                    cb."IdRegistroPersonal" = :id_registro_personal
+                    AND cb."FechaIngreso" IS NOT NULL
+            ),
+            fecha_contratacion_final AS (
+                SELECT
+                    COALESCE(
+                        f25.fecha_estado_25,
+                        fcb.fecha_ingreso_contratacion
+                    ) AS fecha_estado_25,
+                    CASE
+                        WHEN f25.fecha_estado_25 IS NOT NULL
+                        THEN 'HISTORIAL_ESTADO_CONTRATACION'
+
+                        WHEN fcb.fecha_ingreso_contratacion IS NOT NULL
+                        THEN 'CONTRATACION_BASICA'
+
+                        ELSE NULL
+                    END AS fuente_fecha_contratacion
+                FROM fecha_25_historial f25
+                CROSS JOIN fecha_contratacion_basica fcb
             ),
             fecha_24 AS (
-                SELECT MAX(hec."FechaMovimiento") AS fecha_estado_24
+                SELECT
+                    MAX(hec."FechaMovimiento") AS fecha_estado_24
                 FROM public."HistorialEstadoContratacion" hec
-                CROSS JOIN fecha_25 f25
+                CROSS JOIN fecha_contratacion_final fcf
                 WHERE
                     hec."IdRegistroPersonal" = :id_registro_personal
                     AND hec."EstadoNuevo" = 24
-                    AND hec."OrigenMovimiento" = 'CAMBIO_ESTADO'
-                    AND hec."Modulo" = 'SELECCION'
                     AND (
-                        f25.fecha_estado_25 IS NULL
-                        OR hec."FechaMovimiento" <= f25.fecha_estado_25
+                        fcf.fecha_estado_25 IS NULL
+                        OR hec."FechaMovimiento" <= fcf.fecha_estado_25
                     )
             )
             SELECT
                 f24.fecha_estado_24,
-                f25.fecha_estado_25,
+                fcf.fecha_estado_25,
+                fcf.fuente_fecha_contratacion,
                 CASE
                     WHEN f24.fecha_estado_24 IS NOT NULL
-                         AND f25.fecha_estado_25 IS NOT NULL
+                         AND fcf.fecha_estado_25 IS NOT NULL
+                         AND fcf.fecha_estado_25 >= f24.fecha_estado_24
                     THEN EXTRACT(
-                        EPOCH FROM (f25.fecha_estado_25 - f24.fecha_estado_24)
+                        EPOCH FROM (
+                            fcf.fecha_estado_25 - f24.fecha_estado_24
+                        )
                     )
                     ELSE NULL
                 END AS tiempo_segundos
             FROM fecha_24 f24
-            CROSS JOIN fecha_25 f25;
+            CROSS JOIN fecha_contratacion_final fcf;
         """),
-        {"id_registro_personal": id_registro_personal},
+        {
+            "id_registro_personal": id_registro_personal,
+        },
     ).mappings().first()
 
     rechazo = db.execute(
@@ -606,16 +663,21 @@ def _obtener_dashboard_contratacion_individual(
                         NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
                         'Sin observación'
                     )
-                    WHEN hec."OrigenMovimiento" = 'HISTORICO_MOTIVO_CIERRE'
+
+                    WHEN hec."OrigenMovimiento"
+                        = 'HISTORICO_MOTIVO_CIERRE'
                     THEN COALESCE(
                         NULLIF(TRIM(mcp."MotivoCierre"), ''),
                         'Sin motivo de cierre'
                     )
+
                     ELSE 'Sin motivo'
                 END AS motivo_rechazo
             FROM public."HistorialEstadoContratacion" hec
+
             LEFT JOIN LATERAL (
-                SELECT orc_detalle."ObservacionesRechazo"
+                SELECT
+                    orc_detalle."ObservacionesRechazo"
                 FROM public."ObsRechazoContratacion" orc_detalle
                 WHERE
                     orc_detalle."IdRegistroPersonal"
@@ -623,9 +685,12 @@ def _obtener_dashboard_contratacion_individual(
                 ORDER BY
                     orc_detalle."IdObsRechazoContratacion" DESC
                 LIMIT 1
-            ) orc ON hec."OrigenMovimiento" = 'BOTON_NC'
+            ) orc
+                ON hec."OrigenMovimiento" = 'BOTON_NC'
+
             LEFT JOIN LATERAL (
-                SELECT mcp_detalle."MotivoCierre"
+                SELECT
+                    mcp_detalle."MotivoCierre"
                 FROM public."MotivoCierreProceso" mcp_detalle
                 WHERE
                     mcp_detalle."IdRegistroPersonal"
@@ -638,7 +703,9 @@ def _obtener_dashboard_contratacion_individual(
                     mcp_detalle."IdMotivoCierre" DESC
                 LIMIT 1
             ) mcp
-                ON hec."OrigenMovimiento" = 'HISTORICO_MOTIVO_CIERRE'
+                ON hec."OrigenMovimiento"
+                    = 'HISTORICO_MOTIVO_CIERRE'
+
             WHERE
                 hec."IdRegistroPersonal" = :id_registro_personal
                 AND hec."EstadoNuevo" = 28
@@ -647,18 +714,44 @@ def _obtener_dashboard_contratacion_individual(
                     'HISTORICO_MOTIVO_CIERRE'
                 )
                 AND hec."Modulo" = 'CONTRATACION'
+
             ORDER BY
                 hec."FechaMovimiento" DESC,
                 hec."IdHistorialEstadoContratacion" DESC
+
             LIMIT 1;
         """),
-        {"id_registro_personal": id_registro_personal},
+        {
+            "id_registro_personal": id_registro_personal,
+        },
     ).mappings().first()
 
     datos_trabajador = dict(trabajador)
-    fecha_estado_24 = trazabilidad.get("fecha_estado_24") if trazabilidad else None
-    fecha_estado_25 = trazabilidad.get("fecha_estado_25") if trazabilidad else None
-    tiempo_segundos_raw = trazabilidad.get("tiempo_segundos") if trazabilidad else None
+
+    fecha_estado_24 = (
+        trazabilidad.get("fecha_estado_24")
+        if trazabilidad
+        else None
+    )
+
+    fecha_estado_25 = (
+        trazabilidad.get("fecha_estado_25")
+        if trazabilidad
+        else None
+    )
+
+    fuente_fecha_contratacion = (
+        trazabilidad.get("fuente_fecha_contratacion")
+        if trazabilidad
+        else None
+    )
+
+    tiempo_segundos_raw = (
+        trazabilidad.get("tiempo_segundos")
+        if trazabilidad
+        else None
+    )
+
     tiempo_segundos = (
         int(round(float(tiempo_segundos_raw)))
         if tiempo_segundos_raw is not None
@@ -666,36 +759,143 @@ def _obtener_dashboard_contratacion_individual(
     )
 
     id_estado_actual = datos_trabajador.get("id_estado_proceso")
-    fecha_rechazo = rechazo.get("fecha_rechazo") if rechazo else None
-    usuario_rechazo = rechazo.get("usuario_rechazo") if rechazo else None
-    origen_movimiento_rechazo = (
-        rechazo.get("origen_movimiento") if rechazo else None
+    es_activo_migrado = bool(
+        datos_trabajador.get("es_activo_migrado")
     )
-    motivo_rechazo = rechazo.get("motivo_rechazo") if rechazo else None
+
+    fecha_rechazo = (
+        rechazo.get("fecha_rechazo")
+        if rechazo
+        else None
+    )
+
+    usuario_rechazo = (
+        rechazo.get("usuario_rechazo")
+        if rechazo
+        else None
+    )
+
+    origen_movimiento_rechazo = (
+        rechazo.get("origen_movimiento")
+        if rechazo
+        else None
+    )
+
+    motivo_rechazo = (
+        rechazo.get("motivo_rechazo")
+        if rechazo
+        else None
+    )
+
     fue_rechazado = rechazo is not None
+    tiene_contratacion = fecha_estado_25 is not None
+
+    confirmada_por_historial = (
+        fuente_fecha_contratacion
+        == "HISTORIAL_ESTADO_CONTRATACION"
+    )
+
+    fecha_registro_seleccion = datos_trabajador.get(
+        "fecha_registro_seleccion"
+    )
+
+    origen_registro = (
+        "Migración histórica"
+        if es_activo_migrado
+        else "Aplicativo"
+    )
+
+    if fuente_fecha_contratacion == "CONTRATACION_BASICA":
+        mensaje_fecha_contratacion = (
+            "La fecha de contratación fue obtenida de "
+            "ContratacionBasica.FechaIngreso porque el trabajador "
+            "no tiene un movimiento disponible al estado 25."
+        )
+    elif fuente_fecha_contratacion == "HISTORIAL_ESTADO_CONTRATACION":
+        mensaje_fecha_contratacion = (
+            "La fecha de contratación fue obtenida del historial "
+            "de estados del trabajador."
+        )
+    else:
+        mensaje_fecha_contratacion = (
+            "No se encontró una fecha de contratación en el historial "
+            "ni en ContratacionBasica."
+        )
+
+    if tiempo_segundos is not None:
+        mensaje_tiempo = (
+            "Tiempo real del trabajador entre el avance a contratación "
+            "y su fecha de contratación."
+        )
+    elif tiene_contratacion and fecha_estado_24 is None:
+        mensaje_tiempo = (
+            "Existe fecha de contratación, pero no existe una fecha "
+            "histórica verificable de avance al estado 24; por eso no "
+            "es posible calcular el tiempo de contratación."
+        )
+    else:
+        mensaje_tiempo = (
+            "El trabajador todavía no tiene una trazabilidad completa "
+            "entre el avance a contratación y la contratación."
+        )
 
     return {
         "modo_consulta": "individual",
+
         "trabajador": {
-            "id_registro_personal": datos_trabajador.get("id_registro_personal"),
-            "nombre_completo": datos_trabajador.get("nombre_completo"),
-            "numero_identificacion": datos_trabajador.get("numero_identificacion"),
+            "id_registro_personal": datos_trabajador.get(
+                "id_registro_personal"
+            ),
+            "nombre_completo": datos_trabajador.get(
+                "nombre_completo"
+            ),
+            "numero_identificacion": datos_trabajador.get(
+                "numero_identificacion"
+            ),
             "id_estado_actual": id_estado_actual,
-            "estado_actual": _nombre_estado_proceso(id_estado_actual),
+            "estado_actual": _nombre_estado_proceso(
+                id_estado_actual
+            ),
+            "origen_registro": origen_registro,
+            "es_activo_migrado": es_activo_migrado,
+            "usuario_actualizacion": datos_trabajador.get(
+                "usuario_actualizacion"
+            ),
         },
+
         "registro_seleccion": {
-            "existe": datos_trabajador.get("fecha_registro_seleccion") is not None,
-            "fecha": datos_trabajador.get("fecha_registro_seleccion"),
+            "existe": fecha_registro_seleccion is not None,
+            "fecha": fecha_registro_seleccion,
+            "nota": (
+                "En trabajadores migrados esta fecha puede corresponder "
+                "al momento de incorporación histórica al aplicativo."
+                if es_activo_migrado
+                else
+                "Fecha de creación del registro en Selección."
+            ),
         },
+
         "avance_contratacion": {
             "existe": fecha_estado_24 is not None,
             "fecha": fecha_estado_24,
+            "fuente": (
+                "HistorialEstadoContratacion"
+                if fecha_estado_24 is not None
+                else None
+            ),
         },
+
         "contratacion": {
-            "existe": fecha_estado_25 is not None,
+            "existe": tiene_contratacion,
             "fecha": fecha_estado_25,
-            "confirmada_por_boton_c": fecha_estado_25 is not None,
+            "fuente": fuente_fecha_contratacion,
+            "confirmada_por_historial": confirmada_por_historial,
+            "obtenida_de_contratacion_basica": (
+                fuente_fecha_contratacion == "CONTRATACION_BASICA"
+            ),
+            "mensaje": mensaje_fecha_contratacion,
         },
+
         "rechazo": {
             "existe": fue_rechazado,
             "fecha": fecha_rechazo,
@@ -704,6 +904,7 @@ def _obtener_dashboard_contratacion_individual(
             "motivo": motivo_rechazo,
             "fuente": "HistorialEstadoContratacion",
         },
+
         "tiempo_contratacion": {
             "total_segundos": tiempo_segundos,
             "total_minutos": (
@@ -711,36 +912,43 @@ def _obtener_dashboard_contratacion_individual(
                 if tiempo_segundos is not None
                 else None
             ),
-            "formateado": _formatear_duracion_segundos(tiempo_segundos),
+            "formateado": _formatear_duracion_segundos(
+                tiempo_segundos
+            ),
             "disponible": tiempo_segundos is not None,
             "fecha_inicio": fecha_estado_24,
             "fecha_fin": fecha_estado_25,
-            "fuente_inicio": "Estado 24 - CAMBIO_ESTADO - SELECCION",
-            "fuente_fin": "Estado 25 - BOTON_C - CONTRATACION",
-            "mensaje": (
-                "Tiempo real del trabajador entre el avance a contratación "
-                "y la confirmación mediante el botón C."
-                if tiempo_segundos is not None
-                else
-                "El trabajador todavía no tiene una trazabilidad completa "
-                "entre los estados 24 y 25 mediante el botón C."
+            "fuente_inicio": (
+                "Estado 24 - HistorialEstadoContratacion"
+                if fecha_estado_24 is not None
+                else None
             ),
+            "fuente_fin": fuente_fecha_contratacion,
+            "mensaje": mensaje_tiempo,
         },
+
         "linea_tiempo": [
             {
                 "evento": "Registro en Selección",
-                "completado": datos_trabajador.get("fecha_registro_seleccion") is not None,
-                "fecha": datos_trabajador.get("fecha_registro_seleccion"),
+                "completado": fecha_registro_seleccion is not None,
+                "fecha": fecha_registro_seleccion,
+                "fuente": "RegistroPersonal.FechaCreacion",
             },
             {
                 "evento": "Avanza a Contratación",
                 "completado": fecha_estado_24 is not None,
                 "fecha": fecha_estado_24,
+                "fuente": (
+                    "HistorialEstadoContratacion"
+                    if fecha_estado_24 is not None
+                    else None
+                ),
             },
             {
                 "evento": "Contratado",
-                "completado": fecha_estado_25 is not None,
+                "completado": tiene_contratacion,
                 "fecha": fecha_estado_25,
+                "fuente": fuente_fecha_contratacion,
             },
             {
                 "evento": "Rechazado en Contratación",
@@ -751,13 +959,24 @@ def _obtener_dashboard_contratacion_individual(
                 "motivo": motivo_rechazo,
             },
         ],
+
+        "alcance_consulta": {
+            "incluye_personal_migrado": True,
+            "incluye_personal_aplicativo": True,
+            "afecta_indicadores_generales": False,
+            "modifica_base_datos": False,
+        },
+
         "exclusiones": {
-            "activo_migrado_historial_laboral": True,
-            "usuarios_migracion": True,
-            "ajuste_no_activos_maestro": True,
+            "activo_migrado_historial_laboral": False,
+            "usuarios_migracion": False,
+            "ajuste_no_activos_maestro": False,
+            "nota": (
+                "Las exclusiones de migración se aplican únicamente "
+                "a los indicadores generales, no a la consulta individual."
+            ),
         },
     }
-
 
 @router.get("/dashboard-contratacion")
 def obtener_dashboard_contratacion(
