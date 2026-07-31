@@ -1,6 +1,6 @@
 # api/routers/datos_seleccion_routers.py
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Annotated, Any
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Body
@@ -31,8 +31,8 @@ registro_personal_repo = RegistroPersonalRepository()
 @router.put("/registro-personal/{id_registro_personal}")
 def actualizar_registro_personal(
     id_registro_personal: int,
-    body: RegistroPersonalUpdateRequest = Body(...),
-    db: Session = Depends(get_db)
+    body: Annotated[RegistroPersonalUpdateRequest, Body()],
+    db: Annotated[Session, Depends(get_db)],
 ):
     data = body.model_dump(exclude_none=True)
     if not data:
@@ -61,7 +61,7 @@ def actualizar_registro_personal(
     return {"ok": True, "message": "Registro actualizado", "IdRegistroPersonal": id_registro_personal}
 
 
-def _parse_bool(value: Any) -> Optional[bool]:
+def _parse_bool(value: Any) -> bool | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -125,51 +125,259 @@ def _es_rechazo_contratacion(motivo: Any) -> bool:
 
 
 @router.get("/dashboard-indicadores")
-def obtener_dashboard_indicadores_contratacion(
-    anio: Optional[int] = None,
-    mes: Optional[int] = None,
-    db: Session = Depends(get_db)
+def obtener_dashboard_indicadores_seleccion(
+    db: Annotated[Session, Depends(get_db)],
+    anio: int | None = None,
+    mes: int | None = None,
 ):
-    rows = db.execute(text("""
-        SELECT
-            rp."IdEstadoProceso",
-            COALESCE(rp."FechaActualizacion", rp."FechaCreacion") AS fecha_registro,
-            mcp."MotivoCierre" AS motivo_rechazo,
-            CASE rp."IdEstadoProceso"
-                WHEN 18 THEN 'NUEVO'
-                WHEN 19 THEN 'ENTREVISTA'
-                WHEN 20 THEN 'ENTREVISTA JEFE INMEDIATO'
-                WHEN 21 THEN 'EXÁMENES'
-                WHEN 22 THEN 'SEGURIDAD'
-                WHEN 24 THEN 'AVANZA A CONTRATACIÓN'
-                WHEN 25 THEN 'CONTRATADO'
-                WHEN 26 THEN 'REFERENCIACIÓN'
-                WHEN 27 THEN 'DESISTE DEL PROCESO'
-                WHEN 28 THEN 'RECHAZADO'
-                WHEN 30 THEN 'ABIERTO'
-                WHEN 34 THEN 'PENDIENTE DE CONTRATACIÓN'
-                ELSE CONCAT('ESTADO ', rp."IdEstadoProceso")
-            END AS estado
-        FROM public."RegistroPersonal" rp
-        LEFT JOIN (
-            SELECT DISTINCT ON ("IdRegistroPersonal")
-                "IdRegistroPersonal",
-                "MotivoCierre",
-                "FechaCreacion"
-            FROM public."MotivoCierreProceso"
-            ORDER BY "IdRegistroPersonal", "FechaCreacion" DESC
-        ) mcp
-            ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
-        WHERE
-                COALESCE(rp."UsuarioActualizacion",'') <> 'ajuste_no_activos_maestro_2026_06_22'
-                AND (:anio IS NULL OR EXTRACT(YEAR FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :anio)
-                AND (:mes IS NULL OR EXTRACT(MONTH FROM COALESCE(rp."FechaActualizacion", rp."FechaCreacion")) = :mes)
-    """), {
-        "anio": anio,
-        "mes": mes,
-    }).mappings().all()
+    """
+    Dashboard exclusivo de Selección.
 
-    filas = [dict(r) for r in rows]
+    Reglas:
+    - Universo: personas creadas en RegistroPersonal desde el 1 de marzo
+      de 2026 mediante el aplicativo.
+    - Los filtros de año y mes se aplican sobre RegistroPersonal.FechaCreacion.
+    - Se excluyen activos migrados y registros identificados como migración.
+    - Estado actual: representa el resultado vigente de Selección. Si una
+      persona ya fue contratada y posteriormente pasó a estados de Retiros,
+      continúa mostrándose como Contratado dentro de este dashboard.
+    - Avanzan a Contratación: personas del universo con evidencia de haber
+      llegado al estado 24 o a una etapa posterior de contratación.
+    - Rechazados en Selección: personas en estado 28 que no presentan
+      evidencia de rechazo originado en Contratación.
+    - Rechazados en Contratación: personas en estado 28 que llegaron al estado
+      24, llegaron al estado 25, tienen información en ContratacionBasica,
+      poseen un movimiento de rechazo del módulo Contratación o conservan el
+      motivo histórico "No asiste a Contratación". Estos casos no alimentan
+      los indicadores ni los motivos de rechazo de Selección.
+    - Motivos de Selección: se toma el cierre más reciente de
+      MotivoCierreProceso únicamente para los rechazos originados en Selección.
+
+    Esta función solo consulta información. No modifica la base de datos.
+    """
+
+    if mes is not None and (mes < 1 or mes > 12):
+        raise HTTPException(
+            status_code=400,
+            detail="El mes debe estar entre 1 y 12.",
+        )
+
+    if anio is not None and anio < 2000:
+        raise HTTPException(
+            status_code=400,
+            detail="El año consultado no es válido.",
+        )
+
+    rows = db.execute(
+        text("""
+            WITH universo_seleccion AS (
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."IdEstadoProceso",
+                    rp."FechaCreacion",
+                    rp."UsuarioActualizacion",
+
+                    EXISTS (
+                        SELECT 1
+                        FROM public."HistorialEstadoContratacion" hec24
+                        WHERE
+                            hec24."IdRegistroPersonal"
+                                = rp."IdRegistroPersonal"
+                            AND hec24."EstadoNuevo" = 24
+                    ) AS tiene_estado_24,
+
+                    EXISTS (
+                        SELECT 1
+                        FROM public."HistorialEstadoContratacion" hec25
+                        WHERE
+                            hec25."IdRegistroPersonal"
+                                = rp."IdRegistroPersonal"
+                            AND hec25."EstadoNuevo" = 25
+                    ) AS tiene_estado_25,
+
+                    EXISTS (
+                        SELECT 1
+                        FROM public."ContratacionBasica" cb
+                        WHERE
+                            cb."IdRegistroPersonal"
+                                = rp."IdRegistroPersonal"
+                            AND cb."FechaIngreso" IS NOT NULL
+                    ) AS tiene_contratacion_basica,
+
+                    EXISTS (
+                        SELECT 1
+                        FROM public."HistorialEstadoContratacion" hec_rechazo
+                        WHERE
+                            hec_rechazo."IdRegistroPersonal"
+                                = rp."IdRegistroPersonal"
+                            AND hec_rechazo."EstadoNuevo" = 28
+                            AND UPPER(
+                                TRIM(COALESCE(hec_rechazo."Modulo", ''))
+                            ) = 'CONTRATACION'
+                    ) AS tiene_rechazo_contratacion_historial
+
+                FROM public."RegistroPersonal" rp
+
+                WHERE
+                    rp."FechaCreacion"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio
+                    )
+
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes
+                    )
+
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM public."HistorialLaboral" hl
+                        WHERE
+                            hl."IdRegistroPersonal"
+                                = rp."IdRegistroPersonal"
+                            AND UPPER(
+                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                            ) = 'ACTIVO MIGRADO'
+                    )
+
+                   AND LOWER(
+                    COALESCE(rp."UsuarioActualizacion", '')
+                ) NOT LIKE '%migracion%'
+
+                AND LOWER(
+                    COALESCE(rp."UsuarioActualizacion", '')
+                ) NOT LIKE '%migrado%'
+
+                AND COALESCE(rp."UsuarioActualizacion", '')
+                    <> 'ajuste_no_activos_maestro_2026_06_22'
+
+                AND rp."NumeroIdentificacion"::text NOT IN (
+                    '91011506',
+                    '0987654',
+                    '951357'
+                )
+                )
+            SELECT
+                us."IdRegistroPersonal",
+                us."IdEstadoProceso",
+                us."FechaCreacion" AS fecha_registro,
+                us.tiene_estado_24,
+                us.tiene_estado_25,
+                us.tiene_contratacion_basica,
+                us.tiene_rechazo_contratacion_historial,
+
+                CASE
+                    WHEN us."IdEstadoProceso" = 28
+                    THEN 'RECHAZADO'
+
+                    WHEN us."IdEstadoProceso" = 27
+                    THEN 'DESISTE DEL PROCESO'
+
+                    WHEN (
+                        us.tiene_estado_25
+                        OR us.tiene_contratacion_basica
+                        OR us."IdEstadoProceso" IN (
+                            25, 30, 31, 32, 33, 35
+                        )
+                    )
+                    THEN 'CONTRATADO'
+
+                    WHEN us."IdEstadoProceso" = 34
+                    THEN 'PENDIENTE DE CONTRATACIÓN'
+
+                    WHEN us."IdEstadoProceso" = 24
+                    THEN 'AVANZA A CONTRATACIÓN'
+
+                    WHEN us."IdEstadoProceso" = 26
+                    THEN 'REFERENCIACIÓN'
+
+                    WHEN us."IdEstadoProceso" = 22
+                    THEN 'SEGURIDAD'
+
+                    WHEN us."IdEstadoProceso" = 21
+                    THEN 'EXÁMENES'
+
+                    WHEN us."IdEstadoProceso" = 20
+                    THEN 'ENTREVISTA JEFE INMEDIATO'
+
+                    WHEN us."IdEstadoProceso" = 19
+                    THEN 'ENTREVISTA'
+
+                    WHEN us."IdEstadoProceso" = 18
+                    THEN 'NUEVO'
+
+                    ELSE CONCAT(
+                        'ESTADO ',
+                        COALESCE(us."IdEstadoProceso"::text, 'SIN DEFINIR')
+                    )
+                END AS estado_seleccion,
+                    (
+                        us.tiene_estado_24
+                        OR us.tiene_estado_25
+                        OR us.tiene_contratacion_basica
+                        OR us."IdEstadoProceso" IN (
+                            24, 25, 30, 31, 32, 33, 35
+                        )
+                    ) AS avanzo_contratacion,
+
+                mcp."MotivoCierre" AS motivo_rechazo,
+                COALESCE(
+                    mcp."FechaActualizacion",
+                    mcp."FechaCreacion"
+                ) AS fecha_motivo_rechazo,
+
+                CASE
+                    WHEN us."IdEstadoProceso" <> 28
+                    THEN NULL
+                    WHEN (
+                        us.tiene_estado_24
+                        OR us.tiene_estado_25
+                        OR us.tiene_contratacion_basica
+                        OR us.tiene_rechazo_contratacion_historial
+                        OR UPPER(
+                            TRIM(COALESCE(mcp."MotivoCierre", ''))
+                        ) IN (
+                            'NO ASISTE A CONTRATACION',
+                            'NO ASISTE A CONTRATACIÓN'
+                        )
+                    )
+                    THEN 'CONTRATACION'
+                    ELSE 'SELECCION'
+                END AS origen_rechazo
+
+            FROM universo_seleccion us
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    mcp_detalle."MotivoCierre",
+                    mcp_detalle."FechaCreacion",
+                    mcp_detalle."FechaActualizacion"
+                FROM public."MotivoCierreProceso" mcp_detalle
+                WHERE
+                    mcp_detalle."IdRegistroPersonal"
+                        = us."IdRegistroPersonal"
+                ORDER BY
+                    COALESCE(
+                        mcp_detalle."FechaActualizacion",
+                        mcp_detalle."FechaCreacion"
+                    ) DESC,
+                    mcp_detalle."IdMotivoCierre" DESC
+                LIMIT 1
+            ) mcp ON TRUE
+
+            ORDER BY us."IdRegistroPersonal";
+        """),
+        {
+            "anio": anio,
+            "mes": mes,
+        },
+    ).mappings().all()
+
+    filas = [dict(row) for row in rows]
+    total = len(filas)
 
     estados_base = [
         "NUEVO",
@@ -177,27 +385,29 @@ def obtener_dashboard_indicadores_contratacion(
         "ENTREVISTA JEFE INMEDIATO",
         "EXÁMENES",
         "SEGURIDAD",
-        "AVANZA A CONTRATACIÓN",
         "REFERENCIACIÓN",
-        "DESISTE DEL PROCESO",
-        "RECHAZADO",
+        "AVANZA A CONTRATACIÓN",
         "PENDIENTE DE CONTRATACIÓN",
         "CONTRATADO",
-        "ABIERTO",
+        "DESISTE DEL PROCESO",
+        "RECHAZADO",
     ]
 
     conteo_estados = {estado: 0 for estado in estados_base}
 
     for fila in filas:
-        estado = _normalizar_estado_dashboard(fila.get("estado"))
+        estado = _normalizar_estado_dashboard(
+            fila.get("estado_seleccion")
+        )
+
         if estado not in conteo_estados:
             conteo_estados[estado] = 0
+
         conteo_estados[estado] += 1
 
-    total = len(filas)
-
     estados_ordenados = estados_base + [
-        estado for estado in conteo_estados.keys()
+        estado
+        for estado in conteo_estados
         if estado not in estados_base
     ]
 
@@ -205,9 +415,115 @@ def obtener_dashboard_indicadores_contratacion(
         {
             "estado": estado,
             "cantidad": conteo_estados.get(estado, 0),
-            "porcentaje": round((conteo_estados.get(estado, 0) / total) * 100) if total else 0,
+            "porcentaje": (
+                round(
+                    (conteo_estados.get(estado, 0) / total) * 100,
+                    2,
+                )
+                if total
+                else 0
+            ),
         }
         for estado in estados_ordenados
+    ]
+
+    total_avanzan_contratacion = sum(
+        1
+        for fila in filas
+        if bool(fila.get("avanzo_contratacion"))
+    )
+
+    equivalencias_motivos = {
+        "DESISTE DEL PROCESO": "Desiste del proceso",
+        "NO CUMPLE PERFIL": "No cumple perfil",
+        "NO ASISTE A EXAMENES MEDICOS":
+            "No asiste a exámenes médicos",
+        "NO ASISTE A EXÁMENES MEDICOS":
+            "No asiste a exámenes médicos",
+        "NO ASISTE A EXÁMENES MÉDICOS":
+            "No asiste a exámenes médicos",
+        "EXAMENES NO APTOS": "Exámenes no aptos",
+        "EXÁMENES NO APTOS": "Exámenes no aptos",
+        "DOCUMENTACION INCOMPLETA": "Documentación incompleta",
+        "DOCUMENTACIÓN INCOMPLETA": "Documentación incompleta",
+        "ESTUDIO DE SEGURIDAD": "Estudio de seguridad",
+        "REINTEGRO NO APROBADO": "Reintegro no aprobado",
+        "NO SUPERA PRUEBA FISICA": "No supera prueba física",
+        "NO SUPERA PRUEBA FÍSICA": "No supera prueba física",
+        "OTRO": "Otro",
+    }
+
+    motivos_base = [
+        "Desiste del proceso",
+        "No cumple perfil",
+        "No asiste a exámenes médicos",
+        "Exámenes no aptos",
+        "Documentación incompleta",
+        "Estudio de seguridad",
+        "Reintegro no aprobado",
+        "No supera prueba física",
+        "Otro",
+        "Sin motivo registrado",
+    ]
+
+    motivos_rechazo = {motivo: 0 for motivo in motivos_base}
+    total_rechazados_seleccion = 0
+    rechazados_excluidos_contratacion = 0
+
+    for fila in filas:
+        estado = _normalizar_estado_dashboard(
+            fila.get("estado_seleccion")
+        )
+
+        if estado != "RECHAZADO":
+            continue
+
+        motivo_original = fila.get("motivo_rechazo")
+        motivo_normalizado = _normalizar_motivo_dashboard(
+            motivo_original
+        )
+
+        es_rechazo_contratacion = (
+            bool(fila.get("tiene_estado_24"))
+            or bool(fila.get("tiene_estado_25"))
+            or bool(fila.get("tiene_contratacion_basica"))
+            or bool(fila.get("tiene_rechazo_contratacion_historial"))
+            or motivo_normalizado == "NO ASISTE A CONTRATACIÓN"
+        )
+
+        if es_rechazo_contratacion:
+            rechazados_excluidos_contratacion += 1
+            continue
+
+        total_rechazados_seleccion += 1
+
+        if not motivo_normalizado or motivo_normalizado == "SIN_MOTIVO":
+            motivo_final = "Sin motivo registrado"
+        else:
+            motivo_final = equivalencias_motivos.get(
+                motivo_normalizado,
+                str(motivo_original).strip(),
+            )
+
+        if motivo_final not in motivos_rechazo:
+            motivos_rechazo[motivo_final] = 0
+
+        motivos_rechazo[motivo_final] += 1
+
+    motivos_rechazo_generales = [
+        {
+            "motivo": motivo,
+            "cantidad": cantidad,
+            "porcentaje": (
+                round(
+                    (cantidad / total_rechazados_seleccion) * 100,
+                    2,
+                )
+                if total_rechazados_seleccion
+                else 0
+            ),
+        }
+        for motivo, cantidad in motivos_rechazo.items()
     ]
 
     meses_nombre = {
@@ -220,109 +536,58 @@ def obtener_dashboard_indicadores_contratacion(
 
     for fila in filas:
         fecha = fila.get("fecha_registro")
-        if isinstance(fecha, datetime):
-            clave = fecha.strftime("%Y-%m")
-            etiqueta = f"{meses_nombre[fecha.month]}-{str(fecha.year)[-2:]}"
-        else:
-            clave = "9999-99"
-            etiqueta = "Sin fecha"
+
+        if not isinstance(fecha, datetime):
+            continue
+
+        clave = fecha.strftime("%Y-%m")
+        etiqueta = f"{meses_nombre[fecha.month]}-{str(fecha.year)[-2:]}"
 
         if clave not in registros_por_mes:
-            registros_por_mes[clave] = {"mes": etiqueta, "registros": 0}
+            registros_por_mes[clave] = {
+                "mes": etiqueta,
+                "registros": 0,
+            }
 
         registros_por_mes[clave]["registros"] += 1
 
     registros_por_mes = dict(sorted(registros_por_mes.items()))
 
-    motivos_base = [
-        "Desiste del Proceso",
-        "No Cumple Perfil",
-        "No asiste a Examenes Medicos",
-        "Examenes No Aptos",
-        "Documentacion Incompleta",
-        "No asiste a Contratacion",
-    ]
-
-    equivalencias_motivos = {
-        "DESISTE DEL PROCESO": "Desiste del Proceso",
-        "NO CUMPLE PERFIL": "No Cumple Perfil",
-        "NO ASISTE A EXAMENES MEDICOS": "No asiste a Examenes Medicos",
-        "NO ASISTE A EXÁMENES MEDICOS": "No asiste a Examenes Medicos",
-        "NO ASISTE A EXÁMENES MÉDICOS": "No asiste a Examenes Medicos",
-        "EXAMENES NO APTOS": "Examenes No Aptos",
-        "EXÁMENES NO APTOS": "Examenes No Aptos",
-        "DOCUMENTACION INCOMPLETA": "Documentacion Incompleta",
-        "DOCUMENTACIÓN INCOMPLETA": "Documentacion Incompleta",
-        "NO ASISTE A CONTRATACION": "No asiste a Contratacion",
-        "NO ASISTE A CONTRATACIÓN": "No asiste a Contratacion",
-    }
-
-    motivos_generales = {motivo: 0 for motivo in motivos_base}
-    motivos_contratacion = {"No asiste a Contratacion": 0}
-    rechazados_contratacion = 0
-
-    for fila in filas:
-        estado = _normalizar_estado_dashboard(fila.get("estado"))
-        motivo = fila.get("motivo_rechazo")
-
-        if estado == "RECHAZADO" and motivo and str(motivo).strip().upper() != "SIN_MOTIVO":
-            clave = _normalizar_motivo_dashboard(motivo)
-            motivo_final = equivalencias_motivos.get(clave, str(motivo).strip())
-
-            if motivo_final not in motivos_generales:
-                motivos_generales[motivo_final] = 0
-
-            motivos_generales[motivo_final] += 1
-
-            if _es_rechazo_contratacion(motivo):
-                rechazados_contratacion += 1
-
-                if motivo_final not in motivos_contratacion:
-                    motivos_contratacion[motivo_final] = 0
-
-                motivos_contratacion[motivo_final] += 1
-
-    total_motivos_generales = sum(motivos_generales.values())
-    total_motivos_contratacion = sum(motivos_contratacion.values())
-
-    motivos_rechazo_generales = [
-        {
-            "motivo": motivo,
-            "cantidad": cantidad,
-            "porcentaje": round((cantidad / total_motivos_generales) * 100) if total_motivos_generales else 0,
-        }
-        for motivo, cantidad in motivos_generales.items()
-    ]
-
-    motivos_rechazo_contratacion = [
-        {
-            "motivo": motivo,
-            "cantidad": cantidad,
-            "porcentaje": round((cantidad / total_motivos_contratacion) * 100) if total_motivos_contratacion else 0,
-        }
-        for motivo, cantidad in motivos_contratacion.items()
-    ]
-
     contratados = conteo_estados.get("CONTRATADO", 0)
-    rechazados_generales = conteo_estados.get("RECHAZADO", 0)
     desistidos = conteo_estados.get("DESISTE DEL PROCESO", 0)
-    pendiente_contratacion = conteo_estados.get("PENDIENTE DE CONTRATACIÓN", 0)
-    avanza_contratacion = conteo_estados.get("AVANZA A CONTRATACIÓN", 0)
+    rechazados_estado_actual = conteo_estados.get("RECHAZADO", 0)
+    pendientes_contratacion = conteo_estados.get(
+        "PENDIENTE DE CONTRATACIÓN",
+        0,
+    )
 
-    en_proceso = total - contratados - rechazados_generales - desistidos
-    if en_proceso < 0:
-        en_proceso = 0
+    en_proceso = (
+        total
+        - contratados
+        - desistidos
+        - rechazados_estado_actual
+    )
 
-    total_personas_avanzadas_contratacion = contratados + rechazados_contratacion
+    en_proceso = max(en_proceso, 0)
 
     return {
-        "filtros": {"anio": anio, "mes": mes},
+        "filtros": {
+            "anio": anio,
+            "mes": mes,
+            "fecha_inicio_aplicativo": "2026-03-01",
+        },
         "total": total,
-        "rechazados_generales": rechazados_generales,
+        "registrados_seleccion": total,
+        "avanza_contratacion": total_avanzan_contratacion,
+        "total_personas_avanzadas_contratacion": total_avanzan_contratacion,
+        "rechazados_generales": total_rechazados_seleccion,
+        "rechazados_seleccion": total_rechazados_seleccion,
+        "rechazados_estado_actual": rechazados_estado_actual,
+        "rechazados_excluidos_contratacion": rechazados_excluidos_contratacion,
         "desistidos": desistidos,
+        "contratados": contratados,
+        "pendiente_contratacion": pendientes_contratacion,
         "en_proceso": en_proceso,
-        "pendiente_contratacion": pendiente_contratacion,
-        "avanza_contratacion": avanza_contratacion,
         "estados": estados,
         "estados_con_datos": [item for item in estados if item["cantidad"] > 0],
         "registros_por_mes": list(registros_por_mes.values()),
@@ -330,14 +595,27 @@ def obtener_dashboard_indicadores_contratacion(
         "motivos_rechazo_generales_con_datos": [
             item for item in motivos_rechazo_generales if item["cantidad"] > 0
         ],
-        "total_personas_avanzadas_contratacion": total_personas_avanzadas_contratacion,
-        "contratados": contratados,
-        "rechazados": rechazados_contratacion,
-        "motivos_rechazo": motivos_rechazo_contratacion,
-        "motivos_rechazo_con_datos": [
-            item for item in motivos_rechazo_contratacion if item["cantidad"] > 0
-        ],
+        "rechazados": 0,
+        "motivos_rechazo": [],
+        "motivos_rechazo_con_datos": [],
+        "auditoria": {
+            "universo": "RegistroPersonal.FechaCreacion desde 2026-03-01",
+            "filtro_periodo": "RegistroPersonal.FechaCreacion",
+            "estado_actual": "Resultado vigente del proceso de Selección",
+            "avance_contratacion": "Estado 24 o evidencia posterior de contratación",
+            "rechazo_seleccion": (
+                "Estado 28 sin evidencia de rechazo de Contratación"
+            ),
+            "rechazo_contratacion_excluido": (
+                "Estado 28 con estado 24, estado 25, ContratacionBasica, "
+                "movimiento de rechazo en Contratación o motivo histórico "
+                "No asiste a Contratación"
+            ),
+            "excluye_migrados": True,
+            "solo_consulta": True,
+        },
     }
+
 
 # ============================================================
 # DASHBOARD EXCLUSIVO DE CONTRATACIÓN
@@ -366,12 +644,12 @@ def obtener_dashboard_indicadores_contratacion(
 # ============================================================
 
 
-def _formatear_duracion_segundos(total_segundos: Optional[int]) -> Optional[str]:
+def _formatear_duracion_segundos(total_segundos: int | None) -> str | None:
     """Convierte segundos a una duración legible en español."""
     if total_segundos is None:
         return None
 
-    total_segundos = max(int(total_segundos), 0)
+    total_segundos = max(total_segundos, 0)
     dias, resto = divmod(total_segundos, 86400)
     horas, resto = divmod(resto, 3600)
     minutos, segundos = divmod(resto, 60)
@@ -399,7 +677,7 @@ def _formatear_duracion_segundos(total_segundos: Optional[int]) -> Optional[str]
     return ", ".join(partes)
 
 
-def _nombre_estado_proceso(id_estado: Optional[int]) -> str:
+def _nombre_estado_proceso(id_estado: int | None) -> str:
     estados = {
         18: "Nuevo",
         19: "Entrevista",
@@ -419,9 +697,9 @@ def _nombre_estado_proceso(id_estado: Optional[int]) -> str:
 
 @router.get("/buscar-trabajadores-contratacion")
 def buscar_trabajadores_dashboard_contratacion(
+    db: Annotated[Session, Depends(get_db)],
     texto_busqueda: str,
     limite: int = 20,
-    db: Session = Depends(get_db),
 ):
     """
     Busca cualquier trabajador por nombre, apellido o identificación.
@@ -782,7 +1060,7 @@ def _obtener_dashboard_contratacion_individual(
     )
 
     tiempo_segundos = (
-        int(round(float(tiempo_segundos_raw)))
+        round(float(tiempo_segundos_raw))
         if tiempo_segundos_raw is not None
         else None
     )
@@ -1047,10 +1325,10 @@ def _obtener_dashboard_contratacion_individual(
 
 @router.get("/dashboard-contratacion")
 def obtener_dashboard_contratacion(
-    anio: Optional[int] = None,
-    mes: Optional[int] = None,
-    id_registro_personal: Optional[int] = None,
-    db: Session = Depends(get_db),
+    db: Annotated[Session, Depends(get_db)],
+    anio: int | None = None,
+    mes: int | None = None,
+    id_registro_personal: int | None = None,
 ):
     """
     Dashboard independiente para el módulo de Contratación.
@@ -1058,8 +1336,10 @@ def obtener_dashboard_contratacion(
     Reglas de la consulta general:
     - Registrados por Selección: RegistroPersonal.FechaCreacion.
     - Avanzan a Contratación:
-      1. movimiento real al estado 24; o
-      2. contratación real confirmada para uno de los seis casos operativos
+      1. movimiento real al estado 24;
+      2. rechazo real registrado por Contratación, cuya transición confirma
+         que la persona se encontraba en el estado 24; o
+      3. contratación real confirmada para uno de los seis casos operativos
          que quedaron sin historial por una falla anterior.
     - Contratados:
       1. movimiento real al estado 25 mediante BOTON_C; o
@@ -1227,6 +1507,33 @@ def obtener_dashboard_contratacion(
                         OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
                     )
             ),
+            rechazos_contratacion_periodo AS (
+                SELECT DISTINCT ON (hec."IdRegistroPersonal")
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" AS fecha_avance,
+                    'RECHAZO_CONTRATACION'::text AS fuente_avance
+                FROM public."HistorialEstadoContratacion" hec
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
+                WHERE
+                    hec."EstadoNuevo" = 28
+                    AND UPPER(TRIM(COALESCE(hec."Modulo", '')))
+                        = 'CONTRATACION'
+                    AND hec."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
+                    )
+                ORDER BY
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" ASC,
+                    hec."IdHistorialEstadoContratacion" ASC
+            ),
             contrataciones_historial_periodo AS (
                 SELECT DISTINCT ON (hec25."IdRegistroPersonal")
                     hec25."IdRegistroPersonal",
@@ -1347,6 +1654,14 @@ def obtener_dashboard_contratacion(
                         "IdRegistroPersonal",
                         fecha_avance,
                         fuente_avance
+                    FROM rechazos_contratacion_periodo
+
+                    UNION ALL
+
+                    SELECT
+                        "IdRegistroPersonal",
+                        fecha_avance,
+                        fuente_avance
                     FROM avances_sin_historial_periodo
                 ) avances_unificados
                 ORDER BY
@@ -1362,11 +1677,15 @@ def obtener_dashboard_contratacion(
                         WHEN ap.fuente_avance
                             = 'CONTRATACION_REAL_SIN_HISTORIAL'
                         THEN 25
+                        WHEN ap.fuente_avance = 'RECHAZO_CONTRATACION'
+                        THEN 28
                         ELSE decision."EstadoNuevo"
                     END AS estado_decision,
                     CASE
-                        WHEN ap.fuente_avance
-                            = 'CONTRATACION_REAL_SIN_HISTORIAL'
+                        WHEN ap.fuente_avance IN (
+                            'CONTRATACION_REAL_SIN_HISTORIAL',
+                            'RECHAZO_CONTRATACION'
+                        )
                         THEN ap.fecha_avance
                         ELSE decision."FechaMovimiento"
                     END AS fecha_decision
@@ -1488,7 +1807,7 @@ def obtener_dashboard_contratacion(
 
     promedio_segundos_raw = resultado.get("promedio_segundos")
     promedio_segundos = (
-        int(round(float(promedio_segundos_raw)))
+        round(float(promedio_segundos_raw))
         if promedio_segundos_raw is not None
         else None
     )
@@ -1582,6 +1901,33 @@ def obtener_dashboard_contratacion(
                     hec."FechaMovimiento" ASC,
                     hec."IdHistorialEstadoContratacion" ASC
             ),
+            rechazos_contratacion_periodo AS (
+                SELECT DISTINCT ON (hec."IdRegistroPersonal")
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" AS fecha_avance,
+                    'RECHAZO_CONTRATACION'::text AS fuente_avance
+                FROM public."HistorialEstadoContratacion" hec
+                INNER JOIN universo_base ub
+                    ON ub."IdRegistroPersonal" = hec."IdRegistroPersonal"
+                WHERE
+                    hec."EstadoNuevo" = 28
+                    AND UPPER(TRIM(COALESCE(hec."Modulo", '')))
+                        = 'CONTRATACION'
+                    AND hec."FechaMovimiento"
+                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                    AND (
+                        :anio IS NULL
+                        OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
+                    )
+                    AND (
+                        :mes IS NULL
+                        OR EXTRACT(MONTH FROM hec."FechaMovimiento") = :mes
+                    )
+                ORDER BY
+                    hec."IdRegistroPersonal",
+                    hec."FechaMovimiento" ASC,
+                    hec."IdHistorialEstadoContratacion" ASC
+            ),
             avances_sin_historial_periodo AS (
                 SELECT DISTINCT ON (ub."IdRegistroPersonal")
                     ub."IdRegistroPersonal",
@@ -1630,6 +1976,8 @@ def obtener_dashboard_contratacion(
                 FROM (
                     SELECT * FROM avances_historial_periodo
                     UNION ALL
+                    SELECT * FROM rechazos_contratacion_periodo
+                    UNION ALL
                     SELECT * FROM avances_sin_historial_periodo
                 ) avances_unificados
                 ORDER BY
@@ -1643,6 +1991,8 @@ def obtener_dashboard_contratacion(
                         WHEN ap.fuente_avance
                             = 'CONTRATACION_REAL_SIN_HISTORIAL'
                         THEN 25
+                        WHEN ap.fuente_avance = 'RECHAZO_CONTRATACION'
+                        THEN 28
                         ELSE decision."EstadoNuevo"
                     END AS estado_decision
                 FROM avances_periodo ap
@@ -1740,17 +2090,6 @@ def obtener_dashboard_contratacion(
             "porcentaje": porcentaje,
         })
 
-    porcentaje_contratados_sobre_registrados = (
-        round(
-            (
-                contrataciones_finalizadas_periodo
-                / registrados_seleccion
-            ) * 100,
-            2,
-        )
-        if registrados_seleccion > 0
-        else 0
-    )
     porcentaje_contratados_sobre_avanzan = (
         round(
             (contratados_cohorte / avanzan_contratacion) * 100,
@@ -1803,8 +2142,13 @@ def obtener_dashboard_contratacion(
         "comparativo_registrados_contratados": {
             "registrados_seleccion": registrados_seleccion,
             "contratados": contrataciones_finalizadas_periodo,
-            "porcentaje_contratados": porcentaje_contratados_sobre_registrados,
-            "nota": "Cada valor usa la fecha real disponible de su evento.",
+            "porcentaje_contratados": None,
+            "aplica_porcentaje": False,
+            "nota": (
+                "Comparativo informativo. No se calcula porcentaje porque "
+                "los registrados en Selección y las contrataciones finalizadas "
+                "pueden corresponder a cohortes diferentes."
+            ),
         },
         "comparativo_avanzan_contratados": {
             "avanzan_contratacion": avanzan_contratacion,
@@ -1909,7 +2253,7 @@ def obtener_dashboard_contratacion(
 
 
 @router.get("/reporte-excel")
-def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
+def generar_reporte_excel_seleccion(db: Annotated[Session, Depends(get_db)]):
     rows = db.execute(text("""
         SELECT
             rp."Nombres",
@@ -2098,7 +2442,7 @@ def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
         cell.font = dash_font
 
     fila_tendencia = 4
-    for _, item in tendencia_mensual.items():
+    for item in tendencia_mensual.values():
         ws_dash[f"J{fila_tendencia}"] = item["etiqueta"]
         ws_dash[f"K{fila_tendencia}"] = item["cantidad"]
         fila_tendencia += 1
@@ -2212,8 +2556,8 @@ def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
         for idx, item in enumerate(estados_barra):
             try:
                 bar.series[0].data_points[idx].graphicalProperties.solidFill = item["color"]
-            except Exception:
-                pass
+            except (AttributeError, IndexError) as error:
+                print(f"No fue posible aplicar el color de la gráfica: {error}")
 
     ws_dash.add_chart(bar, "D33")
 
@@ -2356,8 +2700,8 @@ def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
             for idx, item in enumerate(motivos_grafica):
                 try:
                     bar_motivos.series[0].data_points[idx].graphicalProperties.solidFill = item["color"]
-                except Exception:
-                    pass
+                except (AttributeError, IndexError) as error:
+                    print(f"No fue posible aplicar el color de la gráfica: {error}")
 
         ws_dash.add_chart(bar_motivos, "E50")
 
@@ -2382,7 +2726,10 @@ def generar_reporte_excel_seleccion(db: Session = Depends(get_db)):
 
 
 @router.get("/{id_registro_personal}", response_model=DatosSeleccionResponse)
-def obtener_datos_seleccion(id_registro_personal: int, db: Session = Depends(get_db)):
+def obtener_datos_seleccion(
+    id_registro_personal: int,
+    db: Annotated[Session, Depends(get_db)],
+):
     data = service.obtener_por_registro_personal(db, id_registro_personal)
     if not data:
         raise HTTPException(status_code=404, detail="No existen datos")
@@ -2394,7 +2741,10 @@ def obtener_datos_seleccion(id_registro_personal: int, db: Session = Depends(get
 
 
 @router.post("/upsert", response_model=DatosSeleccionResponse)
-def upsert_datos_seleccion(body: DatosSeleccionUpsertRequest, db: Session = Depends(get_db)):
+def upsert_datos_seleccion(
+    body: DatosSeleccionUpsertRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
     payload = body.model_dump(exclude_none=True)
 
     if "HaTrabajadoAntesEnLaEmpresa" in payload:
