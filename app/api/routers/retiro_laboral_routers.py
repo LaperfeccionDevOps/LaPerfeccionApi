@@ -1,25 +1,26 @@
-from fastapi import APIRouter, Depends, HTTPException
+# ruff: noqa: B008, BLE001, RUF010, UP045
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from infrastructure.db.deps import get_db
 from domain.schemas.retiro_laboral import (
     RetiroLaboralCreate,
-    RetiroLaboralEstadoUpdate,
     RetiroLaboralDetalleUpdate,
+    RetiroLaboralEstadoUpdate,
 )
+from infrastructure.db.deps import get_db
 from services.rrll_documentos_service import (
-    generar_y_registrar_primer_llamado,
-    generar_y_registrar_segundo_llamado,
     generar_y_registrar_carta_finalizacion,
     generar_y_registrar_paquete_retiro,
+    generar_y_registrar_primer_llamado,
+    generar_y_registrar_segundo_llamado,
 )
-from fastapi.responses import FileResponse
-from pathlib import Path
-from datetime import datetime
-
-from typing import Optional
-from fastapi import Query
 
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
@@ -784,6 +785,7 @@ def actualizar_estado_retiro_laboral(
                 SELECT
                     "IdRetiroLaboral",
                     "IdRegistroPersonal",
+                    "IdMotivoRetiro",
                     "FechaRetiro",
                     "IdTipificacionRetiro"
                 FROM public."RetiroLaboral"
@@ -797,15 +799,25 @@ def actualizar_estado_retiro_laboral(
             raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
         id_registro_personal = retiro_row["IdRegistroPersonal"]
+        id_motivo_retiro = retiro_row["IdMotivoRetiro"]
 
         estado_destino = (
             payload.EstadoCasoRRLL or ""
         ).strip().upper()
 
-        # La tipificación puede permanecer vacía mientras el caso está ABIERTO,
-        # pero es obligatoria antes de enviarlo a Nómina o cerrarlo.
+        # Motivos que por regla de negocio no requieren tipificación:
+        # 2  = Terminación con justa causa / abandono de cargo
+        # 10 = Nunca ingresó
+        motivos_sin_tipificacion = {
+            2,
+            10,
+        }
+
+        # La tipificación puede permanecer vacía mientras el caso está ABIERTO.
+        # Para enviar a Nómina o cerrar solo se exceptúan los motivos 2 y 10.
         if (
             estado_destino in ("ENVIADO_NOMINA", "CERRADO")
+            and id_motivo_retiro not in motivos_sin_tipificacion
             and not retiro_row["IdTipificacionRetiro"]
         ):
             db.rollback()
@@ -821,7 +833,7 @@ def actualizar_estado_retiro_laboral(
         fecha_envio_nomina = payload.FechaEnvioNomina
 
         if estado_destino == "ENVIADO_NOMINA":
-            fecha_cierre = payload.FechaCierre or datetime.utcnow()
+            fecha_cierre = payload.FechaCierre or datetime.now(timezone.utc)
             fecha_envio_nomina = None
 
         result_retiro = db.execute(
@@ -859,7 +871,11 @@ def actualizar_estado_retiro_laboral(
             db.rollback()
             raise HTTPException(status_code=404, detail="No se pudo actualizar el retiro laboral.")
 
-        if retiro_actualizado["FechaRetiro"]:
+        # Nunca ingresó (motivo 10) no maneja Paz y Salvo de Operaciones.
+        if (
+            retiro_actualizado["FechaRetiro"]
+            and id_motivo_retiro != 10
+        ):
             paz_existente = db.execute(
                 text("""
                     SELECT "IdPazYSalvo"
@@ -977,6 +993,7 @@ def actualizar_detalle_retiro_laboral(
             SELECT
                 "IdRetiroLaboral",
                 "IdRegistroPersonal",
+                "IdMotivoRetiro",
                 "FechaRetiro"
             FROM public."RetiroLaboral"
             WHERE "IdRetiroLaboral" = :id_retiro_laboral;
@@ -1035,8 +1052,13 @@ def actualizar_detalle_retiro_laboral(
             )
 
         fecha_ultimo_dia_laborado = row["FechaRetiro"]
+        id_motivo_retiro = retiro_actual["IdMotivoRetiro"]
 
-        if fecha_ultimo_dia_laborado:
+        # Nunca ingresó (motivo 10) no maneja Paz y Salvo de Operaciones.
+        if (
+            fecha_ultimo_dia_laborado
+            and id_motivo_retiro != 10
+        ):
             query_paz_salvo_existente = text("""
                 SELECT "IdPazYSalvo"
                 FROM public."PazYSalvoOperaciones"
