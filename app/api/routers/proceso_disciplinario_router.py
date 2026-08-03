@@ -1,4 +1,6 @@
-from datetime import datetime
+# ruff: noqa: B008
+
+from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -7,46 +9,43 @@ from fastapi import (
     Request,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import or_, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 
-from infrastructure.db.deps import get_db
-
-from domain.models.proceso_disciplinario import (
-    ProcesoDisciplinario,
-)
-from domain.models.citacion_proceso_disciplinario import (
-    CitacionProcesoDisciplinario,
-)
-from domain.models.descargo_proceso_disciplinario import (
-    DescargoProcesoDisciplinario,
-)
-from domain.models.cierre_proceso_disciplinario import (
-    CierreProcesoDisciplinario,
-)
-from domain.models.documento_proceso_disciplinario import (
-    DocumentoProcesoDisciplinario,
-)
-from domain.models.agenda_proceso_disciplinario import (
-    AgendaProcesoDisciplinario,
-)
-
-from domain.schemas.proceso_disciplinario_schema import (
-    ProcesoDisciplinarioCreate,
-    ProcesoDisciplinarioResponse,
-    ProcesoDisciplinarioUpdate,
-)
-
-from services.expediente_disciplinario_pdf_service import (
-    generar_expediente_disciplinario_pdf,
-)
 from api.routers.agenda_proceso_disciplinario_router import (
     TIPO_EVENTO_CITACION_ID,
     calcular_hora_fin_citacion,
     validar_fecha_minima_citacion,
     validar_programacion_citacion,
+)
+from domain.models.agenda_proceso_disciplinario import (
+    AgendaProcesoDisciplinario,
+)
+from domain.models.citacion_proceso_disciplinario import (
+    CitacionProcesoDisciplinario,
+)
+from domain.models.cierre_proceso_disciplinario import (
+    CierreProcesoDisciplinario,
+)
+from domain.models.descargo_proceso_disciplinario import (
+    DescargoProcesoDisciplinario,
+)
+from domain.models.documento_proceso_disciplinario import (
+    DocumentoProcesoDisciplinario,
+)
+from domain.models.proceso_disciplinario import (
+    ProcesoDisciplinario,
+)
+from domain.schemas.proceso_disciplinario_schema import (
+    ProcesoDisciplinarioCreate,
+    ProcesoDisciplinarioResponse,
+    ProcesoDisciplinarioUpdate,
+)
+from infrastructure.db.deps import get_db
+from services.expediente_disciplinario_pdf_service import (
+    generar_expediente_disciplinario_pdf,
 )
 
 
@@ -325,6 +324,38 @@ def obtener_borrador_operaciones(
         )
         .first()
     )
+
+
+
+def serializar_documento_expediente(
+    documento: DocumentoProcesoDisciplinario,
+) -> dict:
+    """
+    Convierte el documento a JSON sin exponer el contenido binario.
+
+    DocumentoCargado se utiliza únicamente para visualizar o descargar
+    el archivo desde los endpoints documentales.
+    """
+
+    return {
+        "IdDocumentoProcesoDisciplinario": (
+            documento.IdDocumentoProcesoDisciplinario
+        ),
+        "IdProcesoDisciplinario": (
+            documento.IdProcesoDisciplinario
+        ),
+        "TipoDocumento": documento.TipoDocumento,
+        "NombreArchivo": documento.NombreArchivo,
+        "RutaArchivo": documento.RutaArchivo,
+        "Observacion": documento.Observacion,
+        "Formato": getattr(
+            documento,
+            "Formato",
+            None,
+        ),
+        "FechaCreacion": documento.FechaCreacion,
+        "FechaActualizacion": documento.FechaActualizacion,
+    }
 
 
 @router.post(
@@ -935,7 +966,7 @@ def enviar_proceso_a_rrll(
         or "operaciones_envio_rrll"
     ).strip()
 
-    fecha_actualizacion = datetime.now()
+    fecha_actualizacion = datetime.now(timezone.utc)
 
     nuevo_evento = AgendaProcesoDisciplinario(
         IdProcesoDisciplinario=id_proceso,
@@ -1086,7 +1117,12 @@ def obtener_expediente_disciplinario(
         "Citacion": citacion,
         "Descargo": descargo,
         "Cierre": cierre,
-        "Documentos": documentos,
+        "Documentos": [
+            serializar_documento_expediente(
+                documento
+            )
+            for documento in documentos
+        ],
     }
 
 
@@ -1107,12 +1143,10 @@ def generar_pdf_expediente_disciplinario(
         request.base_url
     ).rstrip("/")
 
-    buffer_pdf = (
-        generar_expediente_disciplinario_pdf(
-            db=db,
-            id_proceso=id_proceso,
-            url_base=url_base,
-        )
+    buffer_pdf = generar_expediente_disciplinario_pdf(
+        db=db,
+        id_proceso=id_proceso,
+        url_base=url_base,
     )
 
     return StreamingResponse(
@@ -1268,7 +1302,7 @@ def actualizar_proceso_disciplinario(
         )
 
     proceso.FechaActualizacion = (
-        datetime.now()
+        datetime.now(timezone.utc)
     )
 
     try:

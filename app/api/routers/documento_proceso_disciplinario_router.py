@@ -1,6 +1,7 @@
+# ruff: noqa: B008
+import io
 import mimetypes
-import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import (
@@ -12,24 +13,21 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from infrastructure.db.deps import get_db
-
 from domain.models.documento_proceso_disciplinario import (
     DocumentoProcesoDisciplinario,
 )
-from domain.models.proceso_disciplinario import (
-    ProcesoDisciplinario,
-)
+from domain.models.proceso_disciplinario import ProcesoDisciplinario
 from domain.schemas.documento_proceso_disciplinario_schema import (
     DocumentoProcesoDisciplinarioCreate,
     DocumentoProcesoDisciplinarioResponse,
     DocumentoProcesoDisciplinarioUpdate,
 )
+from infrastructure.db.deps import get_db
 
 
 router = APIRouter(
@@ -345,14 +343,244 @@ def obtener_ruta_absoluta_documento(
     return ruta_absoluta
 
 
-def documento_tiene_archivo_fisico(
+def obtener_respaldo_documento(
+    db: Session,
+    documento: DocumentoProcesoDisciplinario,
+) -> tuple[bytes, str] | None:
+    """
+    Busca una copia binaria del documento.
+
+    Orden de búsqueda:
+    1. Respaldo propio de DocumentoProcesoDisciplinario.
+    2. Copia enviada a la Carpeta Digital del trabajador.
+    """
+
+    contenido_propio = getattr(
+        documento,
+        "DocumentoCargado",
+        None,
+    )
+
+    if contenido_propio:
+        formato_propio = str(
+            getattr(
+                documento,
+                "Formato",
+                None,
+            )
+            or ""
+        ).strip()
+
+        return (
+            bytes(contenido_propio),
+            formato_propio,
+        )
+
+    id_tipo_documentacion = (
+        obtener_tipo_carpeta_digital(
+            documento.TipoDocumento
+        )
+    )
+
+    if id_tipo_documentacion is None:
+        return None
+
+    proceso = (
+        db.query(ProcesoDisciplinario)
+        .filter(
+            ProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == documento.IdProcesoDisciplinario
+        )
+        .first()
+    )
+
+    if not proceso:
+        return None
+
+    respaldo = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    d."DocumentoCargado",
+                    d."Formato",
+                    d."Nombre"
+                FROM public."Documentos" d
+                INNER JOIN public."RelacionTipoDocumentacion" rtd
+                    ON rtd."IdDocumento" = d."IdDocumento"
+                WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                  AND d."IdTipoDocumentacion" = :id_tipo_documentacion
+                  AND d."Nombre" = :nombre_archivo
+                  AND d."DocumentoCargado" IS NOT NULL
+                ORDER BY d."IdDocumento" DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "id_registro_personal": (
+                    proceso.IdRegistroPersonal
+                ),
+                "id_tipo_documentacion": (
+                    id_tipo_documentacion
+                ),
+                "nombre_archivo": (
+                    documento.NombreArchivo
+                ),
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if not respaldo:
+        return None
+
+    contenido = respaldo["DocumentoCargado"]
+
+    if not contenido:
+        return None
+
+    return (
+        bytes(contenido),
+        str(
+            respaldo["Formato"]
+            or ""
+        ).strip(),
+    )
+
+
+def documento_tiene_archivo_disponible(
+    db: Session,
     documento: DocumentoProcesoDisciplinario,
 ) -> bool:
-    return (
+    if (
         construir_ruta_absoluta_documento(
             documento
         )
         is not None
+    ):
+        return True
+
+    return (
+        obtener_respaldo_documento(
+            db=db,
+            documento=documento,
+        )
+        is not None
+    )
+
+
+def construir_respuesta_documento(
+    db: Session,
+    documento: DocumentoProcesoDisciplinario,
+    descargar: bool,
+):
+    """
+    Devuelve el archivo físico cuando existe.
+
+    Si el archivo físico ya no está disponible, devuelve la copia
+    binaria almacenada en DocumentoProcesoDisciplinario o en la
+    Carpeta Digital.
+    """
+
+    ruta_absoluta = (
+        construir_ruta_absoluta_documento(
+            documento
+        )
+    )
+
+    nombre_archivo = (
+        documento.NombreArchivo
+        or "documento"
+    )
+
+    disposition = (
+        "attachment"
+        if descargar
+        else "inline"
+    )
+
+    if ruta_absoluta:
+        tipo_contenido, _ = (
+            mimetypes.guess_type(
+                ruta_absoluta.name
+            )
+        )
+
+        return FileResponse(
+            path=str(ruta_absoluta),
+            media_type=(
+                tipo_contenido
+                or "application/octet-stream"
+            ),
+            filename=nombre_archivo,
+            content_disposition_type=disposition,
+        )
+
+    respaldo = obtener_respaldo_documento(
+        db=db,
+        documento=documento,
+    )
+
+    if not respaldo:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "El registro existe, pero no se encontró "
+                    "el archivo físico ni una copia binaria "
+                    "disponible."
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    documento
+                    .IdDocumentoProcesoDisciplinario
+                ),
+                "NombreArchivo": (
+                    documento.NombreArchivo
+                ),
+            },
+        )
+
+    contenido_archivo, formato_guardado = (
+        respaldo
+    )
+
+    tipo_contenido = (
+        formato_guardado
+        if "/" in formato_guardado
+        else None
+    )
+
+    if not tipo_contenido:
+        tipo_contenido, _ = (
+            mimetypes.guess_type(
+                nombre_archivo
+            )
+        )
+
+    nombre_seguro = (
+        nombre_archivo
+        .replace('"', "")
+        .replace("\r", "")
+        .replace("\n", "")
+    )
+
+    return StreamingResponse(
+        io.BytesIO(contenido_archivo),
+        media_type=(
+            tipo_contenido
+            or "application/octet-stream"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'{disposition}; '
+                f'filename="{nombre_seguro}"'
+            ),
+            "Content-Length": str(
+                len(contenido_archivo)
+            ),
+        },
     )
 
 
@@ -602,6 +830,8 @@ def subir_documento_proceso_disciplinario(
                 ruta_archivo_relativa
             ),
             Observacion=Observacion,
+            DocumentoCargado=contenido_archivo,
+            Formato=formato_documento,
         )
 
         db.add(nuevo)
@@ -713,8 +943,9 @@ def obtener_documentos_por_proceso(
 
     for documento in documentos:
         archivo_disponible = (
-            documento_tiene_archivo_fisico(
-                documento
+            documento_tiene_archivo_disponible(
+                db=db,
+                documento=documento,
             )
         )
 
@@ -796,27 +1027,10 @@ def visualizar_archivo_documento(
         id_documento=id_documento,
     )
 
-    ruta_absoluta = (
-        obtener_ruta_absoluta_documento(
-            documento
-        )
-    )
-
-    tipo_contenido, _ = mimetypes.guess_type(
-        ruta_absoluta.name
-    )
-
-    return FileResponse(
-        path=str(ruta_absoluta),
-        media_type=(
-            tipo_contenido
-            or "application/octet-stream"
-        ),
-        filename=(
-            documento.NombreArchivo
-            or ruta_absoluta.name
-        ),
-        content_disposition_type="inline",
+    return construir_respuesta_documento(
+        db=db,
+        documento=documento,
+        descargar=False,
     )
 
 
@@ -840,29 +1054,11 @@ def descargar_archivo_documento(
         id_documento=id_documento,
     )
 
-    ruta_absoluta = (
-        obtener_ruta_absoluta_documento(
-            documento
-        )
+    return construir_respuesta_documento(
+        db=db,
+        documento=documento,
+        descargar=True,
     )
-
-    tipo_contenido, _ = mimetypes.guess_type(
-        ruta_absoluta.name
-    )
-
-    return FileResponse(
-        path=str(ruta_absoluta),
-        media_type=(
-            tipo_contenido
-            or "application/octet-stream"
-        ),
-        filename=(
-            documento.NombreArchivo
-            or ruta_absoluta.name
-        ),
-        content_disposition_type="attachment",
-    )
-
 
 
 @router.delete(
@@ -906,17 +1102,15 @@ def eliminar_documento(
     ruta_temporal = None
 
     if ruta_original:
-        marca_tiempo = datetime.now().strftime(
+        marca_tiempo = datetime.now(timezone.utc).strftime(
             "%Y%m%d%H%M%S%f"
         )
 
         ruta_temporal = ruta_original.with_name(
-            (
-                f".eliminando_"
-                f"{documento.IdDocumentoProcesoDisciplinario}_"
-                f"{marca_tiempo}_"
-                f"{ruta_original.name}"
-            )
+            f".eliminando_"
+            f"{documento.IdDocumentoProcesoDisciplinario}_"
+            f"{marca_tiempo}_"
+            f"{ruta_original.name}"
         )
 
         try:
@@ -1059,8 +1253,8 @@ def actualizar_documento(
             valor,
         )
 
-    documento.FechaActualizacion = (
-        datetime.now()
+    documento.FechaActualizacion = datetime.now(
+        timezone.utc
     )
 
     try:
