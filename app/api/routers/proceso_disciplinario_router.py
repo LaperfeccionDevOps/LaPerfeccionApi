@@ -2,12 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    Request,
-)
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import or_, text
@@ -35,9 +30,7 @@ from domain.models.descargo_proceso_disciplinario import (
 from domain.models.documento_proceso_disciplinario import (
     DocumentoProcesoDisciplinario,
 )
-from domain.models.proceso_disciplinario import (
-    ProcesoDisciplinario,
-)
+from domain.models.proceso_disciplinario import ProcesoDisciplinario
 from domain.schemas.proceso_disciplinario_schema import (
     ProcesoDisciplinarioCreate,
     ProcesoDisciplinarioResponse,
@@ -88,6 +81,19 @@ def normalizar_texto(
     return str(
         valor or ""
     ).strip().upper()
+
+
+def formatear_codigo_expediente(
+    id_proceso: int,
+    fecha_creacion: datetime | None = None,
+) -> str:
+    anio = (
+        fecha_creacion.year
+        if fecha_creacion
+        else datetime.now(timezone.utc).year
+    )
+
+    return f"PD-{anio}-{int(id_proceso):06d}"
 
 
 def aplicar_filtro_visibilidad_rrll(
@@ -1134,9 +1140,14 @@ def generar_pdf_expediente_disciplinario(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    obtener_proceso_o_error(
+    proceso = obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
+    )
+
+    codigo_expediente = formatear_codigo_expediente(
+        id_proceso=proceso.IdProcesoDisciplinario,
+        fecha_creacion=proceso.FechaCreacion,
     )
 
     url_base = str(
@@ -1156,7 +1167,7 @@ def generar_pdf_expediente_disciplinario(
             "Content-Disposition": (
                 f'inline; filename="'
                 f'expediente_disciplinario_'
-                f'{id_proceso}.pdf"'
+                f'{codigo_expediente}.pdf"'
             )
         },
     )

@@ -1,24 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException
+# ruff: noqa: B008, BLE001, RUF010
+
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from infrastructure.db.deps import get_db
 from domain.schemas.retiro_laboral import (
     RetiroLaboralCreate,
-    RetiroLaboralEstadoUpdate,
     RetiroLaboralDetalleUpdate,
+    RetiroLaboralEstadoUpdate,
 )
+from infrastructure.db.deps import get_db
 from services.rrll_documentos_service import (
-    generar_y_registrar_primer_llamado,
-    generar_y_registrar_segundo_llamado,
     generar_y_registrar_carta_finalizacion,
     generar_y_registrar_paquete_retiro,
+    generar_y_registrar_primer_llamado,
+    generar_y_registrar_segundo_llamado,
 )
-from fastapi.responses import FileResponse
-from pathlib import Path
-
-from typing import Optional
-from fastapi import Query
 
 
 router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
@@ -157,8 +157,8 @@ def crear_retiro_laboral(payload: RetiroLaboralCreate, db: Session = Depends(get
 
 @router.get("/dashboard-indicadores")
 def dashboard_indicadores_rrll(
-    anio: Optional[int] = Query(None),
-    mes: Optional[int] = Query(None),
+    anio: int | None = Query(None),
+    mes: int | None = Query(None),
     db: Session = Depends(get_db)
 ):
     try:

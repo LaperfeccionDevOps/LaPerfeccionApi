@@ -1,20 +1,15 @@
-from datetime import date, datetime
+import logging
+from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from xml.sax.saxutils import escape
 
 from fastapi import HTTPException
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import (
-    ParagraphStyle,
-    getSampleStyleSheet,
-)
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
@@ -27,6 +22,8 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from domain.models.aspirante import RegistroPersonal
 from domain.models.cierre_proceso_disciplinario import (
@@ -41,9 +38,10 @@ from domain.models.descargo_proceso_disciplinario import (
 from domain.models.documento_proceso_disciplinario import (
     DocumentoProcesoDisciplinario,
 )
-from domain.models.proceso_disciplinario import (
-    ProcesoDisciplinario,
-)
+from domain.models.proceso_disciplinario import ProcesoDisciplinario
+
+
+logger = logging.getLogger(__name__)
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -79,6 +77,19 @@ ANCHO_CONTENIDO = 17.8 * cm
 MARGEN_HORIZONTAL = (letter[0] - ANCHO_CONTENIDO) / 2
 
 
+def _formatear_codigo_expediente(
+    id_proceso: int,
+    fecha_creacion: date | datetime | None = None,
+) -> str:
+    anio = (
+        fecha_creacion.year
+        if fecha_creacion
+        else datetime.now(timezone.utc).year
+    )
+
+    return f"PD-{anio}-{int(id_proceso):06d}"
+
+
 def _texto(valor: Any, valor_vacio: str = "—") -> str:
     """
     Convierte un valor en texto seguro para ReportLab.
@@ -109,7 +120,7 @@ def _texto_html(valor: Any, valor_vacio: str = "—") -> str:
 
 
 def _fecha(
-    valor: Optional[date | datetime],
+    valor: date | datetime | None,
     incluir_hora: bool = False,
 ) -> str:
     """
@@ -170,7 +181,7 @@ def _hora(valor: Any) -> str:
             hora_convertida = datetime.strptime(
                 texto,
                 formato,
-            )
+            ).replace(tzinfo=timezone.utc)
 
             return hora_convertida.strftime("%I:%M %p")
 
@@ -315,7 +326,7 @@ def _crear_parrafo(
 def _crear_tabla_datos(
     filas: list[list[Any]],
     estilos,
-    anchos: Optional[list[float]] = None,
+    anchos: list[float] | None = None,
 ) -> Table:
     """
     Construye una tabla estándar del expediente.
@@ -547,8 +558,11 @@ def _dibujar_encabezado_y_pie(
                 preserveAspectRatio=True,
                 mask="auto",
             )
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as error:
+        logger.warning(
+            "No se pudo cargar el logo principal del expediente: %s",
+            error,
+        )
 
     # Logo derecho
     try:
@@ -562,8 +576,11 @@ def _dibujar_encabezado_y_pie(
                 preserveAspectRatio=True,
                 mask="auto",
             )
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as error:
+        logger.warning(
+            "No se pudo cargar el logo secundario del expediente: %s",
+            error,
+        )
 
     # Texto central del encabezado
     canvas.setFillColor(COLOR_VERDE_OSCURO)
@@ -772,6 +789,11 @@ def generar_expediente_disciplinario_pdf(
             },
         )
 
+    codigo_expediente = _formatear_codigo_expediente(
+        id_proceso=proceso.IdProcesoDisciplinario,
+        fecha_creacion=proceso.FechaCreacion,
+    )
+
     trabajador = (
         db.query(RegistroPersonal)
         .filter(
@@ -900,7 +922,7 @@ def generar_expediente_disciplinario_pdf(
         bottomMargin=1.35 * cm,
         title=(
             f"Expediente disciplinario "
-            f"{id_proceso}"
+            f"{codigo_expediente}"
         ),
         author="Aseos La Perfección S.A.S.",
         subject="Expediente disciplinario",
@@ -925,9 +947,9 @@ def generar_expediente_disciplinario_pdf(
     contenido.append(
         Paragraph(
             (
-                f"Expediente No. {id_proceso} · "
+                f"{codigo_expediente} · "
                 f"Generado el "
-                f"{datetime.now().strftime('%d/%m/%Y %I:%M %p')}"
+                f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %I:%M %p')}"
             ),
             estilos["SubtituloPrincipalPDF"],
         )
@@ -1050,7 +1072,7 @@ def generar_expediente_disciplinario_pdf(
             filas=[
                 [
                     "Número de expediente",
-                    id_proceso,
+                    codigo_expediente,
                     "Estado",
                     proceso.EstadoProceso,
                 ],
@@ -1500,7 +1522,7 @@ def generar_expediente_disciplinario_pdf(
 
     linea_tiempo = [
         [
-            "Proceso iniciado",
+            "Expediente iniciado",
             _fecha(proceso.FechaCreacion),
         ],
         [
