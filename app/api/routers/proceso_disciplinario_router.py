@@ -31,6 +31,12 @@ from domain.models.documento_proceso_disciplinario import (
     DocumentoProcesoDisciplinario,
 )
 from domain.models.proceso_disciplinario import ProcesoDisciplinario
+from domain.models.solicitud_autorizacion_agenda_disciplinaria import (
+    SolicitudAutorizacionAgendaDisciplinaria,
+)
+from domain.models.autorizacion_agenda_disciplinaria import (
+    AutorizacionAgendaDisciplinaria,
+)
 from domain.schemas.proceso_disciplinario_schema import (
     ProcesoDisciplinarioCreate,
     ProcesoDisciplinarioResponse,
@@ -604,8 +610,37 @@ def obtener_historial_disciplinario_trabajador(
     )
 
     procesos = (
-        aplicar_filtro_visibilidad_rrll(
-            consulta
+        consulta
+        .filter(
+            or_(
+                ProcesoDisciplinario
+                .OrigenProceso
+                != "OPERACIONES",
+                ProcesoDisciplinario
+                .OrigenProceso
+                .is_(None),
+                ProcesoDisciplinario
+                .EstadoProceso
+                .in_(
+                    list(
+                        ESTADOS_VISIBLES_RRLL_OPERACIONES
+                    )
+                ),
+                db.query(
+                    SolicitudAutorizacionAgendaDisciplinaria
+                    .IdSolicitudAutorizacion
+                )
+                .filter(
+                    SolicitudAutorizacionAgendaDisciplinaria
+                    .IdProcesoDisciplinario
+                    == ProcesoDisciplinario
+                    .IdProcesoDisciplinario,
+                    SolicitudAutorizacionAgendaDisciplinaria
+                    .Activo
+                    .is_(True),
+                )
+                .exists(),
+            )
         )
         .order_by(
             ProcesoDisciplinario
@@ -685,6 +720,49 @@ def obtener_historial_disciplinario_trabajador(
             == "CERRADO"
         )
 
+        solicitud_viernes = (
+            db.query(
+                SolicitudAutorizacionAgendaDisciplinaria
+            )
+            .filter(
+                SolicitudAutorizacionAgendaDisciplinaria
+                .IdProcesoDisciplinario
+                == proceso.IdProcesoDisciplinario,
+                SolicitudAutorizacionAgendaDisciplinaria
+                .Activo.is_(True),
+            )
+            .order_by(
+                SolicitudAutorizacionAgendaDisciplinaria
+                .FechaSolicitud
+                .desc(),
+                SolicitudAutorizacionAgendaDisciplinaria
+                .IdSolicitudAutorizacion
+                .desc(),
+            )
+            .first()
+        )
+
+        autorizacion_viernes = None
+
+        if (
+            solicitud_viernes
+            and solicitud_viernes
+            .IdAutorizacionAgendaDisciplinaria
+            is not None
+        ):
+            autorizacion_viernes = (
+                db.query(
+                    AutorizacionAgendaDisciplinaria
+                )
+                .filter(
+                    AutorizacionAgendaDisciplinaria
+                    .IdAutorizacionAgendaDisciplinaria
+                    == solicitud_viernes
+                    .IdAutorizacionAgendaDisciplinaria
+                )
+                .first()
+            )
+
         historial.append(
             {
                 "IdProcesoDisciplinario": (
@@ -754,6 +832,92 @@ def obtener_historial_disciplinario_trabajador(
                     proceso_cerrado
                     and cierre is not None
                     and len(documentos_rrll) > 0
+                ),
+                "TieneSolicitudViernes": (
+                    solicitud_viernes is not None
+                ),
+                "IdSolicitudAutorizacionViernes": (
+                    solicitud_viernes
+                    .IdSolicitudAutorizacion
+                    if solicitud_viernes
+                    else None
+                ),
+                "EstadoSolicitudViernes": (
+                    solicitud_viernes.EstadoSolicitud
+                    if solicitud_viernes
+                    else None
+                ),
+                "FechaSolicitadaViernes": (
+                    solicitud_viernes.FechaSolicitada
+                    if solicitud_viernes
+                    else None
+                ),
+                "FechaSolicitudViernes": (
+                    solicitud_viernes.FechaSolicitud
+                    if solicitud_viernes
+                    else None
+                ),
+                "UsuarioSolicitaViernes": (
+                    solicitud_viernes.UsuarioSolicita
+                    if solicitud_viernes
+                    else None
+                ),
+                "UsuarioResuelveViernes": (
+                    solicitud_viernes.UsuarioResuelve
+                    if solicitud_viernes
+                    else None
+                ),
+                "FechaResolucionViernes": (
+                    solicitud_viernes.FechaResolucion
+                    if solicitud_viernes
+                    else None
+                ),
+                "ObservacionResolucionViernes": (
+                    solicitud_viernes.ObservacionResolucion
+                    if solicitud_viernes
+                    else None
+                ),
+                "IdAutorizacionAgendaDisciplinaria": (
+                    solicitud_viernes
+                    .IdAutorizacionAgendaDisciplinaria
+                    if solicitud_viernes
+                    else None
+                ),
+                "AutorizacionViernesDisponible": (
+                    solicitud_viernes is not None
+                    and normalizar_texto(
+                        solicitud_viernes.EstadoSolicitud
+                    )
+                    == "APROBADA"
+                    and autorizacion_viernes is not None
+                    and bool(
+                        autorizacion_viernes.Activo
+                    )
+                    and normalizar_texto(
+                        autorizacion_viernes
+                        .EstadoAutorizacion
+                    )
+                    == "ACTIVA"
+                ),
+                "FechaAutorizadaViernes": (
+                    autorizacion_viernes.FechaAutorizada
+                    if autorizacion_viernes
+                    else None
+                ),
+                "HoraInicioAutorizadaViernes": (
+                    autorizacion_viernes.HoraInicio
+                    if autorizacion_viernes
+                    else None
+                ),
+                "HoraFinAutorizadaViernes": (
+                    autorizacion_viernes.HoraFin
+                    if autorizacion_viernes
+                    else None
+                ),
+                "EstadoAutorizacionViernes": (
+                    autorizacion_viernes.EstadoAutorizacion
+                    if autorizacion_viernes
+                    else None
                 ),
             }
         )

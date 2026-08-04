@@ -51,7 +51,15 @@ from api.routers.citacion_proceso_disciplinario_router import router as citacion
 from api.routers.descargo_proceso_disciplinario_router import router as descargo_proceso_disciplinario_router
 from api.routers.documento_proceso_disciplinario_router import router as documento_proceso_disciplinario_router
 from api.routers.cierre_proceso_disciplinario_router import router as cierre_proceso_disciplinario_router
-from api.routers.agenda_proceso_disciplinario_router import router as agenda_proceso_disciplinario_router
+from api.routers.agenda_proceso_disciplinario_router import (
+    router as agenda_proceso_disciplinario_router,
+)
+from api.routers.autorizacion_agenda_disciplinaria_router import (
+    router as autorizacion_agenda_disciplinaria_router,
+)
+from api.routers.solicitud_autorizacion_agenda_disciplinaria_router import (
+    router as solicitud_autorizacion_agenda_disciplinaria_router,
+)
 from api.routers.asistente_descargo_proceso_disciplinario_router import (
     router as asistente_descargo_proceso_disciplinario_router,
 )
@@ -102,7 +110,7 @@ app.add_middleware(
 
 
 # ─────────────────────────────────────────────
-# 📌 Routers
+# Routers
 # ─────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api", tags=["auth"])
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
@@ -148,6 +156,10 @@ app.include_router(descargo_proceso_disciplinario_router)
 app.include_router(documento_proceso_disciplinario_router)
 app.include_router(cierre_proceso_disciplinario_router)
 app.include_router(agenda_proceso_disciplinario_router)
+app.include_router(autorizacion_agenda_disciplinaria_router)
+app.include_router(
+    solicitud_autorizacion_agenda_disciplinaria_router
+)
 app.include_router(
     asistente_descargo_proceso_disciplinario_router
 )
