@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,9 @@ from domain.models.proceso_disciplinario import ProcesoDisciplinario
 logger = logging.getLogger(__name__)
 
 
+ZONA_HORARIA_COLOMBIA = timezone(timedelta(hours=-5))
+
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RUTA_LOGO_EMPRESA = (
@@ -84,7 +87,7 @@ def _formatear_codigo_expediente(
     anio = (
         fecha_creacion.year
         if fecha_creacion
-        else datetime.now(timezone.utc).year
+        else datetime.now(ZONA_HORARIA_COLOMBIA).year
     )
 
     return f"PD-{anio}-{int(id_proceso):06d}"
@@ -949,7 +952,7 @@ def generar_expediente_disciplinario_pdf(
             (
                 f"{codigo_expediente} · "
                 f"Generado el "
-                f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %I:%M %p')}"
+                f"{datetime.now(ZONA_HORARIA_COLOMBIA).strftime('%d/%m/%Y %I:%M %p')}"
             ),
             estilos["SubtituloPrincipalPDF"],
         )
