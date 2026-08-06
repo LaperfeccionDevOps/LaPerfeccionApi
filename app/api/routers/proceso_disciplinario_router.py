@@ -1,4 +1,4 @@
-# ruff: noqa: B008
+# ruff: noqa: B008, BLE001
 
 from datetime import datetime, timezone
 
@@ -43,6 +43,10 @@ from domain.schemas.proceso_disciplinario_schema import (
     ProcesoDisciplinarioUpdate,
 )
 from infrastructure.db.deps import get_db
+from services.correo_proceso_disciplinario_service import (
+    TIPO_CITACION_INICIAL,
+    enviar_notificacion_agenda_disciplinaria,
+)
 from services.expediente_disciplinario_pdf_service import (
     generar_expediente_disciplinario_pdf,
 )
@@ -87,6 +91,37 @@ def normalizar_texto(
     return str(
         valor or ""
     ).strip().upper()
+
+
+def intentar_enviar_citacion_inicial(
+    db: Session,
+    id_agenda: int,
+    usuario: str | None = None,
+) -> dict:
+    """
+    Envía la citación inicial después de confirmar el envío a RRLL.
+
+    Un fallo de correo o trazabilidad no revierte el proceso ni la
+    agenda que ya fueron guardados correctamente.
+    """
+    try:
+        return enviar_notificacion_agenda_disciplinaria(
+            db=db,
+            id_agenda=id_agenda,
+            tipo_notificacion=TIPO_CITACION_INICIAL,
+            usuario=usuario,
+        )
+
+    except Exception as error:
+        db.rollback()
+
+        return {
+            "enviado": False,
+            "estado": "ERROR",
+            "correo": None,
+            "mensaje": str(error),
+            "IdNotificacionProcesoDisciplinario": None,
+        }
 
 
 def formatear_codigo_expediente(
@@ -1057,11 +1092,14 @@ def enviar_proceso_a_rrll(
     )
 
     validar_programacion_citacion(
-        db=db,
-        fecha_evento=citacion.FechaCitacion,
-        hora_inicio=citacion.HoraCitacion,
-        hora_fin=hora_fin,
-    )
+            db=db,
+            fecha_evento=citacion.FechaCitacion,
+            hora_inicio=citacion.HoraCitacion,
+            hora_fin=hora_fin,
+            id_registro_personal=proceso.IdRegistroPersonal,
+            id_proceso_disciplinario=id_proceso,
+            bloquear_autorizacion=True,
+        )
 
     agenda_existente = (
         db.query(
@@ -1182,26 +1220,6 @@ def enviar_proceso_a_rrll(
         db.refresh(nuevo_evento)
         db.refresh(proceso)
 
-        return {
-            "ok": True,
-            "yaEnviado": False,
-            "IdProcesoDisciplinario": id_proceso,
-            "EstadoProceso": proceso.EstadoProceso,
-            "IdAgendaProcesoDisciplinario": (
-                nuevo_evento
-                .IdAgendaProcesoDisciplinario
-            ),
-            "FechaEvento": nuevo_evento.FechaEvento,
-            "HoraInicio": nuevo_evento.HoraInicio,
-            "HoraFin": nuevo_evento.HoraFin,
-            "EstadoAgenda": nuevo_evento.EstadoAgenda,
-            "ColorAgenda": nuevo_evento.ColorAgenda,
-            "mensaje": (
-                "El proceso fue enviado a Relaciones "
-                "Laborales y quedó programado en la agenda."
-            ),
-        }
-
     except SQLAlchemyError as error:
         db.rollback()
 
@@ -1215,6 +1233,35 @@ def enviar_proceso_a_rrll(
                 "IdProcesoDisciplinario": id_proceso,
             },
         ) from error
+
+    resultado_notificacion = intentar_enviar_citacion_inicial(
+        db=db,
+        id_agenda=(
+            nuevo_evento.IdAgendaProcesoDisciplinario
+        ),
+        usuario=usuario,
+    )
+
+    return {
+        "ok": True,
+        "yaEnviado": False,
+        "IdProcesoDisciplinario": id_proceso,
+        "EstadoProceso": proceso.EstadoProceso,
+        "IdAgendaProcesoDisciplinario": (
+            nuevo_evento
+            .IdAgendaProcesoDisciplinario
+        ),
+        "FechaEvento": nuevo_evento.FechaEvento,
+        "HoraInicio": nuevo_evento.HoraInicio,
+        "HoraFin": nuevo_evento.HoraFin,
+        "EstadoAgenda": nuevo_evento.EstadoAgenda,
+        "ColorAgenda": nuevo_evento.ColorAgenda,
+        "NotificacionCorreo": resultado_notificacion,
+        "mensaje": (
+            "El proceso fue enviado a Relaciones "
+            "Laborales y quedó programado en la agenda."
+        ),
+    }
 
 
 @router.get(

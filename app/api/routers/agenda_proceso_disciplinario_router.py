@@ -1,4 +1,4 @@
-# ruff: noqa: B008
+# ruff: noqa: B008, BLE001
 
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -37,6 +37,10 @@ from domain.schemas.historial_agenda_proceso_disciplinario_schema import (
 from domain.schemas.tipo_evento_disciplinario_schema import (
     TipoEventoDisciplinarioResponse,
 )
+from services.correo_proceso_disciplinario_service import (
+    TIPO_REPROGRAMACION,
+    enviar_notificacion_agenda_disciplinaria,
+)
 
 
 router = APIRouter(
@@ -69,6 +73,38 @@ COLORES_POR_ESTADO = {
 ZONA_COLOMBIA = timezone(
     timedelta(hours=-5)
 )
+
+
+def intentar_enviar_notificacion_agenda(
+    db: Session,
+    id_agenda: int,
+    tipo_notificacion: str,
+    usuario: str | None = None,
+) -> dict:
+    """
+    Intenta enviar la notificación de una agenda ya confirmada.
+
+    Un fallo del servicio de correo o de su trazabilidad no revierte
+    la creación, reprogramación o cancelación ya guardada.
+    """
+    try:
+        return enviar_notificacion_agenda_disciplinaria(
+            db=db,
+            id_agenda=id_agenda,
+            tipo_notificacion=tipo_notificacion,
+            usuario=usuario,
+        )
+
+    except Exception as error:
+        db.rollback()
+
+        return {
+            "enviado": False,
+            "estado": "ERROR",
+            "correo": None,
+            "mensaje": str(error),
+            "IdNotificacionProcesoDisciplinario": None,
+        }
 
 
 def obtener_ahora_colombia() -> datetime:
@@ -1702,6 +1738,18 @@ def reprogramar_evento_agenda(
 
         db.commit()
         db.refresh(evento)
+
+        intentar_enviar_notificacion_agenda(
+            db=db,
+            id_agenda=(
+                evento.IdAgendaProcesoDisciplinario
+            ),
+            tipo_notificacion=TIPO_REPROGRAMACION,
+            usuario=(
+                data.UsuarioMovimiento
+                or "rrll_reprogramacion"
+            ),
+        )
 
         return evento
 
