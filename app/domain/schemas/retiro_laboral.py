@@ -1,5 +1,6 @@
 from typing import Optional
 from datetime import date, datetime
+
 from pydantic import BaseModel
 
 
@@ -31,3 +32,17 @@ class RetiroLaboralDetalleUpdate(BaseModel):
     DevolucionCarnet: Optional[bool] = None
     RetiroLegalizado: Optional[str] = None
     UsuarioActualizacion: str
+
+
+class RetiroMotivoRRLLUpdate(BaseModel):
+    DescripcionRetiroRRLL: str
+    UsuarioValidacionRRLL: str
+
+
+class RetiroMotivoRRLLOut(BaseModel):
+    IdRetiroLaboral: int
+    DescripcionTrabajador: Optional[str] = None
+    DescripcionRetiroRRLL: Optional[str] = None
+    EstadoValidacionRRLL: Optional[str] = None
+    UsuarioValidacionRRLL: Optional[str] = None
+    FechaValidacionRRLL: Optional[datetime] = None

@@ -1,4 +1,5 @@
 # app/api/routers/aspirante_routers.py
+# ruff: noqa
 
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -37,6 +38,7 @@ ROL_HSE = 10
 ROL_BIENESTAR = 16
 ROL_TALENTO_HUMANO = 13
 ROL_DESARROLLADOR = 15
+ROL_NOMINA = 17
 
 
 def _exists_registro_personal(db: Session, id_registro: int) -> bool:
@@ -167,14 +169,16 @@ def listar_aspirantes(
     id_estado: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
     current=Depends(
-        require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-            ROL_HSE,
-            ROL_BIENESTAR,
-        )
+       require_roles_ids(
+           ROL_SUPER_ADMIN,
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_HSE,
+        ROL_BIENESTAR,
+        ROL_NOMINA,
+    )
     ),
 ):
     try:
@@ -226,10 +230,25 @@ def listar_aspirantes(
                 CARG."NombreCargo",
                 ASCARGO."Salario",
                 COALESCE(
-                    CB."FechaIngreso",
-                    rp."FechaIngresoHistorica"
-                ) AS "FechaIngreso",
-                CL."Nombre" AS "NombreCliente"
+                CB."FechaIngreso",
+                rp."FechaIngresoHistorica"
+            ) AS "FechaIngreso",
+                CL."Nombre" AS "NombreCliente",
+                CASE
+                    WHEN rp."IdEstadoProceso" = 25 THEN TRUE
+                    WHEN rp."FechaIngresoHistorica" IS NOT NULL THEN TRUE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM "ContratacionBasica" CB_HIST
+                        WHERE CB_HIST."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    ) THEN TRUE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM "RetiroLaboral" RL_HIST
+                        WHERE RL_HIST."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    ) THEN TRUE
+                    ELSE FALSE
+                END AS "TuvoContratacion"
             FROM "RegistroPersonal" rp
             LEFT JOIN "EstadoProceso" esp ON rp."IdEstadoProceso" = esp."IdEstadoProceso"
             LEFT JOIN "DatosAdicionales" DA ON DA."IdRegistroPersonal" = rp."IdRegistroPersonal"
@@ -337,11 +356,12 @@ def buscar_aspirantes_por_fecha_y_estado(
     db: Session = Depends(get_db),
     current=Depends(
         require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-        )
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_NOMINA,
+    )
     ),
 ):
     try:
@@ -382,14 +402,16 @@ def obtener_aspirante(
     id_registro: int,
     db: Session = Depends(get_db),
     current=Depends(
-        require_roles_ids(
-            ROL_SELECCION,
-            ROL_TALENTO_HUMANO,
-            ROL_CONTRATACION,
-            ROL_OPERACIONES,
-            ROL_HSE,
-            ROL_BIENESTAR,
-        )
+      require_roles_ids(
+          ROL_SUPER_ADMIN,
+        ROL_SELECCION,
+        ROL_TALENTO_HUMANO,
+        ROL_CONTRATACION,
+        ROL_OPERACIONES,
+        ROL_HSE,
+        ROL_BIENESTAR,
+        ROL_NOMINA,
+    )
     ),
 ):
     aspirante = _get_registro_personal_by_id(db, id_registro)
@@ -408,15 +430,41 @@ def actualizar_estado_aspirante(
     db: Session = Depends(get_db),
     current=Depends(require_roles_ids(ROL_SELECCION, ROL_TALENTO_HUMANO, ROL_CONTRATACION)),
 ):
-    if not _exists_registro_personal(db, id_registro):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Aspirante no encontrado",
-        )
+    """
+    Actualiza el estado general del aspirante.
 
+    Cuando el aspirante entra por primera vez al estado 24
+    (Avanza a Contratación), registra el movimiento en
+    HistorialEstadoContratacion dentro de la misma transacción.
+
+    No altera los demás cambios de estado ni registra duplicados
+    cuando el registro ya se encuentra en estado 24.
+    """
+
+    usuario_movimiento = (usuario or "sistema").strip() or "sistema"
     ahora = datetime.utcnow()
 
     try:
+        # Bloquea el registro durante la transacción y obtiene
+        # el estado real anterior antes de realizar el cambio.
+        registro_actual = db.execute(
+            text("""
+                SELECT "IdEstadoProceso"
+                FROM "RegistroPersonal"
+                WHERE "IdRegistroPersonal" = :id
+                FOR UPDATE
+            """),
+            {"id": id_registro},
+        ).mappings().first()
+
+        if not registro_actual:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Aspirante no encontrado",
+            )
+
+        estado_anterior = registro_actual.get("IdEstadoProceso")
+
         db.execute(
             text("""
                 UPDATE "RegistroPersonal"
@@ -428,12 +476,50 @@ def actualizar_estado_aspirante(
             {
                 "nuevo_estado": nuevo_estado,
                 "fecha": ahora,
-                "usuario": usuario,
+                "usuario": usuario_movimiento,
                 "id": id_registro,
             },
         )
+
+        historial_registrado = False
+
+        # Registra únicamente el ingreso real al estado 24.
+        # Si ya estaba en 24 y vuelven a guardar el mismo estado,
+        # no genera una fila duplicada.
+        if nuevo_estado == 24 and estado_anterior != 24:
+            db.execute(
+                text("""
+                    INSERT INTO public."HistorialEstadoContratacion"
+                    (
+                        "IdRegistroPersonal",
+                        "EstadoAnterior",
+                        "EstadoNuevo",
+                        "FechaMovimiento",
+                        "UsuarioMovimiento"
+                    )
+                    VALUES
+                    (
+                        :id_registro,
+                        :estado_anterior,
+                        :estado_nuevo,
+                        NOW(),
+                        :usuario
+                    )
+                """),
+                {
+                    "id_registro": id_registro,
+                    "estado_anterior": estado_anterior,
+                    "estado_nuevo": nuevo_estado,
+                    "usuario": usuario_movimiento,
+                },
+            )
+            historial_registrado = True
+
         db.commit()
 
+    except HTTPException:
+        db.rollback()
+        raise
     except SQLAlchemyError as e:
         db.rollback()
         raise HTTPException(
@@ -444,8 +530,10 @@ def actualizar_estado_aspirante(
     return {
         "message": "Estado actualizado correctamente",
         "idRegistroPersonal": id_registro,
+        "estadoAnterior": estado_anterior,
         "nuevoEstado": nuevo_estado,
-        "usuario": usuario,
+        "usuario": usuario_movimiento,
+        "historialContratacionRegistrado": historial_registrado,
     }
 
 

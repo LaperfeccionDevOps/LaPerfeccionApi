@@ -28,7 +28,11 @@ class ContratacionBasicaIn(BaseModel):
 
     Posicion: Optional[str] = Field(default=None, max_length=100)
 
-    Escalafon: Optional[str] = Field(default=None, max_length=4, pattern=r"^(200|220)$")
+    Escalafon: Optional[str] = Field(
+        default=None,
+        max_length=4,
+        pattern=r"^(200|210|220)$",
+    )
 
     NumeroCuenta: Optional[str] = Field(default=None, max_length=40)
 
@@ -48,17 +52,25 @@ class ContratacionBasicaOut(ContratacionBasicaIn):
 
 
 # ---------- Endpoints ----------
-@router.get("/registro-personal/{id_registro_personal}", response_model=Optional[ContratacionBasicaOut])
-def obtener_por_registro_personal(id_registro_personal: int, db: Session = Depends(get_db)):
+@router.get(
+    "/registro-personal/{id_registro_personal}",
+    response_model=Optional[ContratacionBasicaOut],
+)
+def obtener_por_registro_personal(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+):
     return service.obtener(db, id_registro_personal)
 
 
 @router.post("", response_model=ContratacionBasicaOut)
-def upsert(payload: ContratacionBasicaIn, db: Session = Depends(get_db)):
+def upsert(
+    payload: ContratacionBasicaIn,
+    db: Session = Depends(get_db),
+):
     try:
         result = service.guardar(db, payload.model_dump())
 
-        # ✅ CLAVE: si el service/repo devuelve None, NO dejamos que FastAPI reviente con ResponseValidationError.
         if result is None:
             raise HTTPException(
                 status_code=500,
@@ -68,11 +80,13 @@ def upsert(payload: ContratacionBasicaIn, db: Session = Depends(get_db)):
                 ),
             )
 
-        # (opcional) si por alguna razón devuelve algo no-dict
         if not isinstance(result, dict):
             raise HTTPException(
                 status_code=500,
-                detail=f"Respuesta inesperada del service: {type(result)}. Se esperaba dict.",
+                detail=(
+                    f"Respuesta inesperada del service: {type(result)}. "
+                    "Se esperaba dict."
+                ),
             )
 
         return result
@@ -82,4 +96,7 @@ def upsert(payload: ContratacionBasicaIn, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error guardando ContratacionBasica: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error guardando ContratacionBasica: {str(e)}",
+        )

@@ -1,11 +1,13 @@
-from typing import Optional, List
-from datetime import date, datetime
+# ruff: noqa: B008, BLE001, RUF010, SIM114
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+import unicodedata
+from datetime import date, datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 
@@ -32,28 +34,28 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     Apellidos: str
     NombreCompleto: str
 
-    Direccion: Optional[str] = None
-    Barrio: Optional[str] = None
-    Telefono: Optional[str] = None
-    Correo: Optional[str] = None
-    Cargo: Optional[str] = None
+    Direccion: str | None = None
+    Barrio: str | None = None
+    Telefono: str | None = None
+    Correo: str | None = None
+    Cargo: str | None = None
 
-    IdCliente: Optional[int] = None
-    ClienteNombre: Optional[str] = None
+    IdCliente: int | None = None
+    ClienteNombre: str | None = None
 
-    IdRetiroLaboral: Optional[int] = None
-    IdMotivoRetiro: Optional[int] = None
-    MotivoRetiroNombre: Optional[str] = None
-    FechaProceso: Optional[str] = None
-    FechaCierre: Optional[str] = None
-    FechaEnvioOperaciones: Optional[str] = None
+    IdRetiroLaboral: int | None = None
+    IdMotivoRetiro: int | None = None
+    MotivoRetiroNombre: str | None = None
+    FechaProceso: str | None = None
+    FechaCierre: str | None = None
+    FechaEnvioOperaciones: str | None = None
 
-    IdTipificacionRetiro: Optional[int] = None
-    ObservacionRetiro: Optional[str] = None
-    DevolucionCarnet: Optional[bool] = None
+    IdTipificacionRetiro: int | None = None
+    ObservacionRetiro: str | None = None
+    DevolucionCarnet: bool | None = None
 
-    FechaInicio: Optional[str] = None
-    FechaUltimoDiaLaborado: Optional[str] = None
+    FechaInicio: str | None = None
+    FechaUltimoDiaLaborado: str | None = None
 
 
 class RetiroLaboralCreate(BaseModel):
@@ -61,9 +63,9 @@ class RetiroLaboralCreate(BaseModel):
     IdCliente: int
     IdMotivoRetiro: int
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
-    UsuarioActualizacion: Optional[str] = None
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
+    UsuarioActualizacion: str | None = None
     EstadoCasoRRLL: str = Field(default="ABIERTO")
 
 
@@ -74,23 +76,23 @@ class RetiroLaboralCreateOut(BaseModel):
     IdMotivoRetiro: int
     EstadoCasoRRLL: str
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
     Activo: bool
 
 
 class RetiroLaboralUpdate(BaseModel):
-    IdCliente: Optional[int] = None
-    IdMotivoRetiro: Optional[int] = None
-    FechaProceso: Optional[date] = None
-    FechaRetiro: Optional[date] = None
-    FechaCierre: Optional[datetime] = None
-    FechaEnvioOperaciones: Optional[datetime] = None
-    FechaEnvioNomina: Optional[datetime] = None
-    ObservacionGeneral: Optional[str] = None
-    Activo: Optional[bool] = None
-    UsuarioActualizacion: Optional[str] = None
-    EstadoCasoRRLL: Optional[str] = None
+    IdCliente: int | None = None
+    IdMotivoRetiro: int | None = None
+    FechaProceso: date | None = None
+    FechaRetiro: date | None = None
+    FechaCierre: datetime | None = None
+    FechaEnvioOperaciones: datetime | None = None
+    FechaEnvioNomina: datetime | None = None
+    ObservacionGeneral: str | None = None
+    Activo: bool | None = None
+    UsuarioActualizacion: str | None = None
+    EstadoCasoRRLL: str | None = None
 
 
 class RetiroLaboralUpdateOut(BaseModel):
@@ -100,9 +102,24 @@ class RetiroLaboralUpdateOut(BaseModel):
     IdMotivoRetiro: int
     EstadoCasoRRLL: str
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
     Activo: bool
+
+
+class RetiroMotivoRRLLUpdate(BaseModel):
+    DescripcionRetiroRRLL: str = Field(..., min_length=3, max_length=5000)
+    UsuarioValidacionRRLL: str = Field(..., min_length=1, max_length=150)
+
+
+class RetiroMotivoRRLLOut(BaseModel):
+    IdRetiroLaboral: int
+    IdRegistroPersonal: int
+    DescripcionTrabajador: str | None = None
+    DescripcionRetiroRRLL: str | None = None
+    EstadoValidacionRRLL: str
+    UsuarioValidacionRRLL: str | None = None
+    FechaValidacionRRLL: datetime | None = None
 
 
 router = APIRouter(prefix="/api/rrll", tags=["RRLL - Búsqueda"])
@@ -114,6 +131,19 @@ def _norm_tipo(tipo: str) -> str:
 
 def _norm_num(num: str) -> str:
     return "".join([c for c in (num or "").strip() if c.isdigit()])
+
+
+ZONA_HORARIA_COLOMBIA = timezone(timedelta(hours=-5))
+
+
+def _ahora_colombia() -> datetime:
+    """
+    Fecha y hora actuales de Colombia usando UTC-5 fijo.
+
+    Colombia no maneja cambio estacional de hora, por lo que UTC-5 evita la
+    dependencia del paquete tzdata en Windows y conserva la fecha local real.
+    """
+    return datetime.now(ZONA_HORARIA_COLOMBIA)
 
 
 TIPO_DOC_TO_ID = {
@@ -251,7 +281,7 @@ def buscar_trabajador_por_numero(
     return dict(row)
 
 
-@router.get("/trabajador/buscar", response_model=List[TrabajadorBusquedaOut])
+@router.get("/trabajador/buscar", response_model=list[TrabajadorBusquedaOut])
 def buscar_trabajador_por_texto(
     texto: str = Query(..., description="Número, nombres, apellidos o nombre completo"),
     limite: int = Query(10, ge=1, le=50, description="Cantidad máxima de resultados"),
@@ -333,6 +363,111 @@ def buscar_trabajador_por_documento(
     return dict(row)
 
 
+@router.get("/trabajador/buscar", response_model=list[TrabajadorBusquedaOut])
+def buscar_trabajadores_por_documento_o_nombre(
+    busqueda: str = Query(..., min_length=2, description="Número de documento o nombre del trabajador"),
+    tipo_documento: str | None = Query(None, description="CC | CE | TI | PPT. Opcional para búsqueda por nombre"),
+    limite: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    termino = " ".join((busqueda or "").strip().split())
+
+    if len(termino) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Debe escribir al menos 2 caracteres para buscar."
+        )
+
+    tipo_txt = _norm_tipo(tipo_documento) if tipo_documento else ""
+    id_tipo = None
+
+    if tipo_txt:
+        id_tipo = TIPO_DOC_TO_ID.get(tipo_txt)
+        if not id_tipo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tipo_documento inválido: {tipo_documento}. Usa CC, CE, TI o PPT."
+            )
+
+    solo_digitos = termino.isdigit()
+    parametros = {"limite": limite}
+    condiciones = []
+
+    if id_tipo is not None:
+        condiciones.append('rp."IdTipoIdentificacion" = :id_tipo')
+        parametros["id_tipo"] = id_tipo
+
+    if solo_digitos:
+        numero = _norm_num(termino)
+        condiciones.append(
+            'REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),\'.\',\'\'),\' \',\'\') LIKE :numero'
+        )
+        parametros["numero"] = f"%{numero}%"
+    else:
+        expresion_nombre = '''
+            UPPER(
+                TRANSLATE(
+                    CONCAT_WS(' ', COALESCE(rp."Nombres", ''), COALESCE(rp."Apellidos", '')),
+                    'ÁÉÍÓÚÜÑáéíóúüñ',
+                    'AEIOUUNAEIOUUN'
+                )
+            )
+        '''
+
+        termino_sin_acentos = unicodedata.normalize("NFKD", termino)
+        termino_sin_acentos = "".join(
+            caracter
+            for caracter in termino_sin_acentos
+            if not unicodedata.combining(caracter)
+        )
+
+        tokens = [
+            token
+            for token in termino_sin_acentos.upper().split()
+            if token.strip()
+        ]
+
+        for index, token in enumerate(tokens):
+            nombre_parametro = f"token_{index}"
+            condiciones.append(f"{expresion_nombre} LIKE :{nombre_parametro}")
+            parametros[nombre_parametro] = f"%{token}%"
+
+    where_sql = " AND ".join(condiciones)
+
+    q = text(f"""
+        SELECT
+          rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+          rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+          rp."NumeroIdentificacion"    AS "NumeroDocumento",
+          rp."Nombres"                 AS "Nombres",
+          rp."Apellidos"               AS "Apellidos",
+          TRIM(
+              CONCAT_WS(
+                  ' ',
+                  COALESCE(rp."Nombres", ''),
+                  COALESCE(rp."Apellidos", '')
+              )
+          ) AS "NombreCompleto"
+        FROM public."RegistroPersonal" rp
+        WHERE {where_sql}
+        ORDER BY
+          CASE
+            WHEN REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :coincidencia_exacta
+            THEN 0
+            ELSE 1
+          END,
+          rp."Nombres",
+          rp."Apellidos",
+          rp."IdRegistroPersonal" DESC
+        LIMIT :limite;
+    """)
+
+    parametros["coincidencia_exacta"] = _norm_num(termino) if solo_digitos else ""
+
+    rows = db.execute(q, parametros).mappings().all()
+    return [dict(row) for row in rows]
+
+
 @router.get("/trabajador/detalle", response_model=TrabajadorBusquedaDetalleOut)
 def buscar_trabajador_detalle_por_documento(
     tipo_documento: str = Query(..., description="CC | CE | TI | PPT"),
@@ -373,15 +508,24 @@ def buscar_trabajador_detalle_por_documento(
           mr."Nombre"                                 AS "MotivoRetiroNombre",
           rrll."FechaProceso"::text                   AS "FechaProceso",
           rrll."FechaCierre"::text                    AS "FechaCierre",
-          COALESCE(rrll."FechaEnvioOperaciones"::text, pys."FechaCreacion"::text) AS "FechaEnvioOperaciones",
+          TO_CHAR(
+              timezone(
+                  'America/Bogota',
+                  COALESCE(
+                      rrll."FechaEnvioOperaciones",
+                      pys."FechaCreacion"
+                  )
+              ),
+              'YYYY-MM-DD'
+          ) AS "FechaEnvioOperaciones",
           rrll."IdTipificacionRetiro"                 AS "IdTipificacionRetiro",
           rrll."ObservacionRetiro"                    AS "ObservacionRetiro",
           rrll."DevolucionCarnet"                     AS "DevolucionCarnet",
 
           COALESCE(
-            cb."FechaIngreso",
-            rp."FechaIngresoHistorica"
-          )::text                                      AS "FechaInicio"
+                cb."FechaIngreso",
+                rp."FechaIngresoHistorica"
+        )::text                                    AS "FechaInicio"
 
         FROM public."RegistroPersonal" rp
 
@@ -483,33 +627,46 @@ def validar_retiro_activo(
             "FechaProceso",
             "FechaRetiro",
             "Activo",
-            "FechaEnvioOperaciones"
+            "FechaEnvioOperaciones",
             "FechaEnvioNomina",
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-          AND "Activo" = true
+          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'CERRADO')
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)
+
     active = db.execute(q, {"id_registro_personal": id_registro_personal}).mappings().first()
 
     fecha_ultimo_dia = _obtener_fecha_ultimo_dia_laborado(db, id_registro_personal)
 
     if active:
         retiro = dict(active)
+        estado = str(retiro.get("EstadoCasoRRLL") or "").upper()
+
         retiro["FechaUltimoDiaLaborado"] = fecha_ultimo_dia
-        return {"tieneRetiroActivo": True, "retiro": retiro}
+        retiro["BloqueadoRRLL"] = estado in ("ENVIADO_NOMINA", "CERRADO")
+        retiro["Owner"] = "NOMINA" if estado == "ENVIADO_NOMINA" else "RRLL"
+
+        return {
+            "tieneRetiroActivo": True,
+            "retiro": retiro
+        }
 
     return {
         "tieneRetiroActivo": False,
         "retiro": {
             "IdRegistroPersonal": id_registro_personal,
-            "FechaUltimoDiaLaborado": fecha_ultimo_dia
+            "FechaUltimoDiaLaborado": fecha_ultimo_dia,
+            "BloqueadoRRLL": False,
+            "Owner": "RRLL"
         }
     }
 
-
+# =========================
+# POST: crear retiro
+# =========================
 @router.post("/retiro", response_model=RetiroLaboralCreateOut)
 def crear_retiro_laboral(
     payload: RetiroLaboralCreate,
@@ -607,6 +764,193 @@ def crear_retiro_laboral(
     return dict(row)
 
 
+# =========================
+# GET: consultar motivo oficial de retiro validado por RRLL
+# =========================
+@router.get(
+    "/retiro/{id_retiro_laboral}/motivo-rrll",
+    response_model=RetiroMotivoRRLLOut,
+)
+def consultar_motivo_retiro_rrll(
+    id_retiro_laboral: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    q = text("""
+        SELECT
+            rl."IdRetiroLaboral" AS "IdRetiroLaboral",
+            rl."IdRegistroPersonal" AS "IdRegistroPersonal",
+            respuesta_trabajador."DescripcionTrabajador" AS "DescripcionTrabajador",
+            rl."DescripcionRetiroRRLL" AS "DescripcionRetiroRRLL",
+            COALESCE(rl."EstadoValidacionRRLL", 'PENDIENTE') AS "EstadoValidacionRRLL",
+            rl."UsuarioValidacionRRLL" AS "UsuarioValidacionRRLL",
+            rl."FechaValidacionRRLL" AS "FechaValidacionRRLL"
+        FROM public."RetiroLaboral" rl
+        LEFT JOIN LATERAL (
+            SELECT
+                NULLIF(
+                    TRIM(
+                        COALESCE(
+                            to_jsonb(err)->>'Respuesta',
+                            to_jsonb(err)->>'ValorRespuesta',
+                            to_jsonb(err)->>'RespuestaTexto',
+                            to_jsonb(err)->>'DescripcionRespuesta',
+                            ''
+                        )
+                    ),
+                    ''
+                ) AS "DescripcionTrabajador"
+            FROM public."EntrevistaRetiro" er
+            INNER JOIN public."EntrevistaRetiroRespuesta" err
+                ON NULLIF(to_jsonb(err)->>'IdEntrevistaRetiro', '')::integer
+                   = er."IdEntrevistaRetiro"
+            WHERE er."IdRetiroLaboral" = rl."IdRetiroLaboral"
+              AND NULLIF(
+                    COALESCE(
+                        to_jsonb(err)->>'IdPreguntaEntrevistaRetiro',
+                        to_jsonb(err)->>'IdPregunta',
+                        ''
+                    ),
+                    ''
+                  )::integer = 18
+            LIMIT 1
+        ) respuesta_trabajador ON true
+        WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+        LIMIT 1;
+    """)
+
+    row = db.execute(
+        q,
+        {"id_retiro_laboral": id_retiro_laboral},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="No existe el retiro laboral solicitado.",
+        )
+
+    return dict(row)
+
+
+# =========================
+# PUT: guardar motivo oficial de retiro validado por RRLL
+# =========================
+@router.put(
+    "/retiro/{id_retiro_laboral}/motivo-rrll",
+    response_model=RetiroMotivoRRLLOut,
+)
+def actualizar_motivo_retiro_rrll(
+    payload: RetiroMotivoRRLLUpdate,
+    id_retiro_laboral: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+):
+    descripcion = " ".join(payload.DescripcionRetiroRRLL.strip().split())
+    usuario = payload.UsuarioValidacionRRLL.strip()
+
+    if len(descripcion) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="La descripción oficial de RRLL debe tener al menos 3 caracteres.",
+        )
+
+    if not usuario:
+        raise HTTPException(
+            status_code=400,
+            detail="UsuarioValidacionRRLL es obligatorio.",
+        )
+
+    q_update = text("""
+        UPDATE public."RetiroLaboral"
+        SET
+            "DescripcionRetiroRRLL" = :descripcion_retiro_rrll,
+            "EstadoValidacionRRLL" = 'VALIDADO',
+            "UsuarioValidacionRRLL" = :usuario_validacion_rrll,
+            "FechaValidacionRRLL" = CURRENT_TIMESTAMP,
+            "FechaActualizacion" = CURRENT_TIMESTAMP,
+            "UsuarioActualizacion" = :usuario_validacion_rrll
+        WHERE "IdRetiroLaboral" = :id_retiro_laboral
+        RETURNING
+            "IdRetiroLaboral",
+            "IdRegistroPersonal",
+            "DescripcionRetiroRRLL",
+            COALESCE("EstadoValidacionRRLL", 'PENDIENTE') AS "EstadoValidacionRRLL",
+            "UsuarioValidacionRRLL",
+            "FechaValidacionRRLL";
+    """)
+
+    try:
+        updated = db.execute(
+            q_update,
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "descripcion_retiro_rrll": descripcion,
+                "usuario_validacion_rrll": usuario,
+            },
+        ).mappings().first()
+
+        if not updated:
+            db.rollback()
+            raise HTTPException(
+                status_code=404,
+                detail="No existe el retiro laboral solicitado.",
+            )
+
+        q_respuesta = text("""
+            SELECT
+                NULLIF(
+                    TRIM(
+                        COALESCE(
+                            to_jsonb(err)->>'Respuesta',
+                            to_jsonb(err)->>'ValorRespuesta',
+                            to_jsonb(err)->>'RespuestaTexto',
+                            to_jsonb(err)->>'DescripcionRespuesta',
+                            ''
+                        )
+                    ),
+                    ''
+                ) AS "DescripcionTrabajador"
+            FROM public."EntrevistaRetiro" er
+            INNER JOIN public."EntrevistaRetiroRespuesta" err
+                ON NULLIF(to_jsonb(err)->>'IdEntrevistaRetiro', '')::integer
+                   = er."IdEntrevistaRetiro"
+            WHERE er."IdRetiroLaboral" = :id_retiro_laboral
+              AND NULLIF(
+                    COALESCE(
+                        to_jsonb(err)->>'IdPreguntaEntrevistaRetiro',
+                        to_jsonb(err)->>'IdPregunta',
+                        ''
+                    ),
+                    ''
+                  )::integer = 18
+            LIMIT 1;
+        """)
+
+        respuesta = db.execute(
+            q_respuesta,
+            {"id_retiro_laboral": id_retiro_laboral},
+        ).mappings().first()
+
+        db.commit()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error guardando el motivo oficial de RRLL: {str(e)}",
+        )
+
+    result = dict(updated)
+    result["DescripcionTrabajador"] = (
+        respuesta.get("DescripcionTrabajador") if respuesta else None
+    )
+    return result
+
+
+# =========================
+# PUT: actualizar retiro (y sincroniza estado global)
+# =========================
 @router.put("/retiro/{id_retiro_laboral}", response_model=RetiroLaboralUpdateOut)
 def actualizar_retiro_laboral(
     id_retiro_laboral: int = Path(..., description="IdRetiroLaboral a actualizar"),
@@ -631,27 +975,33 @@ def actualizar_retiro_laboral(
         WHERE "IdRetiroLaboral" = :id_retiro_laboral
         LIMIT 1;
     """)
+
     current = db.execute(q_get, {"id_retiro_laboral": id_retiro_laboral}).mappings().first()
+
     if not current:
         raise HTTPException(status_code=404, detail="No existe el retiro a actualizar.")
 
     nuevo_estado_caso = None
+
     if payload and payload.EstadoCasoRRLL is not None:
         nuevo_estado_caso = _validar_estado_caso(payload.EstadoCasoRRLL)
 
     activo_forzado = payload.Activo if payload else None
     fecha_cierre_forzada = payload.FechaCierre if payload else None
+    fecha_envio_operaciones_forzada = (
+        payload.FechaEnvioOperaciones if payload else None
+    )
     fecha_envio_nomina_forzada = payload.FechaEnvioNomina if payload else None
 
     if nuevo_estado_caso == "CERRADO":
         activo_forzado = False
         if fecha_cierre_forzada is None:
-            fecha_cierre_forzada = datetime.utcnow()
+            fecha_cierre_forzada = _ahora_colombia()
 
     elif nuevo_estado_caso == "ENVIADO_NOMINA":
         activo_forzado = False
-        if fecha_envio_nomina_forzada is None:
-            fecha_envio_nomina_forzada = datetime.utcnow()
+        if fecha_cierre_forzada is None:
+            fecha_cierre_forzada = _ahora_colombia()
 
     elif nuevo_estado_caso == "ABIERTO":
         activo_forzado = True
@@ -666,10 +1016,12 @@ def actualizar_retiro_laboral(
             ORDER BY "IdRetiroLaboral" DESC
             LIMIT 1;
         """)
+
         other = db.execute(q_other, {
             "id_registro_personal": current["IdRegistroPersonal"],
             "id_retiro_laboral": id_retiro_laboral
         }).mappings().first()
+
         if other:
             raise HTTPException(
                 status_code=409,
@@ -681,13 +1033,25 @@ def actualizar_retiro_laboral(
             return
 
         if nuevo_estado_caso == "ABIERTO":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ABIERTO)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ABIERTO
+            )
 
         elif nuevo_estado_caso == "ENVIADO_NOMINA":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ENVIADO_NOMINA
+            )
 
         elif nuevo_estado_caso == "CERRADO":
-            _actualizar_estado_global_trabajador(db, current["IdRegistroPersonal"], ESTADO_GLOBAL_ENVIADO_NOMINA)
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_ENVIADO_NOMINA
+            )
 
     q_update = text("""
         UPDATE public."RetiroLaboral"
@@ -726,7 +1090,7 @@ def actualizar_retiro_laboral(
             "fecha_proceso": payload.FechaProceso if payload else None,
             "fecha_retiro": payload.FechaRetiro if payload else None,
             "fecha_cierre": fecha_cierre_forzada,
-            "fecha_envio_operaciones": payload.FechaEnvioOperaciones if payload else None,
+            "fecha_envio_operaciones": fecha_envio_operaciones_forzada,
             "fecha_envio_nomina": fecha_envio_nomina_forzada,
             "observacion_general": payload.ObservacionGeneral if payload else None,
             "activo": activo_forzado,
@@ -739,6 +1103,98 @@ def actualizar_retiro_laboral(
                 id_registro_personal=row["IdRegistroPersonal"],
                 id_retiro_laboral=row["IdRetiroLaboral"]
             )
+
+            if row["FechaRetiro"]:
+                paz_existente = db.execute(
+                    text("""
+                        SELECT "IdPazYSalvo"
+                        FROM public."PazYSalvoOperaciones"
+                        WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                           OR "IdRegistroPersonal" = :id_registro_personal
+                        ORDER BY "IdPazYSalvo" DESC
+                        LIMIT 1;
+                    """),
+                    {
+                        "id_retiro_laboral": row["IdRetiroLaboral"],
+                        "id_registro_personal": row["IdRegistroPersonal"],
+                    }
+                ).mappings().first()
+
+                if paz_existente:
+                    db.execute(
+                        text("""
+                            UPDATE public."PazYSalvoOperaciones"
+                            SET
+                                "IdRegistroPersonal" = :id_registro_personal,
+                                "IdRetiroLaboral" = :id_retiro_laboral,
+                                "FechaUltimoDiaLaborado" = :fecha_retiro,
+                                "FechaCarga" = CURRENT_TIMESTAMP,
+                                "UsuarioCreacion" = :usuario
+                            WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                        """),
+                        {
+                            "id_registro_personal": row["IdRegistroPersonal"],
+                            "id_retiro_laboral": row["IdRetiroLaboral"],
+                            "fecha_retiro": row["FechaRetiro"],
+                            "usuario": payload.UsuarioActualizacion or "RRLL",
+                            "id_paz_y_salvo": paz_existente["IdPazYSalvo"],
+                        }
+                    )
+                else:
+                    db.execute(
+                        text("""
+                            INSERT INTO public."PazYSalvoOperaciones"
+                            (
+                                "IdRegistroPersonal",
+                                "FechaUltimoDiaLaborado",
+                                "Observacion",
+                                "UsuarioCreacion",
+                                "FechaCreacion",
+                                "IdRetiroLaboral",
+                                "FechaCarga"
+                            )
+                            VALUES
+                            (
+                                :id_registro_personal,
+                                :fecha_retiro,
+                                :observacion,
+                                :usuario,
+                                CURRENT_TIMESTAMP,
+                                :id_retiro_laboral,
+                                CURRENT_TIMESTAMP
+                            );
+                        """),
+                        {
+                            "id_registro_personal": row["IdRegistroPersonal"],
+                            "fecha_retiro": row["FechaRetiro"],
+                            "observacion": payload.ObservacionGeneral,
+                            "usuario": payload.UsuarioActualizacion or "RRLL",
+                            "id_retiro_laboral": row["IdRetiroLaboral"],
+                        }
+                    )
+
+                # La fecha de envío de Operaciones corresponde al momento en
+                # que el paz y salvo queda cargado, ya sea manualmente o desde
+                # el futuro módulo de Operaciones.
+                #
+                # Se conserva la primera fecha registrada para que posteriores
+                # actualizaciones de RRLL no cambien la fecha original de envío.
+                db.execute(
+                    text("""
+                        UPDATE public."RetiroLaboral"
+                        SET
+                            "FechaEnvioOperaciones" = COALESCE(
+                                "FechaEnvioOperaciones",
+                                :fecha_envio_operaciones
+                            ),
+                            "FechaActualizacion" = CURRENT_TIMESTAMP
+                        WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+                    """),
+                    {
+                        "id_retiro_laboral": row["IdRetiroLaboral"],
+                        "fecha_envio_operaciones": _ahora_colombia(),
+                    },
+                )
 
         _aplicar_estado_global_si_corresponde()
         db.commit()

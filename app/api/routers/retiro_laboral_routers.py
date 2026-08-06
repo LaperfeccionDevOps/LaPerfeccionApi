@@ -1,6 +1,8 @@
-# ruff: noqa: B008, BLE001, RUF010
+# ruff: noqa: B008, BLE001, RUF010, UP045
 
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -28,7 +30,7 @@ router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
 def listar_motivos_retiro(db: Session = Depends(get_db)):
     try:
         query = text("""
-            SELECT 
+            SELECT
                 "IdMotivoRetiro",
                 "Nombre",
                 "Descripcion",
@@ -59,7 +61,7 @@ def listar_motivos_retiro(db: Session = Depends(get_db)):
 def listar_documentos_por_motivo(id_motivo_retiro: int, db: Session = Depends(get_db)):
     try:
         query = text("""
-            SELECT 
+            SELECT
                 mrd."IdMotivoRetiroDocumento",
                 mrd."IdMotivoRetiro",
                 tdr."IdTipoDocumentoRetiro",
@@ -152,117 +154,573 @@ def crear_retiro_laboral(payload: RetiroLaboralCreate, db: Session = Depends(get
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error al crear retiro laboral: {str(e)}")
-    
+
+
+
 
 
 @router.get("/dashboard-indicadores")
 def dashboard_indicadores_rrll(
-    anio: int | None = Query(None),
-    mes: int | None = Query(None),
+    anio: Optional[int] = Query(None, ge=2000, le=2100),
+    mes: Optional[int] = Query(None, ge=1, le=12),
+    id_cliente: Optional[int] = Query(None, ge=1),
+    tipo_periodo: str = Query("gestion"),
+    anio_grafica: Optional[int] = Query(None, ge=2026, le=2100),
     db: Session = Depends(get_db)
 ):
+    """
+    Indicadores RRLL de retiros.
+
+    tipo_periodo:
+    - gestion: mide la actividad de RRLL. Para abiertos usa FechaProceso/FechaCreacion
+      y para ENVIADO_NOMINA/CERRADO usa FechaCierre.
+    - retiro: mide por FechaRetiro, que corresponde al último día laborado.
+
+    Reglas:
+    - No se excluyen registros por Activo=false.
+    - ABIERTO, ENVIADO_NOMINA y CERRADO se muestran separados.
+    - FechaCierre representa el momento en que RRLL termina su gestión y entrega
+      el proceso a Nómina.
+    - Los porcentajes se calculan sobre el total real del filtro.
+    """
     try:
-        where_filtros = 'WHERE COALESCE(rl."Activo", true) = true'
-        params = {}
+        tipo_periodo = (tipo_periodo or "gestion").strip().lower()
 
-        if anio:
-            where_filtros += ' AND EXTRACT(YEAR FROM rl."FechaRetiro") = :anio'
-            params["anio"] = anio
+        if tipo_periodo not in ("gestion", "retiro"):
+            raise HTTPException(
+                status_code=400,
+                detail="tipo_periodo debe ser 'gestion' o 'retiro'."
+            )
 
-        if mes:
-            where_filtros += ' AND EXTRACT(MONTH FROM rl."FechaRetiro") = :mes'
-            params["mes"] = mes
+        anio_actual = int(
+            db.execute(
+                text("SELECT EXTRACT(YEAR FROM CURRENT_DATE)::int;")
+            ).scalar()
+        )
+        anio_consulta = anio or anio_actual
 
-        query_totales = text(f"""
+        if tipo_periodo == "retiro":
+            fecha_referencia = 'rl."FechaRetiro"'
+        else:
+            fecha_referencia = """
+                CASE
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN
+                         ('ENVIADO_NOMINA', 'CERRADO')
+                        THEN COALESCE(
+                            rl."FechaCierre",
+                            rl."FechaActualizacion",
+                            rl."FechaCreacion"
+                        )
+                    ELSE COALESCE(
+                        rl."FechaProceso",
+                        rl."FechaCreacion",
+                        rl."FechaActualizacion"
+                    )
+                END
+            """
+
+        anio_grafica_consulta = anio_grafica or anio_actual
+
+        params = {
+            "anio": anio_consulta,
+            "anio_grafica": anio_grafica_consulta,
+            "mes": mes,
+            "id_cliente": id_cliente,
+        }
+
+        filtro_periodo = f"""
+            EXTRACT(YEAR FROM ({fecha_referencia})) = :anio
+            AND (
+                :mes IS NULL
+                OR EXTRACT(MONTH FROM ({fecha_referencia})) = :mes
+            )
+            AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+        """
+
+        cte_base = f"""
+            WITH base AS (
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    rl."IdCliente",
+                    COALESCE(
+                        NULLIF(TRIM(c."Nombre"), ''),
+                        'SIN SEDE REGISTRADA'
+                    ) AS sede,
+                    COALESCE(
+                        NULLIF(TRIM(mr."Nombre"), ''),
+                        'SIN MOTIVO'
+                    ) AS motivo,
+                    COALESCE(
+                        NULLIF(TRIM(tr."Nombre"), ''),
+                        'SIN TIPIFICACIÓN'
+                    ) AS tipificacion,
+                    UPPER(
+                        TRIM(
+                            COALESCE(rl."EstadoCasoRRLL", 'SIN ESTADO')
+                        )
+                    ) AS estado,
+                    COALESCE(rl."Activo", true) AS activo,
+                    rl."FechaProceso",
+                    rl."FechaRetiro",
+                    rl."FechaCierre",
+                    rl."FechaCreacion",
+                    rl."FechaActualizacion",
+                    ({fecha_referencia}) AS fecha_referencia,
+                    rp."Nombres",
+                    rp."Apellidos",
+                    rp."NumeroIdentificacion",
+                    CASE
+                        /*
+                         * Regla actual del negocio:
+                         * - IdTipificacionRetiro = 1 corresponde a ABANDONO.
+                         * - IdMotivoRetiro = 2 corresponde al motivo catalogado como
+                         *   TERMINACIÓN DE CONTRATO CON JUSTA CAUSA/ABANDONO DE CARGO.
+                         *
+                         * Estos procesos no requieren entrevista de retiro y se muestran
+                         * en la tarjeta "No aplica por abandono de cargo".
+                         */
+                        WHEN rl."IdTipificacionRetiro" = 1
+                             OR rl."IdMotivoRetiro" = 2
+                            THEN true
+                        ELSE false
+                    END AS es_abandono,
+
+                    CASE
+                        WHEN rl."IdTipificacionRetiro" = 1
+                             OR rl."IdMotivoRetiro" = 2
+                            THEN false
+                        ELSE EXISTS (
+                            SELECT 1
+                            FROM public."EntrevistaRetiro" er
+                            WHERE er."IdRetiroLaboral"
+                                  = rl."IdRetiroLaboral"
+                        )
+                    END AS entrevista_realizada
+                FROM public."RetiroLaboral" rl
+                LEFT JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                LEFT JOIN public."Cliente" c
+                    ON c."IdCliente" = rl."IdCliente"
+                LEFT JOIN public."MotivoRetiro" mr
+                    ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+                LEFT JOIN public."TipificacionRetiro" tr
+                    ON tr."IdTipificacionRetiro" = rl."IdTipificacionRetiro"
+                WHERE {filtro_periodo}
+            )
+        """
+
+        def primera_fila(sql):
+            fila = db.execute(text(sql), params).mappings().first()
+            return dict(fila) if fila else {}
+
+        def lista_filas(sql):
+            return [
+                dict(fila)
+                for fila in db.execute(text(sql), params).mappings().all()
+            ]
+
+        query_totales = cte_base + """
             SELECT
-                COUNT(*) AS total_retiros,
-                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'ABIERTO') AS retiros_abiertos,
-                COUNT(*) FILTER (WHERE UPPER(COALESCE(rl."EstadoCasoRRLL", '')) = 'CERRADO') AS retiros_cerrados,
+                COUNT(*)::int AS total_retiros,
+
                 COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(rl."RetiroLegalizado", 'NO')) NOT IN ('SI', 'SÍ', 'TRUE', '1')
-                ) AS pendientes_documentacion
-            FROM public."RetiroLaboral" rl
-            {where_filtros};
-        """)
+                    WHERE estado = 'ABIERTO'
+                )::int AS en_gestion_rrll,
 
-        query_estados = text(f"""
-            SELECT COALESCE(rl."EstadoCasoRRLL", 'SIN ESTADO') AS estado, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            {where_filtros}
-            GROUP BY rl."EstadoCasoRRLL"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS enviados_nomina,
 
-        query_motivos = text(f"""
-            SELECT COALESCE(mr."Nombre", 'SIN MOTIVO') AS motivo, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            {where_filtros}
-            GROUP BY mr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado = 'CERRADO'
+                )::int AS cerrados,
 
-        query_tipificaciones = text(f"""
-            SELECT COALESCE(tr."Nombre", 'SIN TIPIFICACIÓN') AS tipificacion, COUNT(*) AS cantidad
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
-            {where_filtros}
-            GROUP BY tr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE estado = 'ABIERTO' AND activo = false
+                )::int AS abiertos_inactivos,
 
-        query_documentos = text(f"""
-            SELECT 
-                tdr."Nombre" AS documento,
-                COUNT(rla."IdRetiroLaboralAdjunto") AS cantidad
-            FROM public."RetiroLaboral" rl
-            CROSS JOIN public."TipoDocumentoRetiro" tdr
-            LEFT JOIN public."RetiroLaboralAdjunto" rla
-                ON rla."IdRetiroLaboral" = rl."IdRetiroLaboral"
-                AND rla."IdTipoDocumentoRetiro" = tdr."IdTipoDocumentoRetiro"
-                AND COALESCE(rla."Eliminado", false) = false
-                AND COALESCE(rla."Activo", true) = true
-            {where_filtros}
-            AND tdr."IdTipoDocumentoRetiro" IN (2, 4, 10)
-            GROUP BY tdr."Nombre"
-            ORDER BY cantidad DESC;
-        """)
+                COUNT(*) FILTER (
+                    WHERE es_abandono
+                )::int AS entrevistas_no_aplican_abandono,
 
-        query_recientes = text(f"""
+                COUNT(*) FILTER (
+                    WHERE NOT es_abandono
+                )::int AS procesos_requieren_entrevista,
+
+                COUNT(*) FILTER (
+                    WHERE NOT es_abandono
+                      AND entrevista_realizada
+                )::int AS entrevistas_realizadas,
+
+                COUNT(*) FILTER (
+                    WHERE NOT es_abandono
+                      AND NOT entrevista_realizada
+                )::int AS entrevistas_pendientes,
+
+                ROUND(
+                    COUNT(*) FILTER (
+                        WHERE NOT es_abandono
+                          AND entrevista_realizada
+                    ) * 100.0
+                    /
+                    NULLIF(
+                        COUNT(*) FILTER (
+                            WHERE NOT es_abandono
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_entrevistas
+
+            FROM base;
+        """
+
+        query_estados = cte_base + """
             SELECT
-                rl."IdRetiroLaboral",
-                rp."Nombres",
-                rp."Apellidos",
-                rp."NumeroIdentificacion",
-                mr."Nombre" AS motivo_retiro,
-                tr."Nombre" AS tipificacion_retiro,
-                rl."EstadoCasoRRLL",
-                rl."FechaRetiro"
-            FROM public."RetiroLaboral" rl
-            LEFT JOIN public."RegistroPersonal" rp ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-            LEFT JOIN public."MotivoRetiro" mr ON rl."IdMotivoRetiro" = mr."IdMotivoRetiro"
-            LEFT JOIN public."TipificacionRetiro" tr ON rl."IdTipificacionRetiro" = tr."IdTipificacionRetiro"
-            {where_filtros}
-            ORDER BY rl."FechaRetiro" DESC NULLS LAST
+                estado,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY estado
+            ORDER BY cantidad DESC, estado;
+        """
+
+        query_sedes = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY "IdCliente", sede
+            ORDER BY cantidad DESC, sede;
+        """
+
+        query_motivos = cte_base + """
+            SELECT
+                motivo,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY motivo
+            ORDER BY cantidad DESC, motivo;
+        """
+
+        query_tipificaciones = cte_base + """
+            SELECT
+                tipificacion,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM base
+            GROUP BY tipificacion
+            ORDER BY cantidad DESC, tipificacion;
+        """
+
+        query_motivos_sede = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                motivo,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(
+                        SUM(COUNT(*)) OVER (
+                            PARTITION BY "IdCliente", sede
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_dentro_sede,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje_total
+            FROM base
+            GROUP BY "IdCliente", sede, motivo
+            ORDER BY cantidad DESC, sede, motivo;
+        """
+
+        query_tipificaciones_sede = cte_base + """
+            SELECT
+                "IdCliente" AS id_cliente,
+                sede,
+                tipificacion,
+                COUNT(*)::int AS cantidad,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(
+                        SUM(COUNT(*)) OVER (
+                            PARTITION BY "IdCliente", sede
+                        ),
+                        0
+                    ),
+                    2
+                ) AS porcentaje_dentro_sede,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    NULLIF(SUM(COUNT(*)) OVER (), 0),
+                    2
+                ) AS porcentaje_total
+            FROM base
+            GROUP BY "IdCliente", sede, tipificacion
+            ORDER BY cantidad DESC, sede, tipificacion;
+        """
+
+        query_entrevistas = cte_base + """
+            SELECT
+                estado,
+                cantidad,
+                ROUND(
+                    cantidad * 100.0 /
+                    NULLIF(SUM(cantidad) OVER (), 0),
+                    2
+                ) AS porcentaje
+            FROM (
+                SELECT
+                    CASE
+                        WHEN entrevista_realizada
+                            THEN 'REALIZADA'
+                        ELSE 'PENDIENTE'
+                    END AS estado,
+                    COUNT(*)::int AS cantidad
+                FROM base
+                WHERE NOT es_abandono
+                GROUP BY
+                    CASE
+                        WHEN entrevista_realizada
+                            THEN 'REALIZADA'
+                        ELSE 'PENDIENTE'
+                    END
+            ) resumen
+            ORDER BY cantidad DESC, estado;
+        """
+
+        query_tiempo_rrll = cte_base + """
+            SELECT
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM ("FechaCierre" - "FechaRetiro")
+                        ) / 86400.0
+                    ) FILTER (
+                        WHERE "FechaRetiro" IS NOT NULL
+                          AND "FechaCierre" IS NOT NULL
+                          AND "FechaCierre" >= "FechaRetiro"
+                          AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                    )::numeric,
+                    2
+                ) AS promedio_dias_gestion_rrll,
+
+                COUNT(*) FILTER (
+                    WHERE "FechaRetiro" IS NOT NULL
+                      AND "FechaCierre" IS NOT NULL
+                      AND "FechaCierre" >= "FechaRetiro"
+                      AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS registros_validos,
+
+                COUNT(*) FILTER (
+                    WHERE "FechaRetiro" IS NOT NULL
+                      AND "FechaCierre" IS NOT NULL
+                      AND "FechaCierre" < "FechaRetiro"
+                      AND estado IN ('ENVIADO_NOMINA', 'CERRADO')
+                )::int AS registros_excluidos_fecha_futura
+
+            FROM base;
+        """
+
+        # Evolución mensual: usa un año propio para la gráfica.
+        # Azul: procesos iniciados por RRLL.
+        # Verde: procesos enviados a Nómina por RRLL.
+        query_gestion_mensual = """
+            WITH meses AS (
+                SELECT generate_series(1, 12)::int AS numero_mes
+            ),
+            iniciados AS (
+                SELECT
+                    EXTRACT(
+                        MONTH FROM COALESCE(
+                            rl."FechaProceso",
+                            rl."FechaCreacion"
+                        )
+                    )::int AS numero_mes,
+                    COUNT(*)::int AS cantidad
+                FROM public."RetiroLaboral" rl
+                WHERE EXTRACT(
+                    YEAR FROM COALESCE(
+                        rl."FechaProceso",
+                        rl."FechaCreacion"
+                    )
+                ) = :anio_grafica
+                  AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+                GROUP BY 1
+            ),
+            enviados AS (
+                SELECT
+                    EXTRACT(MONTH FROM rl."FechaCierre")::int AS numero_mes,
+                    COUNT(*)::int AS cantidad
+                FROM public."RetiroLaboral" rl
+                WHERE UPPER(
+                    TRIM(COALESCE(rl."EstadoCasoRRLL", ''))
+                ) IN ('ENVIADO_NOMINA', 'CERRADO')
+                  AND rl."FechaCierre" IS NOT NULL
+                  AND EXTRACT(YEAR FROM rl."FechaCierre") = :anio_grafica
+                  AND (:id_cliente IS NULL OR rl."IdCliente" = :id_cliente)
+                GROUP BY 1
+            )
+            SELECT
+                m.numero_mes,
+                CASE m.numero_mes
+                    WHEN 1 THEN 'ENERO'
+                    WHEN 2 THEN 'FEBRERO'
+                    WHEN 3 THEN 'MARZO'
+                    WHEN 4 THEN 'ABRIL'
+                    WHEN 5 THEN 'MAYO'
+                    WHEN 6 THEN 'JUNIO'
+                    WHEN 7 THEN 'JULIO'
+                    WHEN 8 THEN 'AGOSTO'
+                    WHEN 9 THEN 'SEPTIEMBRE'
+                    WHEN 10 THEN 'OCTUBRE'
+                    WHEN 11 THEN 'NOVIEMBRE'
+                    WHEN 12 THEN 'DICIEMBRE'
+                END AS mes,
+                COALESCE(i.cantidad, 0)::int AS procesos_iniciados,
+                COALESCE(e.cantidad, 0)::int AS enviados_nomina
+            FROM meses m
+            LEFT JOIN iniciados i ON i.numero_mes = m.numero_mes
+            LEFT JOIN enviados e ON e.numero_mes = m.numero_mes
+            ORDER BY m.numero_mes;
+        """
+
+        query_recientes = cte_base + """
+            SELECT
+                "IdRetiroLaboral",
+                "Nombres",
+                "Apellidos",
+                "NumeroIdentificacion",
+                sede AS sede_cliente,
+                motivo AS motivo_retiro,
+                tipificacion AS tipificacion_retiro,
+                estado AS "EstadoCasoRRLL",
+                "FechaProceso",
+                "FechaCierre",
+                fecha_referencia
+            FROM base
+            ORDER BY fecha_referencia DESC NULLS LAST,
+                     "IdRetiroLaboral" DESC
             LIMIT 10;
-        """)
+        """
+
+        query_anios = """
+            SELECT DISTINCT anio
+            FROM (
+                SELECT EXTRACT(
+                    YEAR FROM COALESCE(
+                        "FechaProceso",
+                        "FechaCreacion",
+                        "FechaRetiro"
+                    )
+                )::int AS anio
+                FROM public."RetiroLaboral"
+
+                UNION
+
+                SELECT EXTRACT(YEAR FROM "FechaCierre")::int AS anio
+                FROM public."RetiroLaboral"
+                WHERE "FechaCierre" IS NOT NULL
+
+                UNION
+
+                SELECT EXTRACT(YEAR FROM "FechaRetiro")::int AS anio
+                FROM public."RetiroLaboral"
+                WHERE "FechaRetiro" IS NOT NULL
+            ) anios
+            WHERE anio IS NOT NULL
+            ORDER BY anio DESC;
+        """
+
+        query_clientes = """
+            SELECT
+                c."IdCliente" AS id_cliente,
+                c."Nombre" AS cliente
+            FROM public."Cliente" c
+            WHERE NULLIF(TRIM(COALESCE(c."Nombre", '')), '') IS NOT NULL
+            ORDER BY c."Nombre";
+        """
+
+        totales = primera_fila(query_totales)
 
         return {
             "success": True,
             "message": "Indicadores RRLL consultados correctamente.",
             "data": {
-                "filtros": {"anio": anio, "mes": mes},
-                "totales": dict(db.execute(query_totales, params).mappings().first()),
-                "estados": [dict(r) for r in db.execute(query_estados, params).mappings().all()],
-                "motivos": [dict(r) for r in db.execute(query_motivos, params).mappings().all()],
-                "tipificaciones": [dict(r) for r in db.execute(query_tipificaciones, params).mappings().all()],
-                "documentos": [dict(r) for r in db.execute(query_documentos, params).mappings().all()],
-                "retiros_recientes": [dict(r) for r in db.execute(query_recientes, params).mappings().all()],
-            }
+                "filtros": {
+                    "anio": anio_consulta,
+                    "mes": mes,
+                    "id_cliente": id_cliente,
+                    "tipo_periodo": tipo_periodo,
+                    "anio_grafica": anio_grafica_consulta,
+                    "anios_disponibles": [
+                        fila["anio"]
+                        for fila in db.execute(
+                            text(query_anios)
+                        ).mappings().all()
+                    ],
+                    "clientes": [
+                        dict(fila)
+                        for fila in db.execute(
+                            text(query_clientes)
+                        ).mappings().all()
+                    ],
+                },
+                "totales": totales,
+                "estados": lista_filas(query_estados),
+                "sedes": lista_filas(query_sedes),
+                "motivos": lista_filas(query_motivos),
+                "tipificaciones": lista_filas(query_tipificaciones),
+                "motivos_por_sede": lista_filas(query_motivos_sede),
+                "tipificaciones_por_sede": lista_filas(
+                    query_tipificaciones_sede
+                ),
+                "entrevistas": lista_filas(query_entrevistas),
+                "tiempo_gestion_rrll": primera_fila(query_tiempo_rrll),
+                "gestion_mensual": [
+                    dict(fila)
+                    for fila in db.execute(
+                        text(query_gestion_mensual),
+                        params
+                    ).mappings().all()
+                ],
+                "retiros_recientes": lista_filas(query_recientes),
+            },
         }
 
+    except HTTPException:
+        raise
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error consultando dashboard RRLL: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error consultando indicadores RRLL: {str(e)}"
+        )
 
 @router.get("/{id_retiro_laboral}")
 def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_db)):
@@ -322,16 +780,17 @@ def actualizar_estado_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
-        query_retiro = text("""
-            SELECT
-                "IdRetiroLaboral",
-                "IdRegistroPersonal"
-            FROM public."RetiroLaboral"
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
-        """)
-
         retiro_row = db.execute(
-            query_retiro,
+            text("""
+                SELECT
+                    "IdRetiroLaboral",
+                    "IdRegistroPersonal",
+                    "IdMotivoRetiro",
+                    "FechaRetiro",
+                    "IdTipificacionRetiro"
+                FROM public."RetiroLaboral"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+            """),
             {"id_retiro_laboral": id_retiro_laboral}
         ).mappings().first()
 
@@ -340,44 +799,162 @@ def actualizar_estado_retiro_laboral(
             raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
         id_registro_personal = retiro_row["IdRegistroPersonal"]
+        id_motivo_retiro = retiro_row["IdMotivoRetiro"]
 
-        query_update_retiro = text("""
-            UPDATE public."RetiroLaboral"
-            SET
-                "EstadoCasoRRLL" = :EstadoCasoRRLL,
-                "FechaCierre" = :FechaCierre,
-                "FechaEnvioNomina" = :FechaEnvioNomina,
-                "FechaActualizacion" = CURRENT_TIMESTAMP,
-                "UsuarioActualizacion" = :UsuarioActualizacion
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral
-            RETURNING "IdRetiroLaboral";
-        """)
+        estado_destino = (
+            payload.EstadoCasoRRLL or ""
+        ).strip().upper()
 
-        result_retiro = db.execute(query_update_retiro, {
-            "EstadoCasoRRLL": payload.EstadoCasoRRLL,
-            "FechaCierre": payload.FechaCierre,
-            "FechaEnvioNomina": payload.FechaEnvioNomina,
-            "UsuarioActualizacion": payload.UsuarioActualizacion,
-            "id_retiro_laboral": id_retiro_laboral
-        })
+        # Motivos que por regla de negocio no requieren tipificación:
+        # 2  = Terminación con justa causa / abandono de cargo
+        # 10 = Nunca ingresó
+        motivos_sin_tipificacion = {
+            2,
+            10,
+        }
 
-        retiro_actualizado = result_retiro.scalar()
+        # La tipificación puede permanecer vacía mientras el caso está ABIERTO.
+        # Para enviar a Nómina o cerrar solo se exceptúan los motivos 2 y 10.
+        if (
+            estado_destino in ("ENVIADO_NOMINA", "CERRADO")
+            and id_motivo_retiro not in motivos_sin_tipificacion
+            and not retiro_row["IdTipificacionRetiro"]
+        ):
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Debe seleccionar la tipificación del retiro "
+                    "antes de enviar el proceso a Nómina o cerrarlo."
+                ),
+            )
+
+        fecha_cierre = payload.FechaCierre
+        fecha_envio_nomina = payload.FechaEnvioNomina
+
+        if estado_destino == "ENVIADO_NOMINA":
+            fecha_cierre = payload.FechaCierre or datetime.now(timezone.utc)
+            fecha_envio_nomina = None
+
+        result_retiro = db.execute(
+            text("""
+               UPDATE public."RetiroLaboral"
+                    SET
+                        "EstadoCasoRRLL" = :EstadoCasoRRLL,
+                        "FechaCierre" = :FechaCierre,
+                        "FechaEnvioNomina" = :FechaEnvioNomina,
+                        "Activo" = CASE
+                            WHEN :EstadoCasoRRLL = 'ABIERTO' THEN true
+                            WHEN :EstadoCasoRRLL IN ('ENVIADO_NOMINA', 'CERRADO') THEN false
+                            ELSE "Activo"
+                        END,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :UsuarioActualizacion
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                RETURNING
+                    "IdRetiroLaboral",
+                    "IdRegistroPersonal",
+                    "FechaRetiro";
+            """),
+            {
+                "EstadoCasoRRLL": payload.EstadoCasoRRLL,
+                "FechaCierre": fecha_cierre,
+                "FechaEnvioNomina": fecha_envio_nomina,
+                "UsuarioActualizacion": payload.UsuarioActualizacion,
+                "id_retiro_laboral": id_retiro_laboral
+            }
+        )
+
+        retiro_actualizado = result_retiro.mappings().first()
 
         if not retiro_actualizado:
             db.rollback()
             raise HTTPException(status_code=404, detail="No se pudo actualizar el retiro laboral.")
 
-        query_update_registro = text("""
-            UPDATE public."RegistroPersonal"
-            SET
-                "IdEstadoProceso" = :IdEstadoProceso
-            WHERE "IdRegistroPersonal" = :IdRegistroPersonal;
-        """)
+        # Nunca ingresó (motivo 10) no maneja Paz y Salvo de Operaciones.
+        if (
+            retiro_actualizado["FechaRetiro"]
+            and id_motivo_retiro != 10
+        ):
+            paz_existente = db.execute(
+                text("""
+                    SELECT "IdPazYSalvo"
+                    FROM public."PazYSalvoOperaciones"
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                       OR "IdRegistroPersonal" = :id_registro_personal
+                    ORDER BY "IdPazYSalvo" DESC
+                    LIMIT 1;
+                """),
+                {
+                    "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                    "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                }
+            ).mappings().first()
 
-        db.execute(query_update_registro, {
-            "IdEstadoProceso": payload.IdEstadoProceso,
-            "IdRegistroPersonal": id_registro_personal
-        })
+            if paz_existente:
+                db.execute(
+                    text("""
+                        UPDATE public."PazYSalvoOperaciones"
+                        SET
+                            "IdRegistroPersonal" = :id_registro_personal,
+                            "IdRetiroLaboral" = :id_retiro_laboral,
+                            "FechaUltimoDiaLaborado" = :fecha_retiro,
+                            "FechaCarga" = CURRENT_TIMESTAMP,
+                            "UsuarioCreacion" = :usuario
+                        WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                    """),
+                    {
+                        "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                        "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                        "fecha_retiro": retiro_actualizado["FechaRetiro"],
+                        "usuario": payload.UsuarioActualizacion or "RRLL",
+                        "id_paz_y_salvo": paz_existente["IdPazYSalvo"],
+                    }
+                )
+            else:
+                db.execute(
+                    text("""
+                        INSERT INTO public."PazYSalvoOperaciones"
+                        (
+                            "IdRegistroPersonal",
+                            "FechaUltimoDiaLaborado",
+                            "Observacion",
+                            "UsuarioCreacion",
+                            "FechaCreacion",
+                            "IdRetiroLaboral",
+                            "FechaCarga"
+                        )
+                        VALUES
+                        (
+                            :id_registro_personal,
+                            :fecha_retiro,
+                            :observacion,
+                            :usuario,
+                            CURRENT_TIMESTAMP,
+                            :id_retiro_laboral,
+                            CURRENT_TIMESTAMP
+                        );
+                    """),
+                    {
+                        "id_registro_personal": retiro_actualizado["IdRegistroPersonal"],
+                        "fecha_retiro": retiro_actualizado["FechaRetiro"],
+                        "observacion": "Sincronizado desde cierre RRLL",
+                        "usuario": payload.UsuarioActualizacion or "RRLL",
+                        "id_retiro_laboral": retiro_actualizado["IdRetiroLaboral"],
+                    }
+                )
+
+        db.execute(
+            text("""
+                UPDATE public."RegistroPersonal"
+                SET "IdEstadoProceso" = :IdEstadoProceso
+                WHERE "IdRegistroPersonal" = :IdRegistroPersonal;
+            """),
+            {
+                "IdEstadoProceso": payload.IdEstadoProceso,
+                "IdRegistroPersonal": id_registro_personal
+            }
+        )
 
         db.commit()
 
@@ -385,22 +962,25 @@ def actualizar_estado_retiro_laboral(
             "success": True,
             "message": "Estado del retiro laboral actualizado correctamente.",
             "data": {
-                "IdRetiroLaboral": retiro_actualizado,
+                "IdRetiroLaboral": retiro_actualizado["IdRetiroLaboral"],
                 "IdRegistroPersonal": id_registro_personal,
                 "EstadoCasoRRLL": payload.EstadoCasoRRLL,
-                "IdEstadoProceso": payload.IdEstadoProceso
+                "IdEstadoProceso": payload.IdEstadoProceso,
+                "FechaCierre": fecha_cierre,
+                "FechaEnvioNomina": fecha_envio_nomina
             }
         }
 
     except HTTPException:
+        db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Error al actualizar estado del retiro laboral: {str(e)}"
         )
-
 
 @router.put("/{id_retiro_laboral}/detalle")
 def actualizar_detalle_retiro_laboral(
@@ -409,6 +989,27 @@ def actualizar_detalle_retiro_laboral(
     db: Session = Depends(get_db)
 ):
     try:
+        query_retiro_actual = text("""
+            SELECT
+                "IdRetiroLaboral",
+                "IdRegistroPersonal",
+                "IdMotivoRetiro",
+                "FechaRetiro"
+            FROM public."RetiroLaboral"
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+        """)
+
+        retiro_actual = db.execute(
+            query_retiro_actual,
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro_actual:
+            raise HTTPException(
+                status_code=404,
+                detail="No se encontró el retiro laboral para actualizar."
+            )
+
         query = text("""
             UPDATE public."RetiroLaboral"
             SET
@@ -422,6 +1023,7 @@ def actualizar_detalle_retiro_laboral(
             WHERE "IdRetiroLaboral" = :id_retiro_laboral
             RETURNING
                 "IdRetiroLaboral",
+                "IdRegistroPersonal",
                 "FechaRetiro",
                 "IdTipificacionRetiro",
                 "ObservacionRetiro",
@@ -441,8 +1043,7 @@ def actualizar_detalle_retiro_laboral(
             "id_retiro_laboral": id_retiro_laboral
         })
 
-        row = result.fetchone()
-        db.commit()
+        row = result.mappings().first()
 
         if not row:
             raise HTTPException(
@@ -450,22 +1051,101 @@ def actualizar_detalle_retiro_laboral(
                 detail="No se encontró el retiro laboral para actualizar."
             )
 
+        fecha_ultimo_dia_laborado = row["FechaRetiro"]
+        id_motivo_retiro = retiro_actual["IdMotivoRetiro"]
+
+        # Nunca ingresó (motivo 10) no maneja Paz y Salvo de Operaciones.
+        if (
+            fecha_ultimo_dia_laborado
+            and id_motivo_retiro != 10
+        ):
+            query_paz_salvo_existente = text("""
+                SELECT "IdPazYSalvo"
+                FROM public."PazYSalvoOperaciones"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                   OR "IdRegistroPersonal" = :id_registro_personal
+                ORDER BY "IdPazYSalvo" DESC
+                LIMIT 1;
+            """)
+
+            paz_salvo_existente = db.execute(
+                query_paz_salvo_existente,
+                {
+                    "id_retiro_laboral": id_retiro_laboral,
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                }
+            ).mappings().first()
+
+            if paz_salvo_existente:
+                query_update_paz_salvo = text("""
+                    UPDATE public."PazYSalvoOperaciones"
+                    SET
+                        "IdRegistroPersonal" = :id_registro_personal,
+                        "IdRetiroLaboral" = :id_retiro_laboral,
+                        "FechaUltimoDiaLaborado" = :fecha_ultimo_dia_laborado,
+                        "UsuarioCreacion" = :usuario_actualizacion,
+                        "FechaCarga" = CURRENT_TIMESTAMP
+                    WHERE "IdPazYSalvo" = :id_paz_y_salvo;
+                """)
+
+                db.execute(query_update_paz_salvo, {
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                    "id_retiro_laboral": id_retiro_laboral,
+                    "fecha_ultimo_dia_laborado": fecha_ultimo_dia_laborado,
+                    "usuario_actualizacion": payload.UsuarioActualizacion or "RRLL",
+                    "id_paz_y_salvo": paz_salvo_existente["IdPazYSalvo"],
+                })
+
+            else:
+                query_insert_paz_salvo = text("""
+                    INSERT INTO public."PazYSalvoOperaciones"
+                    (
+                        "IdRegistroPersonal",
+                        "FechaUltimoDiaLaborado",
+                        "Observacion",
+                        "UsuarioCreacion",
+                        "FechaCreacion",
+                        "IdRetiroLaboral",
+                        "FechaCarga"
+                    )
+                    VALUES
+                    (
+                        :id_registro_personal,
+                        :fecha_ultimo_dia_laborado,
+                        :observacion,
+                        :usuario_creacion,
+                        CURRENT_TIMESTAMP,
+                        :id_retiro_laboral,
+                        CURRENT_TIMESTAMP
+                    );
+                """)
+
+                db.execute(query_insert_paz_salvo, {
+                    "id_registro_personal": row["IdRegistroPersonal"],
+                    "fecha_ultimo_dia_laborado": fecha_ultimo_dia_laborado,
+                    "observacion": payload.ObservacionRetiro,
+                    "usuario_creacion": payload.UsuarioActualizacion or "RRLL",
+                    "id_retiro_laboral": id_retiro_laboral,
+                })
+
+        db.commit()
+
         return {
             "success": True,
             "message": "Detalle del retiro actualizado correctamente.",
-            "data": dict(row._mapping)
+            "data": dict(row)
         }
 
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
             detail=f"Error actualizando detalle del retiro: {str(e)}"
         )
-        
 @router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
 def generar_primer_llamado_endpoint(
     id_retiro_laboral: int,
@@ -576,7 +1256,7 @@ def generar_paquete_retiro_endpoint(
             status_code=500,
             detail=f"Error al generar y registrar el paquete de retiro: {str(e)}"
         )
-    
+
 @router.get("/carpeta-digital/{id_registro_personal}/documentos")
 def obtener_documentos_retiro_carpeta_digital(
     id_registro_personal: int,
@@ -585,11 +1265,10 @@ def obtener_documentos_retiro_carpeta_digital(
     try:
         query_retiro = text("""
             SELECT "IdRetiroLaboral"
-            FROM public."RetiroLaboral"
-            WHERE "IdRegistroPersonal" = :id_registro_personal
-              AND COALESCE("Activo", true) = true
-            ORDER BY "IdRetiroLaboral" DESC
-            LIMIT 1;
+FROM public."RetiroLaboral"
+WHERE "IdRegistroPersonal" = :id_registro_personal
+ORDER BY "IdRetiroLaboral" DESC
+LIMIT 1;
         """)
 
         retiro = db.execute(
@@ -649,7 +1328,7 @@ def obtener_documentos_retiro_carpeta_digital(
                 LIMIT 1
             ) adj ON true
             WHERE COALESCE(tdr."Activo", true) = true
-             AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10, 15, 16)
+            AND tdr."IdTipoDocumentoRetiro" IN (1, 2, 4, 10, 15, 16, 17, 18)
             ORDER BY tdr."IdTipoDocumentoRetiro";
         """)
 
@@ -722,7 +1401,7 @@ def obtener_documentos_retiro_carpeta_digital(
             status_code=500,
             detail=f"Error al consultar documentos de retiro para carpeta digital: {str(e)}"
         )
-    
+
 @router.get("/carpeta-digital/entrevista-retiro/{id_entrevista_retiro}/descargar")
 def descargar_entrevista_retiro_carpeta_digital(
     id_entrevista_retiro: int,
@@ -764,4 +1443,3 @@ def descargar_entrevista_retiro_carpeta_digital(
             status_code=500,
             detail=f"Error al descargar entrevista de retiro: {str(e)}"
         )
-    
