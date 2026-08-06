@@ -865,6 +865,7 @@ def consultar_eventos_enriquecidos(
             ag."Observacion",
             ag."EstadoAgenda",
             ag."ColorAgenda",
+            pd."EstadoProceso",
             ag."UsuarioAgenda",
             ag."FechaCreacion",
             ag."FechaActualizacion",
@@ -877,6 +878,9 @@ def consultar_eventos_enriquecidos(
         INNER JOIN public."TipoEventoDisciplinario" te
             ON te."IdTipoEventoDisciplinario" =
                ag."IdTipoEventoDisciplinario"
+        INNER JOIN public."ProcesoDisciplinario" pd
+            ON pd."IdProcesoDisciplinario" =
+               ag."IdProcesoDisciplinario"
         WHERE ag."Activo" = TRUE
         {condicion_sql}
         ORDER BY
@@ -1303,6 +1307,196 @@ def listar_agenda(
         )
         .all()
     )
+
+
+@router.get("/general/rango")
+def listar_agenda_general_por_rango(
+    fecha_desde: date,
+    fecha_hasta: date,
+    estado: str | None = None,
+    buscar: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Consulta la agenda general de RRLL por rango de fechas.
+
+    Permite consultar una semana o un mes completo y filtrar
+    por estado, nombre del trabajador o número de documento.
+    """
+    if fecha_desde > fecha_hasta:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "La fecha inicial no puede ser mayor "
+                    "que la fecha final."
+                ),
+                "fechaDesde": fecha_desde,
+                "fechaHasta": fecha_hasta,
+            },
+        )
+
+    cantidad_dias = (
+        fecha_hasta - fecha_desde
+    ).days + 1
+
+    if cantidad_dias > 366:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "El rango consultado no puede superar "
+                    "366 días calendario."
+                ),
+                "cantidadDias": cantidad_dias,
+            },
+        )
+
+    condiciones = [
+        'AND ag."FechaEvento" BETWEEN '
+        ':fecha_desde AND :fecha_hasta'
+    ]
+
+    parametros = {
+        "fecha_desde": fecha_desde,
+        "fecha_hasta": fecha_hasta,
+    }
+
+    estado_normalizado = str(
+        estado or ""
+    ).strip().upper()
+
+    if estado_normalizado:
+        if estado_normalizado not in COLORES_POR_ESTADO:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "mensaje": (
+                        "El estado indicado no es válido "
+                        "para la agenda disciplinaria."
+                    ),
+                    "estadoIngresado": estado_normalizado,
+                    "estadosPermitidos": sorted(
+                        COLORES_POR_ESTADO.keys()
+                    ),
+                },
+            )
+
+        condiciones.append(
+            """
+            AND UPPER(
+                COALESCE(
+                    ag."EstadoAgenda",
+                    ''
+                )
+            ) = :estado
+            """
+        )
+        parametros["estado"] = estado_normalizado
+
+    buscar_normalizado = str(
+        buscar or ""
+    ).strip()
+
+    if buscar_normalizado:
+        condiciones.append(
+            """
+            AND (
+                CONCAT(
+                    COALESCE(rp."Nombres", ''),
+                    ' ',
+                    COALESCE(rp."Apellidos", '')
+                ) ILIKE :buscar
+                OR COALESCE(
+                    rp."NumeroIdentificacion",
+                    ''
+                ) ILIKE :buscar
+            )
+            """
+        )
+        parametros["buscar"] = (
+            f"%{buscar_normalizado}%"
+        )
+
+    rows = consultar_eventos_enriquecidos(
+        db=db,
+        condicion_sql="\n".join(
+            condiciones
+        ),
+        parametros=parametros,
+    )
+
+    eventos = [
+        dict(row)
+        for row in rows
+    ]
+
+    resumen_estados = {
+        estado_agenda: 0
+        for estado_agenda in COLORES_POR_ESTADO
+    }
+
+    resumen_dias = {}
+
+    for evento in eventos:
+        estado_evento = str(
+            evento.get("EstadoAgenda") or ""
+        ).strip().upper()
+
+        if estado_evento in resumen_estados:
+            resumen_estados[estado_evento] += 1
+
+        fecha_evento = evento.get(
+            "FechaEvento"
+        )
+
+        fecha_clave = (
+            fecha_evento.isoformat()
+            if hasattr(fecha_evento, "isoformat")
+            else str(fecha_evento or "")
+        )
+
+        if fecha_clave not in resumen_dias:
+            resumen_dias[fecha_clave] = {
+                "fecha": fecha_evento,
+                "total": 0,
+                "estados": {
+                    estado_agenda: 0
+                    for estado_agenda
+                    in COLORES_POR_ESTADO
+                },
+            }
+
+        resumen_dias[
+            fecha_clave
+        ]["total"] += 1
+
+        if estado_evento in COLORES_POR_ESTADO:
+            resumen_dias[
+                fecha_clave
+            ]["estados"][
+                estado_evento
+            ] += 1
+
+    return {
+        "fechaDesde": fecha_desde,
+        "fechaHasta": fecha_hasta,
+        "cantidadDias": cantidad_dias,
+        "filtros": {
+            "estado": (
+                estado_normalizado or None
+            ),
+            "buscar": (
+                buscar_normalizado or None
+            ),
+        },
+        "total": len(eventos),
+        "resumenEstados": resumen_estados,
+        "resumenDias": list(
+            resumen_dias.values()
+        ),
+        "eventos": eventos,
+    }
 
 
 @router.get("/calendario/listado")

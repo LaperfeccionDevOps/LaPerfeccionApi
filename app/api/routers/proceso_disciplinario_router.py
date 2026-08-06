@@ -68,6 +68,15 @@ ESTADOS_PROCESO_CERRADO = {
     "CERRADO",
 }
 
+ESTADOS_PROCESO_NO_ABIERTO = {
+    "CERRADO",
+    "FINALIZADO",
+    "ATENDIDO",
+    "ANULADO",
+}
+
+MAXIMO_PROCESOS_ABIERTOS_POR_TRABAJADOR = 2
+
 ESTADOS_CAMBIO_PROTEGIDO = {
     "ENVIADO_A_RRLL",
     "EN_CURSO",
@@ -341,6 +350,126 @@ def validar_proceso_modificable(
         )
 
 
+def contar_procesos_abiertos_trabajador(
+    db: Session,
+    id_registro_personal: int,
+) -> int:
+    """
+    Cuenta únicamente registros de ProcesoDisciplinario abiertos.
+
+    Las agendas, reprogramaciones, historiales y notificaciones
+    no aumentan esta cantidad.
+    """
+    cantidad = (
+        db.query(
+            ProcesoDisciplinario
+        )
+        .filter(
+            ProcesoDisciplinario
+            .IdRegistroPersonal
+            == id_registro_personal,
+            ~ProcesoDisciplinario
+            .EstadoProceso
+            .in_(
+                list(
+                    ESTADOS_PROCESO_NO_ABIERTO
+                )
+            ),
+        )
+        .count()
+    )
+
+    return int(
+        cantidad or 0
+    )
+
+
+def validar_maximo_procesos_abiertos(
+    db: Session,
+    id_registro_personal: int,
+) -> None:
+    cantidad_abiertos = (
+        contar_procesos_abiertos_trabajador(
+            db=db,
+            id_registro_personal=(
+                id_registro_personal
+            ),
+        )
+    )
+
+    if (
+        cantidad_abiertos
+        >= MAXIMO_PROCESOS_ABIERTOS_POR_TRABAJADOR
+    ):
+        procesos_abiertos = (
+            db.query(
+                ProcesoDisciplinario
+            )
+            .filter(
+                ProcesoDisciplinario
+                .IdRegistroPersonal
+                == id_registro_personal,
+                ~ProcesoDisciplinario
+                .EstadoProceso
+                .in_(
+                    list(
+                        ESTADOS_PROCESO_NO_ABIERTO
+                    )
+                ),
+            )
+            .order_by(
+                ProcesoDisciplinario
+                .FechaCreacion
+                .desc()
+            )
+            .all()
+        )
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": (
+                    "MAXIMO_PROCESOS_"
+                    "DISCIPLINARIOS_ABIERTOS"
+                ),
+                "mensaje": (
+                    "El trabajador ya tiene el máximo "
+                    "permitido de 2 procesos disciplinarios "
+                    "abiertos. Para registrar uno nuevo, "
+                    "primero debe finalizar o cerrar uno "
+                    "de los procesos existentes."
+                ),
+                "IdRegistroPersonal": (
+                    id_registro_personal
+                ),
+                "CantidadProcesosAbiertos": (
+                    cantidad_abiertos
+                ),
+                "MaximoPermitido": (
+                    MAXIMO_PROCESOS_ABIERTOS_POR_TRABAJADOR
+                ),
+                "ProcesosAbiertos": [
+                    {
+                        "IdProcesoDisciplinario": (
+                            proceso
+                            .IdProcesoDisciplinario
+                        ),
+                        "EstadoProceso": (
+                            proceso.EstadoProceso
+                        ),
+                        "OrigenProceso": (
+                            proceso.OrigenProceso
+                        ),
+                        "FechaCreacion": (
+                            proceso.FechaCreacion
+                        ),
+                    }
+                    for proceso in procesos_abiertos
+                ],
+            },
+        )
+
+
 def obtener_borrador_operaciones(
     db: Session,
     id_registro_personal: int,
@@ -416,6 +545,13 @@ def crear_proceso_disciplinario(
     db: Session = Depends(get_db),
 ):
     trabajador = obtener_trabajador_o_error(
+        db=db,
+        id_registro_personal=(
+            data.IdRegistroPersonal
+        ),
+    )
+
+    validar_maximo_procesos_abiertos(
         db=db,
         id_registro_personal=(
             data.IdRegistroPersonal
