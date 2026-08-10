@@ -1,5 +1,4 @@
 from datetime import date, datetime, time
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -9,40 +8,36 @@ class CitacionProcesoDisciplinarioBase(
 ):
     IdProcesoDisciplinario: int
 
-    FechaCitacion: Optional[date] = None
-    HoraCitacion: Optional[time] = None
+    FechaCitacion: date | None = None
+    HoraCitacion: time | None = None
 
-    LugarCitacion: Optional[str] = None
-    MotivoCitacion: Optional[str] = None
+    LugarCitacion: str | None = None
+    MotivoCitacion: str | None = None
 
-    ResponsableCitacion: Optional[
-        str
-    ] = None
+    ResponsableCitacion: str | None = None
 
     # =============================================
     # INFORMACIÓN MAPEADA DESDE OPERACIONES
     # =============================================
 
-    Modalidad: Optional[str] = None
-    RelatoHechos: Optional[str] = None
+    Modalidad: str | None = None
+    RelatoHechos: str | None = None
 
-    ObservacionOperaciones: Optional[
-        str
-    ] = None
+    ObservacionOperaciones: str | None = None
 
-    SupervisorReporta: Optional[str] = None
+    DesempenoContinua: str | None = None
 
-    ManifestacionSupervisor: Optional[
-        str
-    ] = None
+    JustificacionDesempeno: str | None = None
 
-    Cliente: Optional[str] = None
-    Sede: Optional[str] = None
+    SupervisorReporta: str | None = None
 
-    UsuarioCreacion: Optional[str] = None
-    UsuarioActualizacion: Optional[
-        str
-    ] = None
+    ManifestacionSupervisor: str | None = None
+
+    Cliente: str | None = None
+    Sede: str | None = None
+
+    UsuarioCreacion: str | None = None
+    UsuarioActualizacion: str | None = None
 
 
 class CitacionProcesoDisciplinarioCreate(
@@ -54,35 +49,31 @@ class CitacionProcesoDisciplinarioCreate(
 class CitacionProcesoDisciplinarioUpdate(
     BaseModel
 ):
-    FechaCitacion: Optional[date] = None
-    HoraCitacion: Optional[time] = None
+    FechaCitacion: date | None = None
+    HoraCitacion: time | None = None
 
-    LugarCitacion: Optional[str] = None
-    MotivoCitacion: Optional[str] = None
+    LugarCitacion: str | None = None
+    MotivoCitacion: str | None = None
 
-    ResponsableCitacion: Optional[
-        str
-    ] = None
+    ResponsableCitacion: str | None = None
 
-    Modalidad: Optional[str] = None
-    RelatoHechos: Optional[str] = None
+    Modalidad: str | None = None
+    RelatoHechos: str | None = None
 
-    ObservacionOperaciones: Optional[
-        str
-    ] = None
+    ObservacionOperaciones: str | None = None
 
-    SupervisorReporta: Optional[str] = None
+    DesempenoContinua: str | None = None
 
-    ManifestacionSupervisor: Optional[
-        str
-    ] = None
+    JustificacionDesempeno: str | None = None
 
-    Cliente: Optional[str] = None
-    Sede: Optional[str] = None
+    SupervisorReporta: str | None = None
 
-    UsuarioActualizacion: Optional[
-        str
-    ] = None
+    ManifestacionSupervisor: str | None = None
+
+    Cliente: str | None = None
+    Sede: str | None = None
+
+    UsuarioActualizacion: str | None = None
 
 
 class CitacionProcesoDisciplinarioResponse(
@@ -90,13 +81,8 @@ class CitacionProcesoDisciplinarioResponse(
 ):
     IdCitacionProcesoDisciplinario: int
 
-    FechaCreacion: Optional[
-        datetime
-    ] = None
-
-    FechaActualizacion: Optional[
-        datetime
-    ] = None
+    FechaCreacion: datetime | None = None
+    FechaActualizacion: datetime | None = None
 
     class Config:
         from_attributes = True

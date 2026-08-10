@@ -84,6 +84,16 @@ class CitacionProcesoDisciplinario(Base):
         nullable=True,
     )
 
+    DesempenoContinua = Column(
+        String(2),
+        nullable=True,
+    )
+
+    JustificacionDesempeno = Column(
+        Text,
+        nullable=True,
+    )
+
     SupervisorReporta = Column(
         String(200),
         nullable=True,
