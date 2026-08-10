@@ -69,6 +69,11 @@ class CitacionProcesoDisciplinario(Base):
     # INFORMACIÓN MAPEADA DESDE OPERACIONES
     # =========================================================
 
+    TipoGestionDisciplinaria = Column(
+        String(50),
+        nullable=True,
+    )
+
     Modalidad = Column(
         String(20),
         nullable=True,

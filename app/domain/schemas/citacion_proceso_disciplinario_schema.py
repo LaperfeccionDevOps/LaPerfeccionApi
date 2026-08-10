@@ -20,6 +20,8 @@ class CitacionProcesoDisciplinarioBase(
     # INFORMACIÓN MAPEADA DESDE OPERACIONES
     # =============================================
 
+    TipoGestionDisciplinaria: str | None = None
+
     Modalidad: str | None = None
     RelatoHechos: str | None = None
 
@@ -56,6 +58,8 @@ class CitacionProcesoDisciplinarioUpdate(
     MotivoCitacion: str | None = None
 
     ResponsableCitacion: str | None = None
+
+    TipoGestionDisciplinaria: str | None = None
 
     Modalidad: str | None = None
     RelatoHechos: str | None = None
