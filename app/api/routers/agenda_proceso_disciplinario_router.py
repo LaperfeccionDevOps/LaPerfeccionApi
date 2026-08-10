@@ -3,6 +3,7 @@
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -14,6 +15,9 @@ from domain.models.agenda_proceso_disciplinario import (
 )
 from domain.models.autorizacion_agenda_disciplinaria import (
     AutorizacionAgendaDisciplinaria,
+)
+from domain.models.citacion_proceso_disciplinario import (
+    CitacionProcesoDisciplinario,
 )
 from domain.models.historial_agenda_proceso_disciplinario import (
     HistorialAgendaProcesoDisciplinario,
@@ -38,6 +42,7 @@ from domain.schemas.tipo_evento_disciplinario_schema import (
     TipoEventoDisciplinarioResponse,
 )
 from services.correo_proceso_disciplinario_service import (
+    TIPO_CITACION_INICIAL,
     TIPO_REPROGRAMACION,
     enviar_notificacion_agenda_disciplinaria,
 )
@@ -51,6 +56,11 @@ router = APIRouter(
 
 TIPO_EVENTO_CITACION_ID = 1
 DIAS_HABILES_MINIMOS_CITACION = 5
+
+
+class EnlaceVirtualRRLLRequest(BaseModel):
+    EnlaceVirtual: str
+    UsuarioMovimiento: str | None = None
 
 HORA_INICIO_MANANA = time(7, 10)
 HORA_FIN_MANANA = time(13, 0)
@@ -862,6 +872,7 @@ def consultar_eventos_enriquecidos(
             ag."HoraInicio",
             ag."HoraFin",
             ag."Modalidad",
+            ag."LugarCitacion",
             ag."Observacion",
             ag."EstadoAgenda",
             ag."ColorAgenda",
@@ -2087,6 +2098,271 @@ def cancelar_evento_agenda(
                 "el evento de agenda."
             ),
         ) from error
+
+
+@router.put(
+    "/{id_agenda}/enlace-virtual",
+)
+def registrar_enlace_virtual_rrll(
+    id_agenda: int,
+    data: EnlaceVirtualRRLLRequest,
+    db: Session = Depends(get_db),
+):
+    evento = (
+        db.query(AgendaProcesoDisciplinario)
+        .filter(
+            AgendaProcesoDisciplinario
+            .IdAgendaProcesoDisciplinario
+            == id_agenda,
+            AgendaProcesoDisciplinario
+            .Activo
+            .is_(True),
+        )
+        .first()
+    )
+
+    if not evento:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "Evento de agenda no encontrado."
+                ),
+                "IdAgendaProcesoDisciplinario": id_agenda,
+            },
+        )
+
+    validar_proceso_abierto(
+        db=db,
+        id_proceso=evento.IdProcesoDisciplinario,
+    )
+
+    modalidad = str(
+        evento.Modalidad or ""
+    ).strip().upper()
+
+    if modalidad != "VIRTUAL":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El enlace de reunión solo puede "
+                    "registrarse para citaciones virtuales."
+                ),
+                "Modalidad": evento.Modalidad,
+            },
+        )
+
+    estado_actual = str(
+        evento.EstadoAgenda or ""
+    ).strip().upper()
+
+    if estado_actual in {
+        "ATENDIDO",
+        "CANCELADO",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "La citación ya no admite la asignación "
+                    "del enlace de reunión."
+                ),
+                "EstadoAgenda": evento.EstadoAgenda,
+            },
+        )
+
+    enlace = str(
+        data.EnlaceVirtual or ""
+    ).strip()
+
+    if not enlace:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "Debe ingresar el enlace de la reunión virtual."
+                ),
+            },
+        )
+
+    if not (
+        enlace.lower().startswith("https://")
+        or enlace.lower().startswith("http://")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "El enlace debe comenzar por "
+                    "http:// o https://."
+                ),
+            },
+        )
+
+    if len(enlace) > 2000:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "El enlace de la reunión es demasiado largo."
+                ),
+                "longitudMaxima": 2000,
+            },
+        )
+
+    enlace_existente = str(
+        getattr(
+            evento,
+            "LugarCitacion",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if enlace_existente:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "La citación virtual ya tiene un enlace "
+                    "asignado por Relaciones Laborales."
+                ),
+                "IdAgendaProcesoDisciplinario": id_agenda,
+            },
+        )
+
+    citacion = (
+        db.query(CitacionProcesoDisciplinario)
+        .filter(
+            CitacionProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == evento.IdProcesoDisciplinario
+        )
+        .order_by(
+            CitacionProcesoDisciplinario
+            .IdCitacionProcesoDisciplinario
+            .desc()
+        )
+        .first()
+    )
+
+    if not citacion:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "No se encontró la citación asociada "
+                    "al proceso disciplinario."
+                ),
+                "IdProcesoDisciplinario": (
+                    evento.IdProcesoDisciplinario
+                ),
+            },
+        )
+
+    modalidad_citacion = str(
+        citacion.Modalidad or ""
+    ).strip().upper()
+
+    if modalidad_citacion != "VIRTUAL":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "La citación asociada al proceso "
+                    "no está registrada como virtual."
+                ),
+                "ModalidadCitacion": citacion.Modalidad,
+            },
+        )
+
+    usuario = str(
+        data.UsuarioMovimiento
+        or "rrll_enlace_virtual"
+    ).strip()
+
+    fecha_actualizacion = (
+        obtener_ahora_colombia()
+    )
+
+    try:
+        evento.LugarCitacion = enlace
+        evento.FechaActualizacion = (
+            fecha_actualizacion
+        )
+        evento.UsuarioActualizacion = usuario
+
+        citacion.LugarCitacion = enlace
+        citacion.FechaActualizacion = (
+            fecha_actualizacion
+        )
+        citacion.UsuarioActualizacion = usuario
+
+        db.commit()
+        db.refresh(evento)
+        db.refresh(citacion)
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No se pudo guardar el enlace "
+                    "de la reunión virtual."
+                ),
+                "IdAgendaProcesoDisciplinario": id_agenda,
+            },
+        ) from error
+
+    resultado_notificacion = (
+        intentar_enviar_notificacion_agenda(
+            db=db,
+            id_agenda=id_agenda,
+            tipo_notificacion=(
+                TIPO_CITACION_INICIAL
+            ),
+            usuario=usuario,
+        )
+    )
+
+    correo_enviado = bool(
+        resultado_notificacion.get(
+            "enviado"
+        )
+    )
+
+    if correo_enviado:
+        mensaje = (
+            "El enlace virtual fue registrado correctamente "
+            "y la citación fue enviada al trabajador."
+        )
+    else:
+        mensaje = (
+            "El enlace virtual fue registrado correctamente, "
+            "pero no fue posible confirmar el envío del correo "
+            "al trabajador. Revise el resultado de la notificación."
+        )
+
+    return {
+        "ok": True,
+        "IdAgendaProcesoDisciplinario": (
+            evento.IdAgendaProcesoDisciplinario
+        ),
+        "IdProcesoDisciplinario": (
+            evento.IdProcesoDisciplinario
+        ),
+        "Modalidad": evento.Modalidad,
+        "LugarCitacion": evento.LugarCitacion,
+        "EnlaceVirtual": evento.LugarCitacion,
+        "PendienteEnlaceVirtual": False,
+        "NotificacionCorreo": (
+            resultado_notificacion
+        ),
+        "mensaje": mensaje,
+    }
 
 
 @router.get(

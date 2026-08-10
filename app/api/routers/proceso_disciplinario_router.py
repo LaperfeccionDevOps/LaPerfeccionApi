@@ -169,16 +169,24 @@ def aplicar_filtro_visibilidad_rrll(
 def validar_citacion_completa_para_envio(
     citacion: CitacionProcesoDisciplinario,
 ) -> None:
+    modalidad = normalizar_texto(
+        citacion.Modalidad
+    )
+
     campos_obligatorios = {
         "FechaCitacion": citacion.FechaCitacion,
         "HoraCitacion": citacion.HoraCitacion,
-        "LugarCitacion": citacion.LugarCitacion,
         "Modalidad": citacion.Modalidad,
         "MotivoCitacion": citacion.MotivoCitacion,
         "RelatoHechos": citacion.RelatoHechos,
         "SupervisorReporta": citacion.SupervisorReporta,
         "Cliente": citacion.Cliente,
     }
+
+    if modalidad == "PRESENCIAL":
+        campos_obligatorios[
+            "LugarCitacion"
+        ] = citacion.LugarCitacion
 
     faltantes = [
         nombre
@@ -196,6 +204,21 @@ def validar_citacion_completa_para_envio(
                     "incompleta y no puede enviarse a RRLL."
                 ),
                 "camposFaltantes": faltantes,
+            },
+        )
+
+    if modalidad not in {
+        "PRESENCIAL",
+        "VIRTUAL",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "La modalidad de la citación debe ser "
+                    "PRESENCIAL o VIRTUAL."
+                ),
+                "Modalidad": citacion.Modalidad,
             },
         )
 
@@ -1310,6 +1333,10 @@ def enviar_proceso_a_rrll(
         or "operaciones_envio_rrll"
     ).strip()
 
+    modalidad_citacion = normalizar_texto(
+        citacion.Modalidad
+    )
+
     fecha_actualizacion = datetime.now(timezone.utc)
 
     nuevo_evento = AgendaProcesoDisciplinario(
@@ -1330,7 +1357,11 @@ def enviar_proceso_a_rrll(
         FechaActualizacion=fecha_actualizacion,
         UsuarioActualizacion=usuario,
         Activo=True,
-        LugarCitacion=citacion.LugarCitacion,
+        LugarCitacion=(
+            citacion.LugarCitacion
+            if modalidad_citacion == "PRESENCIAL"
+            else None
+        ),
         SupervisorReporta=(
             citacion.SupervisorReporta
         ),
@@ -1370,13 +1401,40 @@ def enviar_proceso_a_rrll(
             },
         ) from error
 
-    resultado_notificacion = intentar_enviar_citacion_inicial(
-        db=db,
-        id_agenda=(
-            nuevo_evento.IdAgendaProcesoDisciplinario
-        ),
-        usuario=usuario,
-    )
+    if modalidad_citacion == "VIRTUAL":
+        resultado_notificacion = {
+            "enviado": False,
+            "estado": "PENDIENTE_ENLACE_RRLL",
+            "correo": None,
+            "mensaje": (
+                "La citación es virtual. El correo al trabajador "
+                "se enviará cuando Relaciones Laborales registre "
+                "el enlace de la reunión."
+            ),
+            "IdNotificacionProcesoDisciplinario": None,
+        }
+
+        mensaje_respuesta = (
+            "El proceso fue enviado a Relaciones Laborales y "
+            "quedó programado en la agenda. La citación virtual "
+            "está pendiente de que RRLL registre el enlace de la "
+            "reunión antes de notificar al trabajador."
+        )
+
+    else:
+        resultado_notificacion = intentar_enviar_citacion_inicial(
+            db=db,
+            id_agenda=(
+                nuevo_evento.IdAgendaProcesoDisciplinario
+            ),
+            usuario=usuario,
+        )
+
+        mensaje_respuesta = (
+            "El proceso fue enviado a Relaciones Laborales, "
+            "quedó programado en la agenda y se gestionó la "
+            "notificación inicial al trabajador."
+        )
 
     return {
         "ok": True,
@@ -1390,13 +1448,14 @@ def enviar_proceso_a_rrll(
         "FechaEvento": nuevo_evento.FechaEvento,
         "HoraInicio": nuevo_evento.HoraInicio,
         "HoraFin": nuevo_evento.HoraFin,
+        "Modalidad": modalidad_citacion,
+        "PendienteEnlaceVirtual": (
+            modalidad_citacion == "VIRTUAL"
+        ),
         "EstadoAgenda": nuevo_evento.EstadoAgenda,
         "ColorAgenda": nuevo_evento.ColorAgenda,
         "NotificacionCorreo": resultado_notificacion,
-        "mensaje": (
-            "El proceso fue enviado a Relaciones "
-            "Laborales y quedó programado en la agenda."
-        ),
+        "mensaje": mensaje_respuesta,
     }
 
 
