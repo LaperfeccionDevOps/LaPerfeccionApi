@@ -104,6 +104,11 @@ class CitacionProcesoDisciplinario(Base):
         nullable=True,
     )
 
+    TelefonoTrabajador = Column(
+        String(30),
+        nullable=True,
+    )
+
     ManifestacionSupervisor = Column(
         Text,
         nullable=True,
