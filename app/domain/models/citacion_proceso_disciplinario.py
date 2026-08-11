@@ -90,7 +90,7 @@ class CitacionProcesoDisciplinario(Base):
     )
 
     DesempenoContinua = Column(
-        String(2),
+        String(20),
         nullable=True,
     )
 
