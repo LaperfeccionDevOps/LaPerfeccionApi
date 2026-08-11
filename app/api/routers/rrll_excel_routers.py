@@ -1,15 +1,17 @@
-from datetime import datetime, date
-from io import BytesIO
 from collections import Counter
+from datetime import date, datetime
+from io import BytesIO
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
@@ -80,22 +82,15 @@ def _convertir_a_fecha(valor):
     if not texto_fecha:
         return None
 
-    formatos = (
-        "%Y-%m-%d",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%d/%m/%Y",
-    )
-
-    for formato in formatos:
-        try:
-            return datetime.strptime(texto_fecha[:19], formato).date()
-        except ValueError:
-            continue
+    try:
+        return date.fromisoformat(texto_fecha[:10])
+    except ValueError:
+        pass
 
     try:
-        return datetime.fromisoformat(texto_fecha.replace("Z", "+00:00")).date()
-    except (ValueError, TypeError):
+        dia, mes, anio = texto_fecha[:10].split("/")
+        return date(int(anio), int(mes), int(dia))
+    except (TypeError, ValueError):
         return None
 
 
@@ -429,18 +424,24 @@ def _agregar_motivo_oficial_validado_rrll(db: Session, resultados):
 
 @router.get("/exportar-retiros")
 def exportar_excel_retiros(
-    fecha_inicio: str = Query(..., description="Fecha inicio en formato YYYY-MM-DD"),
-    fecha_fin: str = Query(..., description="Fecha fin en formato YYYY-MM-DD"),
-    db: Session = Depends(get_db)
+    fecha_inicio: Annotated[
+        str,
+        Query(description="Fecha inicio en formato YYYY-MM-DD"),
+    ],
+    fecha_fin: Annotated[
+        str,
+        Query(description="Fecha fin en formato YYYY-MM-DD"),
+    ],
+    db: Annotated[Session, Depends(get_db)],
 ):
     try:
-        fecha_inicio_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d")
-        fecha_fin_dt = datetime.strptime(fecha_fin, "%Y-%m-%d")
-    except ValueError:
+        fecha_inicio_dt = date.fromisoformat(fecha_inicio)
+        fecha_fin_dt = date.fromisoformat(fecha_fin)
+    except ValueError as error:
         raise HTTPException(
             status_code=400,
-            detail="Las fechas deben estar en formato YYYY-MM-DD."
-        )
+            detail="Las fechas deben estar en formato YYYY-MM-DD.",
+        ) from error
 
     if fecha_inicio_dt > fecha_fin_dt:
         raise HTTPException(
@@ -935,8 +936,6 @@ def exportar_excel_retiros(
 
             ws_dashboard.row_dimensions[idx].height = 34
 
-        fila_tip_fin = max(fila_tip_inicio, fila_tip_inicio + len(top_tipificaciones) - 1)
-
         # ==================================================
         # BLOQUE 3 - MOTIVOS DE RETIRO (TABLA + GRÁFICA)
         # ==================================================
@@ -1008,20 +1007,9 @@ def exportar_excel_retiros(
         bar_motivos.dLbls.showLegendKey = False
         bar_motivos.dLbls.position = "outEnd"
 
-        try:
-            bar_motivos.x_axis.delete = True
-        except Exception:
-            pass
-
-        try:
-            bar_motivos.y_axis.delete = True
-        except Exception:
-            pass
-
-        try:
-            bar_motivos.x_axis.majorGridlines = None
-        except Exception:
-            pass
+        bar_motivos.x_axis.delete = True
+        bar_motivos.y_axis.delete = True
+        bar_motivos.x_axis.majorGridlines = None
 
         ws_dashboard.add_chart(bar_motivos, "D45")
 
@@ -1062,8 +1050,960 @@ def exportar_excel_retiros(
             }
         )
 
-    except Exception as e:
+    except (
+        SQLAlchemyError,
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al generar el Excel de retiros: {str(e)}"
+            detail=f"Error al generar el Excel de retiros: {error!s}",
+        ) from error
+# ============================================================
+# EXCEL DE PROCESOS DISCIPLINARIOS
+# Una fila = un expediente disciplinario
+# ============================================================
+
+def _valor_fila(fila, candidatos, default=None):
+    """
+    Busca un valor en un mapping sin depender de mayúsculas/minúsculas.
+    Permite que el reporte siga funcionando aunque algunos nombres de columna
+    cambien entre ambientes.
+    """
+    if not fila:
+        return default
+
+    mapa = {
+        str(clave).lower(): valor
+        for clave, valor in dict(fila).items()
+    }
+
+    for candidato in candidatos:
+        clave = str(candidato).lower()
+        if clave in mapa:
+            valor = mapa[clave]
+            if valor not in (None, ""):
+                return valor
+
+    return default
+
+
+def _primer_valor(filas, candidatos, default=None):
+    for fila in filas:
+        valor = _valor_fila(fila, candidatos, None)
+        if valor not in (None, ""):
+            return valor
+    return default
+
+
+def _formatear_novedad_disciplinaria(valor) -> str:
+    """
+    Convierte el código interno del motivo de citación a un texto legible
+    para el Excel de procesos disciplinarios.
+    """
+    codigo = str(valor or "").strip().upper()
+
+    if not codigo:
+        return ""
+
+    etiquetas = {
+        "AUSENCIA_INJUSTIFICADA": "Ausencia injustificada",
+        "RETARDOS_INJUSTIFICADOS": "Retardos injustificados",
+        "INCUMPLIMIENTO_FUNCIONES": "Incumplimiento de funciones",
+        "INCUMPLIMIENTO_NORMAS": "Incumplimiento de normas",
+        "CLIMA_LABORAL": "Clima laboral",
+        "DANOS_BIEN_AJENO_AFECTACION_CLIENTE": (
+            "Daños en bien ajeno - afectación al cliente"
+        ),
+        "PERIODO_PRUEBA": "Período de prueba",
+        "ATENCION_LINEA_VERDE": "Atención línea verde",
+    }
+
+    return etiquetas.get(
+        codigo,
+        str(valor or "").replace("_", " ").strip().capitalize(),
+    )
+
+
+def _dias_entre_fechas(fecha_inicio, fecha_fin):
+    """
+    Calcula días calendario inclusivos cuando existen ambas fechas.
+    Si no hay fechas suficientes, retorna vacío.
+    """
+    inicio = _convertir_a_fecha(fecha_inicio)
+    fin = _convertir_a_fecha(fecha_fin)
+
+    if not inicio or not fin or fin < inicio:
+        return ""
+
+    return (fin - inicio).days + 1
+
+
+def _obtener_ultimos_registros_por_proceso(
+    db: Session,
+    nombre_tabla: str,
+    ids_proceso: list[int],
+    candidatos_fk: list[str],
+    candidatos_orden: list[str],
+):
+    """
+    Obtiene el registro más reciente de una tabla por proceso disciplinario.
+    Usa las columnas reales de information_schema para evitar acoplar el
+    reporte a una sola variante de nombres.
+    """
+    if not ids_proceso:
+        return {}
+
+    columnas = _obtener_columnas_tabla(db, nombre_tabla)
+    if not columnas:
+        return {}
+
+    columna_fk = _buscar_columna(columnas, candidatos_fk)
+    if not columna_fk:
+        return {}
+
+    columna_orden = _buscar_columna(columnas, candidatos_orden)
+    if not columna_orden:
+        columna_orden = columna_fk
+
+    consulta = text(f"""
+        SELECT *
+        FROM public.{_quote_identifier(nombre_tabla)}
+        WHERE {_quote_identifier(columna_fk)} = ANY(:ids_proceso)
+        ORDER BY
+            {_quote_identifier(columna_fk)},
+            {_quote_identifier(columna_orden)} DESC NULLS LAST
+    """)
+
+    filas = db.execute(
+        consulta,
+        {"ids_proceso": ids_proceso},
+    ).mappings().all()
+
+    resultado = {}
+
+    for fila in filas:
+        id_proceso = _valor_fila(
+            fila,
+            [columna_fk],
         )
+
+        if id_proceso is None:
+            continue
+
+        id_proceso = int(id_proceso)
+
+        if id_proceso not in resultado:
+            resultado[id_proceso] = dict(fila)
+
+    return resultado
+
+
+@router.get("/exportar-procesos-disciplinarios")
+def exportar_excel_procesos_disciplinarios(
+    fecha_inicio: Annotated[
+        str,
+        Query(description="Fecha inicio en formato YYYY-MM-DD"),
+    ],
+    fecha_fin: Annotated[
+        str,
+        Query(description="Fecha fin en formato YYYY-MM-DD"),
+    ],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """
+    Genera el Excel de Procesos Disciplinarios para RRLL.
+
+    Regla principal:
+        1 fila = 1 expediente disciplinario.
+
+    El filtro se realiza por la fecha de creación del expediente.
+
+    Los campos que todavía no existan en el flujo se entregan vacíos;
+    el reporte no inventa información ni modifica la base de datos.
+    """
+    try:
+        fecha_inicio_dt = date.fromisoformat(fecha_inicio)
+        fecha_fin_dt = date.fromisoformat(fecha_fin)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Las fechas deben estar en formato YYYY-MM-DD.",
+        ) from error
+
+    if fecha_inicio_dt > fecha_fin_dt:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "La fecha de inicio no puede ser mayor "
+                "que la fecha final."
+            ),
+        )
+
+    try:
+        # =====================================================
+        # 1. UNIVERSO DE EXPEDIENTES
+        # =====================================================
+
+        consulta_procesos = text("""
+            SELECT
+                p."IdProcesoDisciplinario" AS id_proceso_disciplinario,
+                p."IdRegistroPersonal" AS id_registro_personal,
+                p."EstadoProceso" AS estado_proceso,
+                p."FechaCreacion" AS fecha_creacion_proceso,
+                rp."NumeroIdentificacion" AS cedula,
+                rp."Nombres" AS nombres,
+                rp."Apellidos" AS apellidos
+            FROM public."ProcesoDisciplinario" p
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = p."IdRegistroPersonal"
+            WHERE p."FechaCreacion"::date
+                  BETWEEN CAST(:fecha_inicio AS date)
+                      AND CAST(:fecha_fin AS date)
+            ORDER BY
+                p."FechaCreacion" ASC,
+                p."IdProcesoDisciplinario" ASC
+        """)
+
+        procesos = db.execute(
+            consulta_procesos,
+            {
+                "fecha_inicio": fecha_inicio,
+                "fecha_fin": fecha_fin,
+            },
+        ).mappings().all()
+
+        ids_proceso = [
+            int(row["id_proceso_disciplinario"])
+            for row in procesos
+        ]
+
+        # =====================================================
+        # 2. ÚLTIMA INFORMACIÓN DE CADA ETAPA
+        # =====================================================
+
+        citaciones = _obtener_ultimos_registros_por_proceso(
+            db=db,
+            nombre_tabla="CitacionProcesoDisciplinario",
+            ids_proceso=ids_proceso,
+            candidatos_fk=[
+                "IdProcesoDisciplinario",
+                "IdProceso",
+            ],
+            candidatos_orden=[
+                "FechaActualizacion",
+                "FechaCreacion",
+                "IdCitacionProcesoDisciplinario",
+            ],
+        )
+
+        descargos = _obtener_ultimos_registros_por_proceso(
+            db=db,
+            nombre_tabla="DescargoProcesoDisciplinario",
+            ids_proceso=ids_proceso,
+            candidatos_fk=[
+                "IdProcesoDisciplinario",
+                "IdProceso",
+            ],
+            candidatos_orden=[
+                "FechaActualizacion",
+                "FechaCreacion",
+                "IdDescargoProcesoDisciplinario",
+                "IdDescargo",
+            ],
+        )
+
+        cierres = _obtener_ultimos_registros_por_proceso(
+            db=db,
+            nombre_tabla="CierreProcesoDisciplinario",
+            ids_proceso=ids_proceso,
+            candidatos_fk=[
+                "IdProcesoDisciplinario",
+                "IdProceso",
+            ],
+            candidatos_orden=[
+                "FechaActualizacion",
+                "FechaCreacion",
+                "IdCierreProcesoDisciplinario",
+                "IdCierre",
+            ],
+        )
+
+        agendas = _obtener_ultimos_registros_por_proceso(
+            db=db,
+            nombre_tabla="AgendaProcesoDisciplinario",
+            ids_proceso=ids_proceso,
+            candidatos_fk=[
+                "IdProcesoDisciplinario",
+                "IdProceso",
+            ],
+            candidatos_orden=[
+                "FechaActualizacion",
+                "FechaCreacion",
+                "IdAgendaProcesoDisciplinario",
+                "IdAgenda",
+            ],
+        )
+
+        # =====================================================
+        # 3. ARMAR FILAS DEL REPORTE
+        # =====================================================
+
+        filas_excel = []
+
+        for proceso in procesos:
+            id_proceso = int(
+                proceso["id_proceso_disciplinario"]
+            )
+
+            citacion = citaciones.get(id_proceso, {})
+            descargo = descargos.get(id_proceso, {})
+            cierre = cierres.get(id_proceso, {})
+            agenda = agendas.get(id_proceso, {})
+
+            fuentes = [
+                cierre,
+                descargo,
+                citacion,
+                agenda,
+                proceso,
+            ]
+
+            cedula = str(
+                proceso.get("cedula") or ""
+            ).strip()
+
+            colaborador = " ".join(
+                [
+                    str(proceso.get("nombres") or "").strip(),
+                    str(proceso.get("apellidos") or "").strip(),
+                ]
+            ).strip()
+
+            novedad = _formatear_novedad_disciplinaria(
+                _primer_valor(
+                    [citacion, descargo],
+                    [
+                        "MotivoCitacion",
+                        "Motivo",
+                        "TipoFalta",
+                        "Novedad",
+                    ],
+                    "",
+                )
+            )
+
+            inicio_ausencia = _primer_valor(
+                fuentes,
+                [
+                    "InicioAusencia",
+                    "FechaInicioAusencia",
+                    "FechaDesdeAusencia",
+                ],
+                "",
+            )
+
+            fin_ausencia = _primer_valor(
+                fuentes,
+                [
+                    "FinAusencia",
+                    "FechaFinAusencia",
+                    "FechaHastaAusencia",
+                ],
+                "",
+            )
+
+            dias_ausencia = _primer_valor(
+                fuentes,
+                [
+                    "DiasAusencia",
+                    "DiasDeAusencia",
+                ],
+                None,
+            )
+
+            if dias_ausencia is None:
+                dias_ausencia = _dias_entre_fechas(
+                    inicio_ausencia,
+                    fin_ausencia,
+                )
+
+            medida = _primer_valor(
+                [cierre],
+                [
+                    "MedidaDisciplinaria",
+                    "Medida",
+                    "Decision",
+                    "TipoMedida",
+                ],
+                "",
+            )
+
+            inicio_suspension = _primer_valor(
+                [cierre, descargo],
+                [
+                    "DiaInicioSuspension",
+                    "FechaInicioSuspension",
+                    "InicioSuspension",
+                ],
+                "",
+            )
+
+            fin_suspension = _primer_valor(
+                [cierre, descargo],
+                [
+                    "DiaFinSuspension",
+                    "FechaFinSuspension",
+                    "FinSuspension",
+                ],
+                "",
+            )
+
+            dias_suspension = _primer_valor(
+                [cierre, descargo],
+                [
+                    "DiasSuspension",
+                    "DiasDeSuspension",
+                ],
+                None,
+            )
+
+            if dias_suspension is None:
+                dias_suspension = _dias_entre_fechas(
+                    inicio_suspension,
+                    fin_suspension,
+                )
+
+            ultimo_dia_laborado = _primer_valor(
+                fuentes,
+                [
+                    "UltimoDiaLaborado",
+                    "FechaUltimoDiaLaborado",
+                ],
+                "",
+            )
+
+            estado_agenda = _primer_valor(
+                [agenda],
+                [
+                    "EstadoAgenda",
+                    "Estado",
+                ],
+                "",
+            )
+
+            presentacion = _primer_valor(
+                [agenda, descargo],
+                [
+                    "Presentacion",
+                    "SePresento",
+                    "Asistencia",
+                    "EstadoAsistencia",
+                ],
+                "",
+            )
+
+            if not presentacion:
+                estado_agenda_normalizado = str(
+                    estado_agenda or ""
+                ).strip().upper()
+
+                if estado_agenda_normalizado == "ATENDIDO":
+                    presentacion = "SÍ"
+                elif estado_agenda_normalizado == "CANCELADO":
+                    presentacion = "NO"
+
+            sede = _primer_valor(
+                [citacion],
+                [
+                    "Cliente",
+                    "Sede",
+                ],
+                "",
+            )
+
+            fecha_citacion = _primer_valor(
+                [citacion],
+                [
+                    "FechaCitacion",
+                    "Fecha",
+                ],
+                "",
+            )
+
+            fecha_entrega_carta = _primer_valor(
+                [cierre, descargo],
+                [
+                    "FechaEntregaCarta",
+                    "FechaCarta",
+                    "FechaNotificacionCarta",
+                ],
+                "",
+            )
+
+            fecha_agenda = _primer_valor(
+                [agenda],
+                [
+                    "FechaEvento",
+                    "FechaAgenda",
+                    "Fecha",
+                ],
+                "",
+            )
+
+            informacion = _primer_valor(
+                [citacion, descargo],
+                [
+                    "RelatoHechos",
+                    "Informacion",
+                    "ManifestacionSupervisor",
+                ],
+                "",
+            )
+
+            observacion = _primer_valor(
+                [citacion, descargo, cierre, agenda],
+                [
+                    "ObservacionOperaciones",
+                    "Observacion",
+                    "Observaciones",
+                    "Conclusion",
+                    "ConclusionCierre",
+                ],
+                "",
+            )
+
+            modalidad = _primer_valor(
+                [citacion, agenda],
+                [
+                    "Modalidad",
+                ],
+                "",
+            )
+
+            verificacion = _primer_valor(
+                [citacion, cierre],
+                [
+                    "DesempenoContinua",
+                    "Verificacion",
+                    "NivelDesempeno",
+                ],
+                "",
+            )
+
+            filas_excel.append(
+                [
+                    cedula,
+                    colaborador,
+                    novedad,
+                    dias_ausencia,
+                    inicio_ausencia,
+                    fin_ausencia,
+                    medida,
+                    dias_suspension,
+                    inicio_suspension,
+                    fin_suspension,
+                    ultimo_dia_laborado,
+                    presentacion,
+                    sede,
+                    fecha_citacion,
+                    fecha_entrega_carta,
+                    fecha_agenda,
+                    informacion,
+                    observacion,
+                    estado_agenda,
+                    modalidad,
+                    verificacion,
+                ]
+            )
+
+        # =====================================================
+        # 4. CREAR EXCEL
+        # =====================================================
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Procesos Disciplinarios"
+
+        fill_header = PatternFill(
+            fill_type="solid",
+            start_color="D9EAD3",
+            end_color="D9EAD3",
+        )
+
+        fill_title = PatternFill(
+            fill_type="solid",
+            start_color="B6D7A8",
+            end_color="B6D7A8",
+        )
+
+        fill_metric = PatternFill(
+            fill_type="solid",
+            start_color="EAF4E2",
+            end_color="EAF4E2",
+        )
+
+        thin_side = Side(
+            style="thin",
+            color="B7B7B7",
+        )
+
+        border_tabla = Border(
+            left=thin_side,
+            right=thin_side,
+            top=thin_side,
+            bottom=thin_side,
+        )
+
+        def style_header_disciplinario(cell):
+            cell.font = Font(
+                bold=True,
+                color="1F1F1F",
+            )
+            cell.fill = fill_header
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+            cell.border = border_tabla
+
+        # =====================================================
+        # 5. TÍTULO Y PERIODO
+        # =====================================================
+
+        ws.merge_cells("A1:U1")
+        ws["A1"] = (
+            "REPORTE RRLL - PROCESOS DISCIPLINARIOS"
+        )
+        ws["A1"].font = Font(
+            bold=True,
+            size=14,
+        )
+        ws["A1"].fill = fill_title
+        ws["A1"].alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+
+        ws["A2"] = "Fecha inicio"
+        ws["B2"] = fecha_inicio
+        ws["A3"] = "Fecha fin"
+        ws["B3"] = fecha_fin
+
+        ws["A2"].font = Font(bold=True)
+        ws["A3"].font = Font(bold=True)
+
+        # =====================================================
+        # 6. ENCABEZADOS SOLICITADOS
+        # =====================================================
+
+        headers = [
+            "CÉDULA",
+            "COLABORADOR",
+            "NOVEDAD",
+            "DÍAS DE AUSENCIA",
+            "INICIO AUSENCIA",
+            "FIN AUSENCIA",
+            "MEDIDA",
+            "DÍAS DE SUSPENSIÓN",
+            "DÍA INICIO SUSPENSIÓN",
+            "DÍA FIN SUSPENSIÓN",
+            "ÚLTIMO DÍA LABORADO",
+            "PRESENTACIÓN",
+            "SEDE",
+            "FECHA CITACIÓN",
+            "FECHA ENTREGA CARTA",
+            "FECHA AGENDA",
+            "INFORMACIÓN",
+            "OBSERVACIÓN",
+            "AGENDADOS",
+            "MODALIDAD",
+            "VERIFICACIÓN",
+        ]
+
+        header_row = 5
+
+        for col_num, header in enumerate(
+            headers,
+            start=1,
+        ):
+            cell = ws.cell(
+                row=header_row,
+                column=col_num,
+                value=header,
+            )
+            style_header_disciplinario(cell)
+
+        ws.row_dimensions[header_row].height = 42
+
+        # =====================================================
+        # 7. DATOS
+        # =====================================================
+
+        for fila in filas_excel:
+            ws.append(fila)
+
+        fila_datos_inicio = header_row + 1
+        fila_datos_fin = (
+            header_row + len(filas_excel)
+        )
+
+        for row_num in range(
+            fila_datos_inicio,
+            fila_datos_fin + 1,
+        ):
+            for col_num in range(
+                1,
+                len(headers) + 1,
+            ):
+                cell = ws.cell(
+                    row=row_num,
+                    column=col_num,
+                )
+                cell.border = border_tabla
+                cell.alignment = Alignment(
+                    vertical="center",
+                    wrap_text=True,
+                )
+
+            # Fechas con formato colombiano
+            for col_num in [
+                5,   # Inicio ausencia
+                6,   # Fin ausencia
+                9,   # Inicio suspensión
+                10,  # Fin suspensión
+                11,  # Último día laborado
+                14,  # Fecha citación
+                15,  # Fecha entrega carta
+                16,  # Fecha agenda
+            ]:
+                cell = ws.cell(
+                    row=row_num,
+                    column=col_num,
+                )
+                fecha = _convertir_a_fecha(
+                    cell.value
+                )
+                if fecha:
+                    cell.value = fecha
+                    cell.number_format = "DD/MM/YYYY"
+
+            ws.row_dimensions[row_num].height = 34
+
+        # =====================================================
+        # 8. FILTROS Y PANELES
+        # =====================================================
+
+        ultima_fila_filtro = max(
+            fila_datos_fin,
+            header_row,
+        )
+
+        ws.auto_filter.ref = (
+            f"A{header_row}:U{ultima_fila_filtro}"
+        )
+
+        ws.freeze_panes = "A6"
+
+        # =====================================================
+        # 9. ANCHOS
+        # =====================================================
+
+        anchos = {
+            "A": 18,
+            "B": 34,
+            "C": 32,
+            "D": 18,
+            "E": 18,
+            "F": 18,
+            "G": 28,
+            "H": 20,
+            "I": 22,
+            "J": 22,
+            "K": 22,
+            "L": 18,
+            "M": 34,
+            "N": 19,
+            "O": 22,
+            "P": 19,
+            "Q": 45,
+            "R": 45,
+            "S": 20,
+            "T": 18,
+            "U": 22,
+        }
+
+        for col, ancho in anchos.items():
+            ws.column_dimensions[col].width = ancho
+
+        # =====================================================
+        # 10. HOJA RESUMEN
+        # =====================================================
+
+        ws_resumen = wb.create_sheet(
+            title="Resumen"
+        )
+
+        ws_resumen.merge_cells("A1:F1")
+        ws_resumen["A1"] = (
+            "RESUMEN - PROCESOS DISCIPLINARIOS"
+        )
+        ws_resumen["A1"].font = Font(
+            bold=True,
+            size=14,
+        )
+        ws_resumen["A1"].fill = fill_title
+        ws_resumen["A1"].alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+
+        ws_resumen["A2"] = (
+            f"Periodo analizado: "
+            f"{fecha_inicio} a {fecha_fin}"
+        )
+        ws_resumen["A2"].font = Font(
+            italic=True,
+            size=10,
+        )
+
+        modalidades_counter = Counter(
+            str(fila[19] or "SIN MODALIDAD").strip()
+            for fila in filas_excel
+        )
+
+        medidas_counter = Counter(
+            str(fila[6] or "SIN MEDIDA").strip()
+            for fila in filas_excel
+        )
+
+        estados_agenda_counter = Counter(
+            str(fila[18] or "SIN ESTADO").strip()
+            for fila in filas_excel
+        )
+
+        metricas = [
+            (
+                "Total expedientes",
+                len(filas_excel),
+            ),
+            (
+                "Presenciales",
+                modalidades_counter.get(
+                    "PRESENCIAL",
+                    0,
+                ),
+            ),
+            (
+                "Virtuales",
+                modalidades_counter.get(
+                    "VIRTUAL",
+                    0,
+                ),
+            ),
+            (
+                "Atendidos",
+                estados_agenda_counter.get(
+                    "ATENDIDO",
+                    0,
+                ),
+            ),
+            (
+                "Con medida registrada",
+                sum(
+                    cantidad
+                    for medida, cantidad
+                    in medidas_counter.items()
+                    if medida != "SIN MEDIDA"
+                ),
+            ),
+        ]
+
+        ws_resumen["A4"] = "INDICADOR"
+        ws_resumen["B4"] = "VALOR"
+
+        for cell in [
+            ws_resumen["A4"],
+            ws_resumen["B4"],
+        ]:
+            style_header_disciplinario(cell)
+
+        fila_metrica = 5
+
+        for etiqueta, valor in metricas:
+            ws_resumen[
+                f"A{fila_metrica}"
+            ] = etiqueta
+            ws_resumen[
+                f"B{fila_metrica}"
+            ] = valor
+
+            ws_resumen[
+                f"A{fila_metrica}"
+            ].fill = fill_metric
+
+            ws_resumen[
+                f"A{fila_metrica}"
+            ].font = Font(bold=True)
+
+            ws_resumen[
+                f"A{fila_metrica}"
+            ].border = border_tabla
+
+            ws_resumen[
+                f"B{fila_metrica}"
+            ].border = border_tabla
+
+            fila_metrica += 1
+
+        ws_resumen.column_dimensions["A"].width = 36
+        ws_resumen.column_dimensions["B"].width = 18
+
+        # =====================================================
+        # 11. GENERAR ARCHIVO
+        # =====================================================
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        nombre_archivo = (
+            "reporte_procesos_disciplinarios_"
+            f"{fecha_inicio}_a_{fecha_fin}.xlsx"
+        )
+
+        return StreamingResponse(
+            output,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{nombre_archivo}"'
+                )
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except (
+        SQLAlchemyError,
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Error al generar el Excel de procesos "
+                f"disciplinarios: {error!s}"
+            ),
+        ) from error
