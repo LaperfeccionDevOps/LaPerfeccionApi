@@ -107,6 +107,12 @@ from api.routers.perfil_aspirante_routers import router as perfil_aspirante_rout
 from api.routers.proceso_disciplinario_router import (
     router as proceso_disciplinario_router,
 )
+from api.routers.indicadores_proceso_disciplinario_router import (
+    router as indicadores_proceso_disciplinario_router,
+)
+from api.routers.gestion_mensual_indicadores_routers import (
+    router as gestion_mensual_indicadores_router,
+)
 from api.routers.rechazo_contratacion_routers import (
     router as rechazo_contratacion_router,
 )
@@ -237,6 +243,8 @@ app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
 app.include_router(documentos_activos_routers.router)
 app.include_router(proceso_disciplinario_router)
+app.include_router(indicadores_proceso_disciplinario_router)
+app.include_router(gestion_mensual_indicadores_router)
 app.include_router(citacion_proceso_disciplinario_router)
 app.include_router(descargo_proceso_disciplinario_router)
 app.include_router(documento_proceso_disciplinario_router)
