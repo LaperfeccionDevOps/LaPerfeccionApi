@@ -50,6 +50,9 @@ from services.correo_proceso_disciplinario_service import (
 from services.expediente_disciplinario_pdf_service import (
     generar_expediente_disciplinario_pdf,
 )
+from services.carta_citacion_descargos_pdf_service import (
+    generar_carta_citacion_descargos_pdf,
+)
 
 
 router = APIRouter(
@@ -180,6 +183,7 @@ def validar_citacion_completa_para_envio(
         "MotivoCitacion": citacion.MotivoCitacion,
         "RelatoHechos": citacion.RelatoHechos,
         "SupervisorReporta": citacion.SupervisorReporta,
+        "CorreoSupervisorReporta": citacion.CorreoSupervisorReporta,
         "Cliente": citacion.Cliente,
     }
 
@@ -204,6 +208,26 @@ def validar_citacion_completa_para_envio(
                     "incompleta y no puede enviarse a RRLL."
                 ),
                 "camposFaltantes": faltantes,
+            },
+        )
+
+    correo_supervisor = str(
+        citacion.CorreoSupervisorReporta or ""
+    ).strip()
+
+    if (
+        "@" not in correo_supervisor
+        or "." not in correo_supervisor.split("@")[-1]
+        or " " in correo_supervisor
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "El correo del supervisor que reporta "
+                    "no tiene un formato válido."
+                ),
+                "campo": "CorreoSupervisorReporta",
             },
         )
 
@@ -456,11 +480,10 @@ def validar_maximo_procesos_abiertos(
                     "DISCIPLINARIOS_ABIERTOS"
                 ),
                 "mensaje": (
-                    "El trabajador ya tiene el máximo "
-                    "permitido de 2 procesos disciplinarios "
-                    "abiertos. Para registrar uno nuevo, "
-                    "primero debe finalizar o cerrar uno "
-                    "de los procesos existentes."
+                    "Este trabajador ya cuenta con 2 procesos "
+                    "disciplinarios abiertos. No es posible iniciar "
+                    "un nuevo proceso hasta que uno de los procesos "
+                    "actuales sea finalizado o cerrado."
                 ),
                 "IdRegistroPersonal": (
                     id_registro_personal
@@ -484,7 +507,9 @@ def validar_maximo_procesos_abiertos(
                             proceso.OrigenProceso
                         ),
                         "FechaCreacion": (
-                            proceso.FechaCreacion
+                            proceso.FechaCreacion.isoformat()
+                            if proceso.FechaCreacion
+                            else None
                         ),
                     }
                     for proceso in procesos_abiertos
@@ -1573,6 +1598,41 @@ def generar_pdf_expediente_disciplinario(
             "Content-Disposition": (
                 f'inline; filename="'
                 f'expediente_disciplinario_'
+                f'{codigo_expediente}.pdf"'
+            )
+        },
+    )
+
+
+@router.get(
+    "/{id_proceso}/carta-citacion"
+)
+def generar_carta_citacion_descargos(
+    id_proceso: int,
+    db: Session = Depends(get_db),
+):
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=id_proceso,
+    )
+
+    codigo_expediente = formatear_codigo_expediente(
+        id_proceso=proceso.IdProcesoDisciplinario,
+        fecha_creacion=proceso.FechaCreacion,
+    )
+
+    buffer_pdf = generar_carta_citacion_descargos_pdf(
+        db=db,
+        id_proceso=id_proceso,
+    )
+
+    return StreamingResponse(
+        buffer_pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'inline; filename="'
+                f'carta_citacion_descargos_'
                 f'{codigo_expediente}.pdf"'
             )
         },

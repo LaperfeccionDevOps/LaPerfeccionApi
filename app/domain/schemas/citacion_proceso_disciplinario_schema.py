@@ -33,6 +33,8 @@ class CitacionProcesoDisciplinarioBase(
 
     SupervisorReporta: str | None = None
 
+    CorreoSupervisorReporta: str | None = None
+
     TelefonoTrabajador: str | None = None
 
     ManifestacionSupervisor: str | None = None
@@ -73,6 +75,8 @@ class CitacionProcesoDisciplinarioUpdate(
     JustificacionDesempeno: str | None = None
 
     SupervisorReporta: str | None = None
+
+    CorreoSupervisorReporta: str | None = None
 
     TelefonoTrabajador: str | None = None
 

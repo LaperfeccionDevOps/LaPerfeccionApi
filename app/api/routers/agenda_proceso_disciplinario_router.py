@@ -42,6 +42,7 @@ from domain.schemas.tipo_evento_disciplinario_schema import (
     TipoEventoDisciplinarioResponse,
 )
 from services.correo_proceso_disciplinario_service import (
+    TIPO_CANCELACION,
     TIPO_CITACION_INICIAL,
     TIPO_REPROGRAMACION,
     enviar_notificacion_agenda_disciplinaria,
@@ -2085,6 +2086,18 @@ def cancelar_evento_agenda(
 
         db.commit()
         db.refresh(evento)
+
+        intentar_enviar_notificacion_agenda(
+            db=db,
+            id_agenda=(
+                evento.IdAgendaProcesoDisciplinario
+            ),
+            tipo_notificacion=TIPO_CANCELACION,
+            usuario=(
+                data.UsuarioMovimiento
+                or "rrll_cancelacion"
+            ),
+        )
 
         return evento
 
