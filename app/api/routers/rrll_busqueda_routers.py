@@ -18,6 +18,7 @@ from infrastructure.db.deps import get_db
 ESTADO_GLOBAL_CONTRATADO = 25
 ESTADO_GLOBAL_ABIERTO = 30
 ESTADO_GLOBAL_ENVIADO_NOMINA = 32
+ESTADO_GLOBAL_DEVUELTO_NOMINA = 33
 
 # FUTURO: cuando exista el módulo Nómina, Nómina pondrá el estado final RETIRADO.
 # EJ: ESTADO_GLOBAL_RETIRADO = 34
@@ -104,7 +105,7 @@ class RetiroLaboralUpdate(BaseModel):
     Activo: Optional[bool] = None
     UsuarioActualizacion: Optional[str] = None
 
-    # ✅ Estado del caso RRLL (ABIERTO | ENVIADO_NOMINA | CERRADO)
+    # Estado del caso RRLL (ABIERTO | ENVIADO_NOMINA | DEVUELTO_NOMINA | CERRADO)
     EstadoCasoRRLL: Optional[str] = None
 
 
@@ -185,8 +186,22 @@ def _actualizar_estado_global_trabajador(db: Session, id_registro_personal: int,
 
 def _validar_estado_caso(valor: str) -> str:
     v = (valor or "").strip().upper()
-    if v not in ("ABIERTO", "ENVIADO_NOMINA", "CERRADO"):
-        raise HTTPException(status_code=400, detail="EstadoCasoRRLL inválido. Usa ABIERTO, ENVIADO_NOMINA o CERRADO.")
+    estados_validos = (
+        "ABIERTO",
+        "ENVIADO_NOMINA",
+        "DEVUELTO_NOMINA",
+        "CERRADO",
+    )
+
+    if v not in estados_validos:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "EstadoCasoRRLL inválido. Usa ABIERTO, ENVIADO_NOMINA, "
+                "DEVUELTO_NOMINA o CERRADO."
+            ),
+        )
+
     return v
 
 
@@ -620,7 +635,7 @@ def validar_retiro_activo(
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'CERRADO')
+          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'DEVUELTO_NOMINA', 'CERRADO')
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)
@@ -993,7 +1008,7 @@ def actualizar_retiro_laboral(
         if fecha_cierre_forzada is None:
             fecha_cierre_forzada = _ahora_colombia()
 
-    elif nuevo_estado_caso == "ABIERTO":
+    elif nuevo_estado_caso in ("ABIERTO", "DEVUELTO_NOMINA"):
         activo_forzado = True
 
     if activo_forzado is True:
@@ -1027,6 +1042,13 @@ def actualizar_retiro_laboral(
                 db,
                 current["IdRegistroPersonal"],
                 ESTADO_GLOBAL_ABIERTO
+            )
+
+        elif nuevo_estado_caso == "DEVUELTO_NOMINA":
+            _actualizar_estado_global_trabajador(
+                db,
+                current["IdRegistroPersonal"],
+                ESTADO_GLOBAL_DEVUELTO_NOMINA
             )
 
         elif nuevo_estado_caso == "ENVIADO_NOMINA":

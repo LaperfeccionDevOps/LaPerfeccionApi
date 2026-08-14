@@ -178,7 +178,7 @@ def dashboard_indicadores_rrll(
 
     Reglas:
     - No se excluyen registros por Activo=false.
-    - ABIERTO, ENVIADO_NOMINA y CERRADO se muestran separados.
+    - ABIERTO, DEVUELTO_NOMINA, ENVIADO_NOMINA y CERRADO se muestran separados.
     - FechaCierre representa el momento en que RRLL termina su gestión y entrega
       el proceso a Nómina.
     - Los porcentajes se calculan sobre el total real del filtro.
@@ -204,6 +204,13 @@ def dashboard_indicadores_rrll(
         else:
             fecha_referencia = """
                 CASE
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) =
+                         'DEVUELTO_NOMINA'
+                        THEN COALESCE(
+                            rl."FechaObservacionNomina",
+                            rl."FechaActualizacion",
+                            rl."FechaCreacion"
+                        )
                     WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN
                          ('ENVIADO_NOMINA', 'CERRADO')
                         THEN COALESCE(
@@ -264,6 +271,8 @@ def dashboard_indicadores_rrll(
                     rl."FechaProceso",
                     rl."FechaRetiro",
                     rl."FechaCierre",
+                    rl."FechaObservacionNomina",
+                    rl."ObservacionNomina",
                     rl."FechaCreacion",
                     rl."FechaActualizacion",
                     ({fecha_referencia}) AS fecha_referencia,
@@ -325,7 +334,7 @@ def dashboard_indicadores_rrll(
                 COUNT(*)::int AS total_retiros,
 
                 COUNT(*) FILTER (
-                    WHERE estado = 'ABIERTO'
+                    WHERE estado IN ('ABIERTO', 'DEVUELTO_NOMINA')
                 )::int AS en_gestion_rrll,
 
                 COUNT(*) FILTER (
@@ -722,6 +731,63 @@ def dashboard_indicadores_rrll(
             detail=f"Error consultando indicadores RRLL: {str(e)}"
         )
 
+@router.get("/devueltos-nomina")
+def listar_retiros_devueltos_nomina(db: Session = Depends(get_db)):
+    """
+    Lista únicamente los retiros que Nómina devolvió a Relaciones Laborales
+    y que aún están pendientes de corrección y reenvío.
+
+    La devolución se identifica por EstadoCasoRRLL = DEVUELTO_NOMINA.
+    El motivo y la fecha se toman de los campos de observación de Nómina.
+    """
+    try:
+        query = text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rp."NumeroIdentificacion",
+                rp."Nombres",
+                rp."Apellidos",
+                CONCAT_WS(
+                    ' ',
+                    NULLIF(TRIM(COALESCE(rp."Nombres", '')), ''),
+                    NULLIF(TRIM(COALESCE(rp."Apellidos", '')), '')
+                ) AS "NombreCompleto",
+                rl."ObservacionNomina" AS "MotivoDevolucion",
+                rl."ObservacionNomina",
+                rl."FechaObservacionNomina" AS "FechaDevolucionNomina",
+                rl."FechaObservacionNomina",
+                rl."EstadoCasoRRLL",
+                rp."IdEstadoProceso"
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            WHERE UPPER(
+                TRIM(
+                    COALESCE(rl."EstadoCasoRRLL", '')
+                )
+            ) = 'DEVUELTO_NOMINA'
+            ORDER BY
+                rl."FechaObservacionNomina" DESC NULLS LAST,
+                rl."FechaActualizacion" DESC NULLS LAST,
+                rl."IdRetiroLaboral" DESC;
+        """)
+
+        rows = db.execute(query).mappings().all()
+
+        return {
+            "success": True,
+            "message": "Retiros devueltos por Nómina consultados correctamente.",
+            "data": [dict(row) for row in rows],
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar retiros devueltos por Nómina: {str(e)}",
+        )
+
+
 @router.get("/{id_retiro_laboral}")
 def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_db)):
     try:
@@ -740,6 +806,8 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
         rl."ObservacionGeneral",
         rl."IdTipificacionRetiro",
         rl."ObservacionRetiro",
+        rl."ObservacionNomina",
+        rl."FechaObservacionNomina",
         rl."DevolucionCarnet",
         rl."RetiroLegalizado",
         rl."EstadoCasoRRLL",
@@ -844,7 +912,7 @@ def actualizar_estado_retiro_laboral(
                         "FechaCierre" = :FechaCierre,
                         "FechaEnvioNomina" = :FechaEnvioNomina,
                         "Activo" = CASE
-                            WHEN :EstadoCasoRRLL = 'ABIERTO' THEN true
+                            WHEN :EstadoCasoRRLL IN ('ABIERTO', 'DEVUELTO_NOMINA') THEN true
                             WHEN :EstadoCasoRRLL IN ('ENVIADO_NOMINA', 'CERRADO') THEN false
                             ELSE "Activo"
                         END,

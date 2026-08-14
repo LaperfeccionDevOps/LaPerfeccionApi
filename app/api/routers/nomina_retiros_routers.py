@@ -1,8 +1,10 @@
+# ruff: noqa: B008, BLE001, RUF010
+
 import os
 from io import BytesIO
-from datetime import datetime, date
+from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
@@ -15,6 +17,8 @@ from infrastructure.db.deps import get_db
 
 router = APIRouter(prefix="/api/nomina-retiros", tags=["Nómina Retiros"])
 
+COLOMBIA_TZ = timezone(timedelta(hours=-5))
+
 
 class ObservacionNominaRequest(BaseModel):
     observacion_nomina: str | None = None
@@ -22,6 +26,10 @@ class ObservacionNominaRequest(BaseModel):
 
 class FinalizarRetiroNominaRequest(BaseModel):
     fecha_pago_liquidacion: date
+
+
+class DevolverRetiroNominaRequest(BaseModel):
+    motivo_devolucion: str
 
 
 FILTRO_NOMINA_SQL = """
@@ -125,7 +133,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
     ws.row_dimensions[1].height = 30
 
     ws.merge_cells("A2:F2")
-    ws["A2"] = f"Generado: {datetime.now().strftime('%d/%m/%Y %I:%M %p')}"
+    ws["A2"] = f"Generado: {datetime.now(COLOMBIA_TZ).strftime('%d/%m/%Y %I:%M %p')}"
     ws["A2"].font = Font(italic=True, size=10, color="6B7280")
     ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
 
@@ -360,7 +368,7 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al consultar retiros de nómina: {str(e)}"
+            detail=f"Error al consultar retiros de nómina: {e!s}"
         )
 
 @router.put("/{id_retiro_laboral}/observacion-nomina")
@@ -434,7 +442,7 @@ def guardar_observacion_nomina(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error guardando observación de nómina: {str(e)}"
+            detail=f"Error guardando observación de nómina: {e!s}"
         )
 
 
@@ -764,7 +772,7 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
             status_code=500,
             detail=(
                 "Error al consultar indicadores de nómina retiros: "
-                f"{str(e)}"
+                f"{e!s}"
             )
         )
 
@@ -805,7 +813,7 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
         wb.save(output)
         output.seek(0)
 
-        nombre_archivo = f"Reporte_Nomina_Retiros_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        nombre_archivo = f"Reporte_Nomina_Retiros_{datetime.now(COLOMBIA_TZ).strftime('%Y%m%d_%H%M%S')}.xlsx"
 
         headers = {
             "Content-Disposition": f'attachment; filename="{nombre_archivo}"'
@@ -820,7 +828,7 @@ def descargar_reporte_excel_nomina_retiros(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al generar reporte Excel de nómina retiros: {str(e)}"
+            detail=f"Error al generar reporte Excel de nómina retiros: {e!s}"
         )
 
 
@@ -980,15 +988,24 @@ def finalizar_retiro_nomina(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error al finalizar retiro desde nómina: {str(e)}"
+            detail=f"Error al finalizar retiro desde nómina: {e!s}"
         )
 
 @router.put("/{id_retiro_laboral}/devolver")
 def devolver_retiro_rrll(
     id_retiro_laboral: int,
-    db: Session = Depends(get_db)
+    payload: DevolverRetiroNominaRequest,
+    db: Session = Depends(get_db),
 ):
     try:
+        motivo_devolucion = (payload.motivo_devolucion or "").strip()
+
+        if not motivo_devolucion:
+            raise HTTPException(
+                status_code=400,
+                detail="Debe registrar el motivo de devolución antes de enviar el retiro a RRLL.",
+            )
+
         query_retiro = text("""
             SELECT
                 rl."IdRetiroLaboral",
@@ -1003,47 +1020,89 @@ def devolver_retiro_rrll(
 
         retiro = db.execute(
             query_retiro,
-            {"id_retiro_laboral": id_retiro_laboral}
+            {"id_retiro_laboral": id_retiro_laboral},
         ).mappings().first()
 
         if not retiro:
-            raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado.",
+            )
 
-        estado_caso = str(retiro["EstadoCasoRRLL"] or "").upper()
+        estado_caso = str(retiro["EstadoCasoRRLL"] or "").strip().upper()
 
-        if int(retiro["IdEstadoProceso"] or 0) != 32 and estado_caso != "ENVIADO_NOMINA":
+        if (
+            int(retiro["IdEstadoProceso"] or 0) != 32
+            and estado_caso != "ENVIADO_NOMINA"
+        ):
             raise HTTPException(
                 status_code=400,
-                detail="Solo se pueden devolver retiros enviados a nómina."
+                detail="Solo se pueden devolver retiros enviados a nómina.",
+            )
+
+        query_estado_devolucion = text("""
+            SELECT
+                "IdEstadoProceso",
+                "Nombre"
+            FROM public."EstadoProceso"
+            WHERE "IdEstadoProceso" = 33
+            LIMIT 1;
+        """)
+
+        estado_devolucion = (
+            db.execute(query_estado_devolucion)
+            .mappings()
+            .first()
+        )
+
+        if not estado_devolucion:
+            raise HTTPException(
+                status_code=400,
+                detail="No existe el estado Devolución con IdEstadoProceso 33.",
             )
 
         query_update_retiro = text("""
             UPDATE public."RetiroLaboral"
             SET
-                "EstadoCasoRRLL" = 'ABIERTO',
+                "EstadoCasoRRLL" = 'DEVUELTO_NOMINA',
                 "Activo" = true,
-                "FechaEnvioNomina" = NULL,
-                "FechaCierre" = NULL,
+                "ObservacionNomina" = :motivo_devolucion,
+                "UsuarioObservacionNomina" = 'nomina',
+                "FechaObservacionNomina" = NOW(),
                 "FechaActualizacion" = NOW(),
                 "UsuarioActualizacion" = 'nomina'
-            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral
+            RETURNING
+                "IdRetiroLaboral",
+                "IdRegistroPersonal",
+                "EstadoCasoRRLL",
+                "ObservacionNomina",
+                "FechaObservacionNomina";
         """)
+
+        retiro_actualizado = db.execute(
+            query_update_retiro,
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "motivo_devolucion": motivo_devolucion,
+            },
+        ).mappings().first()
 
         query_update_registro = text("""
             UPDATE public."RegistroPersonal"
             SET
-                "IdEstadoProceso" = 30
+                "IdEstadoProceso" = :id_estado_devolucion,
+                "FechaActualizacion" = NOW(),
+                "UsuarioActualizacion" = 'nomina'
             WHERE "IdRegistroPersonal" = :id_registro_personal;
         """)
 
         db.execute(
-            query_update_retiro,
-            {"id_retiro_laboral": id_retiro_laboral}
-        )
-
-        db.execute(
             query_update_registro,
-            {"id_registro_personal": retiro["IdRegistroPersonal"]}
+            {
+                "id_estado_devolucion": estado_devolucion["IdEstadoProceso"],
+                "id_registro_personal": retiro["IdRegistroPersonal"],
+            },
         )
 
         db.commit()
@@ -1052,10 +1111,13 @@ def devolver_retiro_rrll(
             "success": True,
             "message": "Retiro devuelto correctamente a Relaciones Laborales.",
             "data": {
-                "IdRetiroLaboral": id_retiro_laboral,
-                "IdRegistroPersonal": retiro["IdRegistroPersonal"],
-                "IdEstadoProceso": 30,
-                "EstadoProceso": "Abierto",
+                "IdRetiroLaboral": retiro_actualizado["IdRetiroLaboral"],
+                "IdRegistroPersonal": retiro_actualizado["IdRegistroPersonal"],
+                "IdEstadoProceso": estado_devolucion["IdEstadoProceso"],
+                "EstadoProceso": estado_devolucion["Nombre"] or "Devolución",
+                "EstadoCasoRRLL": retiro_actualizado["EstadoCasoRRLL"],
+                "MotivoDevolucion": retiro_actualizado["ObservacionNomina"],
+                "FechaDevolucion": retiro_actualizado["FechaObservacionNomina"],
             },
         }
 
@@ -1067,9 +1129,10 @@ def devolver_retiro_rrll(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error al devolver retiro a RRLL: {str(e)}"
+            detail=f"Error al devolver retiro a RRLL: {e!s}",
         )
-    
+
+
 @router.get("/{id_retiro_laboral}/adjuntos")
 def listar_adjuntos_nomina_retiro(
     id_retiro_laboral: int,
@@ -1157,7 +1220,7 @@ def listar_adjuntos_nomina_retiro(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error consultando adjuntos del retiro: {str(e)}"
+            detail=f"Error consultando adjuntos del retiro: {e!s}"
         )
 
 @router.post("/{id_retiro_laboral}/adjuntos")
@@ -1249,7 +1312,7 @@ async def subir_adjunto_nomina_retiro(
             raise HTTPException(status_code=400, detail="El archivo está vacío.")
 
         extension = os.path.splitext(file.filename or "")[1].lower() or ".pdf"
-        fecha_nombre = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fecha_nombre = datetime.now(COLOMBIA_TZ).strftime("%Y%m%d_%H%M%S")
 
         nombre_archivo = (
             f"retiro_{id_retiro_laboral}_tipo_{IdTipoDocumentoRetiro}_{fecha_nombre}{extension}"
@@ -1347,5 +1410,5 @@ async def subir_adjunto_nomina_retiro(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error al adjuntar documento de nómina: {str(e)}"
+            detail=f"Error al adjuntar documento de nómina: {e!s}"
         )
