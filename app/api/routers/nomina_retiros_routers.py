@@ -106,6 +106,19 @@ def _valor_fecha_excel(fecha):
     return fecha
 
 
+def _valor_fecha_hora_excel(fecha):
+    if not fecha:
+        return ""
+
+    if isinstance(fecha, datetime):
+        if fecha.tzinfo is not None:
+            fecha = fecha.astimezone(COLOMBIA_TZ).replace(tzinfo=None)
+
+        return fecha
+
+    return fecha
+
+
 def _nombre_completo(row):
     nombres = row.get("Nombres") or ""
     apellidos = row.get("Apellidos") or ""
@@ -125,14 +138,14 @@ def _configurar_hoja_detalle(ws, titulo, registros):
     thin = Side(style="thin", color=borde_color)
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells("A1:F1")
+    ws.merge_cells("A1:G1")
     ws["A1"] = titulo
     ws["A1"].font = Font(bold=True, size=16, color=verde)
     ws["A1"].fill = title_fill
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
 
-    ws.merge_cells("A2:F2")
+    ws.merge_cells("A2:G2")
     ws["A2"] = f"Generado: {datetime.now(COLOMBIA_TZ).strftime('%d/%m/%Y %I:%M %p')}"
     ws["A2"].font = Font(italic=True, size=10, color="6B7280")
     ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
@@ -141,6 +154,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
         "Identificación",
         "Nombre completo",
         "Fecha de retiro",
+        "Fecha envío RRLL a Nómina",
         "Fecha pago liquidación",
         "Cliente",
         "Estado",
@@ -172,6 +186,7 @@ def _configurar_hoja_detalle(ws, titulo, registros):
             registro.get("NumeroIdentificacion") or "",
             _nombre_completo(registro),
             _valor_fecha_excel(registro.get("FechaRetiro")),
+            _valor_fecha_hora_excel(registro.get("FechaCierre")),
             _valor_fecha_excel(registro.get("FechaPagoLiquidacion")),
             " ".join(
                 str(registro.get("NombreCliente") or "SIN CLIENTE")
@@ -191,10 +206,13 @@ def _configurar_hoja_detalle(ws, titulo, registros):
             if row_idx % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=gris_fila)
 
-            if col_idx in (3, 4) and valor:
+            if col_idx in (3, 5) and valor:
                 cell.number_format = "DD/MM/YYYY"
 
-            if col_idx == 6:
+            if col_idx == 4 and valor:
+                cell.number_format = "DD/MM/YYYY hh:mm AM/PM"
+
+            if col_idx == 7:
                 estado = str(valor).upper()
                 if "RETIRADO" in estado:
                     cell.fill = PatternFill("solid", fgColor="DCFCE7")
@@ -212,16 +230,17 @@ def _configurar_hoja_detalle(ws, titulo, registros):
         "A": 20,
         "B": 42,
         "C": 18,
-        "D": 24,
-        "E": 60,
-        "F": 24,
+        "D": 28,
+        "E": 24,
+        "F": 60,
+        "G": 24,
     }
 
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
 
     ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A4:F{max(4, len(registros) + 4)}"
+    ws.auto_filter.ref = f"A4:G{max(4, len(registros) + 4)}"
 
 
 @router.get("")
