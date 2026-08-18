@@ -8,6 +8,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from fastapi import HTTPException
+from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import letter
@@ -194,37 +195,126 @@ def _imagen_disponible(
     return ruta.is_file()
 
 
+def _preparar_logo_sin_fondo(
+    ruta: Path,
+    umbral_blanco: int = 238,
+) -> BytesIO:
+    """
+    Limpia únicamente la presentación del logo dentro del PDF.
+
+    - No modifica el archivo original.
+    - Elimina el rectángulo blanco/gris muy claro que rodea el logo.
+    - Recorta automáticamente el espacio sobrante.
+    - Conserva los colores verdes y grises reales del logotipo.
+    - Devuelve un PNG transparente en memoria.
+    """
+    with PILImage.open(ruta) as imagen_original:
+        imagen = imagen_original.convert("RGBA")
+
+        pixeles = imagen.load()
+        ancho, alto = imagen.size
+
+        for y in range(alto):
+            for x in range(ancho):
+                rojo, verde, azul, alfa = pixeles[x, y]
+
+                if (
+                    rojo >= umbral_blanco
+                    and verde >= umbral_blanco
+                    and azul >= umbral_blanco
+                ):
+                    pixeles[x, y] = (
+                        rojo,
+                        verde,
+                        azul,
+                        0,
+                    )
+
+        canal_alfa = imagen.getchannel("A")
+        caja = canal_alfa.getbbox()
+
+        if caja:
+            imagen = imagen.crop(caja)
+
+        buffer = BytesIO()
+        imagen.save(
+            buffer,
+            format="PNG",
+            optimize=True,
+        )
+        buffer.seek(0)
+
+        return buffer
+
+
 def _imagen_logo(
     ruta: Path,
-    ancho: float,
-    alto: float,
+    ancho_maximo: float,
+    alto_maximo: float,
+    limpiar_fondo: bool = False,
 ):
+    """
+    Carga un logo conservando siempre su proporción original.
+
+    Cuando limpiar_fondo=True, elimina en memoria el fondo blanco/gris
+    sobrante y recorta los márgenes antes de enviarlo a ReportLab.
+    """
     if not _imagen_disponible(ruta):
         logger.warning(
             "No se encontró recurso gráfico: %s",
             ruta,
         )
-        return Spacer(ancho, alto)
+        return Spacer(
+            ancho_maximo,
+            alto_maximo,
+        )
 
     try:
-        imagen = Image(
-            str(ruta),
-            width=ancho,
-            height=alto,
+        fuente_imagen = (
+            _preparar_logo_sin_fondo(ruta)
+            if limpiar_fondo
+            else str(ruta)
+        )
+
+        imagen = Image(fuente_imagen)
+
+        ancho_original = float(
+            imagen.imageWidth or 1
+        )
+        alto_original = float(
+            imagen.imageHeight or 1
+        )
+
+        escala = min(
+            ancho_maximo / ancho_original,
+            alto_maximo / alto_original,
+        )
+
+        imagen.drawWidth = (
+            ancho_original * escala
+        )
+        imagen.drawHeight = (
+            alto_original * escala
         )
         imagen.hAlign = "CENTER"
+
         return imagen
+
     except (
         OSError,
         TypeError,
         ValueError,
+        ZeroDivisionError,
     ) as error:
         logger.warning(
             "No se pudo cargar recurso gráfico %s: %s",
             ruta,
             error,
         )
-        return Spacer(ancho, alto)
+        return Spacer(
+            ancho_maximo,
+            alto_maximo,
+        )
 
 
 # ============================================================
@@ -355,8 +445,8 @@ def _crear_estilos():
             "PazSalvoTitulo",
             parent=estilos_base["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=10.5,
-            leading=11.5,
+            fontSize=11.0,
+            leading=12.0,
             alignment=TA_CENTER,
             textColor=colors.black,
             spaceBefore=0,
@@ -366,8 +456,8 @@ def _crear_estilos():
             "PazSalvoSeccion",
             parent=estilos_base["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=7.2,
-            leading=8.0,
+            fontSize=7.6,
+            leading=8.4,
             alignment=TA_CENTER,
             textColor=colors.black,
             spaceBefore=0,
@@ -377,8 +467,8 @@ def _crear_estilos():
             "PazSalvoEtiqueta",
             parent=estilos_base["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=6.6,
-            leading=7.3,
+            fontSize=7.0,
+            leading=7.7,
             alignment=TA_CENTER,
             textColor=colors.black,
             spaceBefore=0,
@@ -434,7 +524,7 @@ def _estilo_tabla(
     encabezado: bool = False,
 ) -> TableStyle:
     instrucciones = [
-        ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+        ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
@@ -459,45 +549,57 @@ def _crear_encabezado(
     solo_logos: bool = False,
 ):
     """
-    Encabezado corporativo compacto.
+    Encabezado corporativo del formato oficial.
 
-    Se usan únicamente:
-    - Logo Aseos La Perfección
-    - Logo ISSA
-    - Logo de certificaciones
+    Orden visual:
+    1. Aseos La Perfección
+    2. Certificaciones ICONTEC / IQNET
+    3. ISSA
 
-    No se incluye Mantener Ingeniería.
+    Los logos se muestran más grandes, juntos y conservando su proporción
+    original para acercarse al formato físico de referencia.
+
+    Importante:
+    - No se incluye Mantener Ingeniería.
     """
 
+    # Logo principal con mayor presencia, como en el formato original.
     logo_empresa = _imagen_logo(
         RUTA_LOGO_EMPRESA,
-        4.2 * cm,
-        1.35 * cm,
-    )
-    logo_issa = _imagen_logo(
-        RUTA_LOGO_ISSA,
-        1.35 * cm,
-        1.10 * cm,
-    )
-    logo_certificaciones = _imagen_logo(
-        RUTA_LOGO_CERTIFICACIONES,
-        2.45 * cm,
-        1.25 * cm,
+        5.85 * cm,
+        1.78 * cm,
+        limpiar_fondo=True,
     )
 
+    # El recurso de certificaciones contiene ICONTEC / IQNET.
+    logo_certificaciones = _imagen_logo(
+        RUTA_LOGO_CERTIFICACIONES,
+        2.75 * cm,
+        1.48 * cm,
+    )
+
+    # ISSA se ubica inmediatamente después de las certificaciones.
+    logo_issa = _imagen_logo(
+        RUTA_LOGO_ISSA,
+        1.55 * cm,
+        1.30 * cm,
+    )
+
+    # Se deja el bloque compacto y alineado hacia la izquierda,
+    # tal como se aprecia en el formato original.
     logos = Table(
         [[
             logo_empresa,
-            logo_issa,
             logo_certificaciones,
+            logo_issa,
         ]],
         colWidths=[
-            5.5 * cm,
-            2.0 * cm,
-            3.0 * cm,
+            6.10 * cm,
+            2.80 * cm,
+            1.70 * cm,
         ],
-        rowHeights=[1.45 * cm],
-        hAlign="CENTER",
+        rowHeights=[1.86 * cm],
+        hAlign="LEFT",
     )
     logos.setStyle(
         TableStyle([
@@ -513,7 +615,7 @@ def _crear_encabezado(
     if solo_logos:
         return [
             logos,
-            Spacer(1, 0.08 * cm),
+            Spacer(1, 0.18 * cm),
         ]
 
     bloque_codigo = Table(
@@ -544,12 +646,12 @@ def _crear_encabezado(
     )
     bloque_codigo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 1),
             ("RIGHTPADDING", (0, 0), (-1, -1), 1),
-            ("TOPPADDING", (0, 0), (-1, -1), 1),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
         ])
     )
 
@@ -565,11 +667,11 @@ def _crear_encabezado(
             13.05 * cm,
             3.45 * cm,
         ],
-        rowHeights=[1.75 * cm],
+        rowHeights=[1.90 * cm],
     )
     titulo_codigo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -598,22 +700,24 @@ def _crear_encabezado(
     )
     objetivo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 2),
             ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-            ("TOPPADDING", (0, 0), (-1, -1), 1),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
         ])
     )
 
     return [
         logos,
-        Spacer(1, 0.08 * cm),
+        Spacer(1, 0.06 * cm),
         titulo_codigo,
         objetivo,
-        Spacer(1, 0.28 * cm),
+        Spacer(1, 0.30 * cm),
     ]
+
+
 
 def _tabla_datos_realizacion(
     datos,
@@ -675,7 +779,18 @@ def _tabla_datos_realizacion(
             8.25 * cm,
         ],
     )
-    tabla.setStyle(_estilo_tabla())
+    tabla.setStyle(
+        TableStyle([
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.4),
+        ])
+    )
     return tabla
 
 
@@ -740,12 +855,14 @@ def _tabla_datos_colaborador(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 4.4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4.4),
         ])
     )
     return tabla
@@ -795,12 +912,14 @@ def _tabla_datos_paz_salvo(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 4.4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4.4),
         ])
     )
     return tabla
@@ -920,13 +1039,15 @@ def _tabla_entrega_elementos(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
             ("SPAN", (0, -1), (1, -1)),
-            ("GRID", (0, 0), (-1, -2), 0.7, colors.black),
-            ("BOX", (0, -1), (1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -2), 1.0, colors.black),
+            ("BOX", (0, -1), (1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 4.0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4.0),
         ])
     )
     return tabla
@@ -1016,12 +1137,14 @@ def _tabla_uniformes_alp_vacunas(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 0.7, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 4.6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4.6),
         ])
     )
     return tabla
@@ -1037,7 +1160,7 @@ def _bloque_firma(
     )
 
     return KeepTogether([
-        Spacer(1, 0.55 * cm),
+        Spacer(1, 1.35 * cm),
         Table(
             [
                 [
@@ -1070,6 +1193,12 @@ def _bloque_firma(
                 8.5 * cm,
                 8.5 * cm,
             ],
+            style=TableStyle([
+                ("TOPPADDING", (0, 0), (-1, -1), 2.0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.0),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]),
         ),
     ])
 
@@ -1202,7 +1331,7 @@ def generar_paz_salvo_operaciones_pdf(
     )
 
     elementos.append(
-        Spacer(1, 0.24 * cm)
+        Spacer(1, 0.32 * cm)
     )
 
     elementos.append(
@@ -1213,7 +1342,7 @@ def generar_paz_salvo_operaciones_pdf(
     )
 
     elementos.append(
-        Spacer(1, 0.24 * cm)
+        Spacer(1, 0.32 * cm)
     )
 
     elementos.append(
@@ -1224,7 +1353,7 @@ def generar_paz_salvo_operaciones_pdf(
     )
 
     elementos.append(
-        Spacer(1, 0.24 * cm)
+        Spacer(1, 0.32 * cm)
     )
 
     elementos.append(
