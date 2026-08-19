@@ -130,10 +130,6 @@ def obtener_cierre_o_error(
 def validar_cierre_completo(
     cierre: CierreProcesoDisciplinario,
 ) -> None:
-    tipo = str(
-        cierre.TipoCierre or ""
-    ).strip().upper()
-
     conclusion = str(
         cierre.ConclusionRRLL or ""
     ).strip()
@@ -142,20 +138,7 @@ def validar_cierre_completo(
         cierre.ResponsableCierre or ""
     ).strip()
 
-    medida = str(
-        cierre.MedidaDisciplinaria or ""
-    ).strip()
-
     errores = []
-
-    if tipo not in {
-        "CON_MEDIDA_DISCIPLINARIA",
-        "SIN_MEDIDA_DISCIPLINARIA",
-        "ARCHIVO_DEL_PROCESO",
-    }:
-        errores.append(
-            "Debe seleccionar un tipo de cierre."
-        )
 
     if not cierre.FechaCierre:
         errores.append(
@@ -172,15 +155,6 @@ def validar_cierre_completo(
         errores.append(
             "La conclusión de Relaciones "
             "Laborales es obligatoria."
-        )
-
-    if (
-        tipo == "CON_MEDIDA_DISCIPLINARIA"
-        and not medida
-    ):
-        errores.append(
-            "Debe registrar la medida "
-            "disciplinaria."
         )
 
     if errores:
@@ -474,21 +448,6 @@ def finalizar_cierre(
         ).strip()
         or "rrll"
     )
-
-    if (
-        cierre.TipoCierre
-        in {
-            "SIN_MEDIDA_DISCIPLINARIA",
-            "ARCHIVO_DEL_PROCESO",
-        }
-        and not str(
-            cierre.MedidaDisciplinaria
-            or ""
-        ).strip()
-    ):
-        cierre.MedidaDisciplinaria = (
-            "Sin medida disciplinaria"
-        )
 
     cierre.FechaActualizacion = (
         ahora_colombia()

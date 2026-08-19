@@ -54,6 +54,10 @@ from services.carta_citacion_descargos_pdf_service import (
     generar_carta_citacion_descargos_pdf,
 )
 
+from api.routers.documento_proceso_disciplinario_router import (
+    registrar_o_actualizar_evidencias_operaciones_carpeta_digital,
+)
+
 
 router = APIRouter(
     prefix="/api/procesos-disciplinarios",
@@ -147,6 +151,147 @@ def formatear_codigo_expediente(
     )
 
     return f"PD-{anio}-{int(id_proceso):06d}"
+
+
+def registrar_o_actualizar_citacion_carpeta_digital(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+    contenido_pdf: bytes,
+) -> int:
+    """
+    Registra la citación a diligencia de descargos en Carpeta Digital
+    dentro del tipo documental 82 (Procesos disciplinarios).
+
+    Es idempotente por trabajador y nombre controlado: si ya existe
+    el documento, actualiza su contenido en lugar de crear duplicados.
+
+    No ejecuta commit. El commit se realiza desde el endpoint que
+    genera la carta.
+    """
+
+    id_tipo_documentacion = 82
+
+    codigo_expediente = formatear_codigo_expediente(
+        id_proceso=proceso.IdProcesoDisciplinario,
+        fecha_creacion=proceso.FechaCreacion,
+    )
+
+    nombre_archivo = (
+        "01 - Citación a diligencia de descargos - "
+        f"{codigo_expediente}.pdf"
+    )
+
+    formato = "application/pdf"
+
+    existente = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    d."IdDocumento"
+                FROM public."Documentos" d
+                INNER JOIN public."RelacionTipoDocumentacion" rtd
+                    ON rtd."IdDocumento" = d."IdDocumento"
+                WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                  AND d."IdTipoDocumentacion" = :id_tipo_documentacion
+                  AND d."Nombre" = :nombre_archivo
+                ORDER BY d."IdDocumento" DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "id_registro_personal": proceso.IdRegistroPersonal,
+                "id_tipo_documentacion": id_tipo_documentacion,
+                "nombre_archivo": nombre_archivo,
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if existente:
+        db.execute(
+            text(
+                """
+                UPDATE public."Documentos"
+                SET
+                    "DocumentoCargado" = :documento_cargado,
+                    "FechaActualizacion" = NOW(),
+                    "Formato" = :formato
+                WHERE "IdDocumento" = :id_documento
+                """
+            ),
+            {
+                "documento_cargado": contenido_pdf,
+                "formato": formato,
+                "id_documento": int(existente["IdDocumento"]),
+            },
+        )
+
+        return int(existente["IdDocumento"])
+
+    documento = (
+        db.execute(
+            text(
+                """
+                INSERT INTO public."Documentos" (
+                    "IdTipoDocumentacion",
+                    "DocumentoCargado",
+                    "FechaCreacion",
+                    "FechaActualizacion",
+                    "Formato",
+                    "Nombre"
+                )
+                VALUES (
+                    :id_tipo_documentacion,
+                    :documento_cargado,
+                    NOW(),
+                    NOW(),
+                    :formato,
+                    :nombre_archivo
+                )
+                RETURNING "IdDocumento"
+                """
+            ),
+            {
+                "id_tipo_documentacion": id_tipo_documentacion,
+                "documento_cargado": contenido_pdf,
+                "formato": formato,
+                "nombre_archivo": nombre_archivo,
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if not documento:
+        raise RuntimeError(
+            "No fue posible registrar la citación "
+            "en la Carpeta Digital."
+        )
+
+    id_documento = int(documento["IdDocumento"])
+
+    db.execute(
+        text(
+            """
+            INSERT INTO public."RelacionTipoDocumentacion" (
+                "IdRegistroPersonal",
+                "IdDocumento"
+            )
+            VALUES (
+                :id_registro_personal,
+                :id_documento
+            )
+            """
+        ),
+        {
+            "id_registro_personal": proceso.IdRegistroPersonal,
+            "id_documento": id_documento,
+        },
+    )
+
+    return id_documento
 
 
 def aplicar_filtro_visibilidad_rrll(
@@ -922,7 +1067,7 @@ def obtener_historial_disciplinario_trabajador(
                 .IdProcesoDisciplinario,
                 DocumentoProcesoDisciplinario
                 .TipoDocumento
-                != "EVIDENCIA_OPERACIONES",
+                == "DOCUMENTO_CIERRE_DISCIPLINARIO",
             )
             .order_by(
                 DocumentoProcesoDisciplinario
@@ -1426,40 +1571,99 @@ def enviar_proceso_a_rrll(
             },
         ) from error
 
-    if modalidad_citacion == "VIRTUAL":
-        resultado_notificacion = {
-            "enviado": False,
-            "estado": "PENDIENTE_ENLACE_RRLL",
-            "correo": None,
+    resultado_documento_citacion = {
+        "generado": False,
+        "guardadoCarpetaDigital": False,
+        "IdDocumentoCarpetaDigital": None,
+        "mensaje": None,
+    }
+
+    try:
+        buffer_citacion = generar_carta_citacion_descargos_pdf(
+            db=db,
+            id_proceso=id_proceso,
+        )
+
+        contenido_citacion = buffer_citacion.getvalue()
+
+        id_documento_carpeta = (
+            registrar_o_actualizar_citacion_carpeta_digital(
+                db=db,
+                proceso=proceso,
+                contenido_pdf=contenido_citacion,
+            )
+        )
+
+        db.commit()
+
+        resultado_documento_citacion = {
+            "generado": True,
+            "guardadoCarpetaDigital": True,
+            "IdDocumentoCarpetaDigital": id_documento_carpeta,
             "mensaje": (
-                "La citación es virtual. El correo al trabajador "
-                "se enviará cuando Relaciones Laborales registre "
-                "el enlace de la reunión."
+                "La citación fue generada y registrada "
+                "en la Carpeta Digital."
             ),
-            "IdNotificacionProcesoDisciplinario": None,
         }
 
-        mensaje_respuesta = (
-            "El proceso fue enviado a Relaciones Laborales y "
-            "quedó programado en la agenda. La citación virtual "
-            "está pendiente de que RRLL registre el enlace de la "
-            "reunión antes de notificar al trabajador."
+    except Exception as error:
+        db.rollback()
+
+        resultado_documento_citacion = {
+            "generado": False,
+            "guardadoCarpetaDigital": False,
+            "IdDocumentoCarpetaDigital": None,
+            "mensaje": str(error),
+        }
+
+    resultado_evidencias_operaciones = {
+        "generado": False,
+        "guardadoCarpetaDigital": False,
+        "IdDocumentoCarpetaDigital": None,
+        "cantidadEvidencias": 0,
+        "nombreArchivo": None,
+        "mensaje": None,
+    }
+
+    try:
+        resultado_evidencias_operaciones = (
+            registrar_o_actualizar_evidencias_operaciones_carpeta_digital(
+                db=db,
+                proceso=proceso,
+            )
         )
 
-    else:
-        resultado_notificacion = intentar_enviar_citacion_inicial(
-            db=db,
-            id_agenda=(
-                nuevo_evento.IdAgendaProcesoDisciplinario
+        db.commit()
+
+    except Exception as error:
+        db.rollback()
+
+        resultado_evidencias_operaciones = {
+            "generado": False,
+            "guardadoCarpetaDigital": False,
+            "IdDocumentoCarpetaDigital": None,
+            "cantidadEvidencias": 0,
+            "nombreArchivo": None,
+            "mensaje": (
+                "El proceso fue enviado a RRLL, pero no fue posible "
+                "consolidar las evidencias de Operaciones en la "
+                f"Carpeta Digital. Detalle: {error}"
             ),
-            usuario=usuario,
-        )
+        }
 
-        mensaje_respuesta = (
-            "El proceso fue enviado a Relaciones Laborales, "
-            "quedó programado en la agenda y se gestionó la "
-            "notificación inicial al trabajador."
-        )
+    resultado_notificacion = intentar_enviar_citacion_inicial(
+        db=db,
+        id_agenda=(
+            nuevo_evento.IdAgendaProcesoDisciplinario
+        ),
+        usuario=usuario,
+    )
+
+    mensaje_respuesta = (
+        "El proceso fue enviado a Relaciones Laborales, "
+        "quedó programado en la agenda y se gestionó la "
+        "notificación inicial al trabajador."
+    )
 
     return {
         "ok": True,
@@ -1474,13 +1678,155 @@ def enviar_proceso_a_rrll(
         "HoraInicio": nuevo_evento.HoraInicio,
         "HoraFin": nuevo_evento.HoraFin,
         "Modalidad": modalidad_citacion,
-        "PendienteEnlaceVirtual": (
-            modalidad_citacion == "VIRTUAL"
-        ),
+        "PendienteEnlaceVirtual": False,
         "EstadoAgenda": nuevo_evento.EstadoAgenda,
         "ColorAgenda": nuevo_evento.ColorAgenda,
+        "DocumentoCitacion": resultado_documento_citacion,
+        "DocumentoEvidenciasOperaciones": (
+            resultado_evidencias_operaciones
+        ),
         "NotificacionCorreo": resultado_notificacion,
         "mensaje": mensaje_respuesta,
+    }
+
+
+@router.get(
+    "/{id_proceso}/respuesta-operaciones"
+)
+def obtener_respuesta_rrll_para_operaciones(
+    id_proceso: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Devuelve únicamente la información de cierre que Operaciones
+    puede consultar como respuesta de Relaciones Laborales.
+
+    No expone citación, descargos, evidencias del trabajador,
+    evidencias de Operaciones, actas generadas ni otros documentos
+    internos del expediente disciplinario.
+    """
+
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=id_proceso,
+    )
+
+    estado_proceso = normalizar_texto(
+        proceso.EstadoProceso
+    )
+
+    if estado_proceso != "CERRADO":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "La respuesta de Relaciones Laborales "
+                    "solo está disponible cuando el proceso "
+                    "disciplinario se encuentra cerrado."
+                ),
+                "IdProcesoDisciplinario": (
+                    id_proceso
+                ),
+                "EstadoProceso": (
+                    proceso.EstadoProceso
+                ),
+            },
+        )
+
+    cierre = (
+        db.query(
+            CierreProcesoDisciplinario
+        )
+        .filter(
+            CierreProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso
+        )
+        .first()
+    )
+
+    if not cierre:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": (
+                    "El proceso está cerrado, pero no se encontró "
+                    "el registro de cierre disciplinario."
+                ),
+                "IdProcesoDisciplinario": (
+                    id_proceso
+                ),
+            },
+        )
+
+    documentos_cierre = (
+        db.query(
+            DocumentoProcesoDisciplinario
+        )
+        .filter(
+            DocumentoProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso,
+            DocumentoProcesoDisciplinario
+            .TipoDocumento
+            == "DOCUMENTO_CIERRE_DISCIPLINARIO",
+        )
+        .order_by(
+            DocumentoProcesoDisciplinario
+            .FechaCreacion
+            .asc()
+        )
+        .all()
+    )
+
+    return {
+        "Proceso": {
+            "IdProcesoDisciplinario": (
+                proceso.IdProcesoDisciplinario
+            ),
+            "IdRegistroPersonal": (
+                proceso.IdRegistroPersonal
+            ),
+            "EstadoProceso": (
+                proceso.EstadoProceso
+            ),
+            "OrigenProceso": (
+                proceso.OrigenProceso
+            ),
+            "FechaCreacion": (
+                proceso.FechaCreacion
+            ),
+            "FechaActualizacion": (
+                proceso.FechaActualizacion
+            ),
+        },
+        "Cierre": {
+            "IdCierreProcesoDisciplinario": (
+                cierre.IdCierreProcesoDisciplinario
+            ),
+            "FechaCierre": (
+                cierre.FechaCierre
+            ),
+            "ResponsableCierre": (
+                cierre.ResponsableCierre
+            ),
+            "ConclusionRRLL": (
+                cierre.ConclusionRRLL
+            ),
+        },
+        "Documentos": [
+            serializar_documento_expediente(
+                documento
+            )
+            for documento
+            in documentos_cierre
+        ],
+        "CantidadDocumentos": (
+            len(documentos_cierre)
+        ),
+        "RespuestaRRLLDisponible": (
+            len(documentos_cierre) > 0
+        ),
     }
 
 
@@ -1626,8 +1972,36 @@ def generar_carta_citacion_descargos(
         id_proceso=id_proceso,
     )
 
+    contenido_pdf = buffer_pdf.getvalue()
+
+    try:
+        registrar_o_actualizar_citacion_carpeta_digital(
+            db=db,
+            proceso=proceso,
+            contenido_pdf=contenido_pdf,
+        )
+
+        db.commit()
+
+    except (
+        SQLAlchemyError,
+        RuntimeError,
+    ) as error:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "La carta de citación fue generada, pero no fue "
+                    "posible registrarla en la Carpeta Digital."
+                ),
+                "IdProcesoDisciplinario": id_proceso,
+            },
+        ) from error
+
     return StreamingResponse(
-        buffer_pdf,
+        iter([contenido_pdf]),
         media_type="application/pdf",
         headers={
             "Content-Disposition": (

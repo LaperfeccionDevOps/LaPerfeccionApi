@@ -892,39 +892,13 @@ def generar_carta_citacion_descargos_pdf(
         )
     )
 
-    if not lugar:
-        mensaje_lugar = (
-            "La citación virtual no tiene enlace de reunión "
-            "registrado por Relaciones Laborales."
-            if modalidad == "VIRTUAL"
-            else (
-                "La citación presencial no tiene "
-                "lugar definido."
-            )
-        )
-
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "mensaje": mensaje_lugar,
-                "campo": "LugarCitacion",
-                "Modalidad": modalidad,
-            },
-        )
-
-    if (
-        modalidad == "VIRTUAL"
-        and not (
-            lugar.lower().startswith("https://")
-            or lugar.lower().startswith("http://")
-        )
-    ):
+    if modalidad == "PRESENCIAL" and not lugar:
         raise HTTPException(
             status_code=422,
             detail={
                 "mensaje": (
-                    "La citación virtual tiene un enlace "
-                    "de reunión inválido."
+                    "La citación presencial no tiene "
+                    "lugar definido."
                 ),
                 "campo": "LugarCitacion",
                 "Modalidad": modalidad,
@@ -1148,21 +1122,15 @@ def generar_carta_citacion_descargos_pdf(
     # ========================================================
 
     if modalidad == "VIRTUAL":
-        enlace_html = escape(
-            lugar
-        )
-
         parrafo_programacion = (
             "Por lo anterior, le solicitamos conectarse "
             "a la diligencia de descargos de manera "
             "<b>virtual</b>, "
             f"el día <b>{escape(fecha_citacion)}</b> "
-            f"a las <b>{escape(hora_citacion)}</b>, "
-            "a través del siguiente enlace de reunión: "
-            f'<link href="{enlace_html}" '
-            'color="#0B57D0">'
-            f"<u>{enlace_html}</u>"
-            "</link>. "
+            f"a las <b>{escape(hora_citacion)}</b>. "
+            "El enlace de conexión será suministrado por "
+            "Relaciones Laborales a través de WhatsApp interno "
+            "antes de la diligencia. "
             "La conexión deberá realizarse de manera puntual "
             "con el fin de rendir diligencia de descargos "
             "por los hechos descritos anteriormente; "

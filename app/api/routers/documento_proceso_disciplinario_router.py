@@ -5,6 +5,7 @@ import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -94,6 +95,7 @@ RUTA_FIRMA_YENY = (
 TIPOS_CARPETA_DIGITAL_RRLL = {
     "PROCESO_DISCIPLINARIO": 82,
     "PROCESOS_DISCIPLINARIOS": 82,
+    "DOCUMENTO_CIERRE_DISCIPLINARIO": 82,
     "AUSENTISMO": 83,
     "LLAMADO_ATENCION": 86,
     "LLAMADOS_ATENCION": 86,
@@ -173,6 +175,966 @@ def obtener_proceso_o_error(
         )
 
     return proceso
+
+
+
+def _nombre_expediente_evidencias(
+    proceso: ProcesoDisciplinario,
+) -> str:
+    """
+    Construye el código visible del expediente para el consolidado
+    de evidencias de Operaciones.
+    """
+
+    fecha_creacion = getattr(
+        proceso,
+        "FechaCreacion",
+        None,
+    )
+
+    anio = (
+        fecha_creacion.year
+        if fecha_creacion
+        else _fecha_generacion_colombia().year
+    )
+
+    return (
+        f"PD-{anio}-"
+        f"{int(proceso.IdProcesoDisciplinario):06d}"
+    )
+
+
+def _nombre_seguro_adjunto_pdf(
+    nombre_archivo: str,
+    indice: int,
+) -> str:
+    """
+    Limpia únicamente caracteres problemáticos para adjuntar el
+    archivo original dentro del PDF consolidado.
+    """
+
+    nombre = Path(
+        str(nombre_archivo or "")
+    ).name.strip()
+
+    if not nombre:
+        nombre = f"evidencia_{indice}"
+
+    return (
+        nombre
+        .replace("\x00", "")
+        .replace("\r", "")
+        .replace("\n", "")
+    )
+
+
+def _crear_pdf_portada_evidencia_operaciones(
+    indice: int,
+    total: int,
+    nombre_archivo: str,
+    formato: str,
+    expediente: str,
+    nota: str | None = None,
+    texto_adicional: str | None = None,
+) -> bytes:
+    """
+    Crea una portada/hoja descriptiva para cada evidencia.
+
+    Esta hoja permite que archivos que no pueden representarse
+    visualmente en PDF (por ejemplo Excel o audio) sigan quedando
+    identificados dentro del consolidado. El archivo original se
+    conserva en DocumentoProcesoDisciplinario.
+    """
+
+    buffer = io.BytesIO()
+
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=LETTER,
+        rightMargin=2.0 * cm,
+        leftMargin=2.0 * cm,
+        topMargin=3.55 * cm,
+        bottomMargin=1.8 * cm,
+        title="Evidencias de Operaciones",
+        author="Aseos La Perfección",
+    )
+
+    estilos_base = getSampleStyleSheet()
+
+    titulo = ParagraphStyle(
+        "EvidenciasOperacionesTitulo",
+        parent=estilos_base["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=0,
+    )
+
+    subtitulo = ParagraphStyle(
+        "EvidenciasOperacionesSubtitulo",
+        parent=estilos_base["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=15,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=0,
+    )
+
+    normal = ParagraphStyle(
+        "EvidenciasOperacionesNormal",
+        parent=estilos_base["Normal"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=14,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=0,
+    )
+
+    def escapar(valor) -> str:
+        return (
+            str(valor or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    contenido = [
+        Paragraph(
+            "EVIDENCIAS APORTADAS POR OPERACIONES",
+            titulo,
+        ),
+        Spacer(1, 0.45 * cm),
+        Paragraph(
+            f"Expediente: {escapar(expediente)}",
+            subtitulo,
+        ),
+        Spacer(1, 0.35 * cm),
+        Paragraph(
+            (
+                f"Evidencia {indice} de {total}: "
+                f"{escapar(nombre_archivo)}"
+            ),
+            subtitulo,
+        ),
+        Spacer(1, 0.20 * cm),
+        Paragraph(
+            (
+                "Tipo de archivo: "
+                f"{escapar(formato or 'No identificado')}"
+            ),
+            normal,
+        ),
+    ]
+
+    if nota:
+        contenido.extend(
+            [
+                Spacer(1, 0.30 * cm),
+                Paragraph(
+                    escapar(nota),
+                    normal,
+                ),
+            ]
+        )
+
+    if texto_adicional:
+        contenido.extend(
+            [
+                Spacer(1, 0.35 * cm),
+                Paragraph(
+                    "Contenido textual recuperado:",
+                    subtitulo,
+                ),
+                Spacer(1, 0.20 * cm),
+            ]
+        )
+
+        lineas = (
+            str(texto_adicional)
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .split("\n")
+        )
+
+        for linea in lineas:
+            if linea.strip():
+                contenido.append(
+                    Paragraph(
+                        escapar(linea.strip()),
+                        normal,
+                    )
+                )
+            else:
+                contenido.append(
+                    Spacer(1, 0.12 * cm)
+                )
+
+    documento.build(
+        contenido,
+        onFirstPage=_dibujar_encabezado_carta_descargos,
+        onLaterPages=_dibujar_encabezado_carta_descargos,
+    )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _convertir_imagen_a_pdf(
+    contenido_archivo: bytes,
+) -> bytes:
+    """
+    Convierte una imagen a PDF conservando su proporción.
+    """
+
+    with PILImage.open(
+        io.BytesIO(contenido_archivo)
+    ) as imagen_original:
+        imagen = imagen_original.convert("RGB")
+
+        buffer = io.BytesIO()
+
+        imagen.save(
+            buffer,
+            format="PDF",
+            resolution=150.0,
+        )
+
+        buffer.seek(0)
+        return buffer.getvalue()
+
+
+def _decodificar_archivo_texto(
+    contenido_archivo: bytes,
+) -> str:
+    """
+    Intenta recuperar texto plano sin romper el flujo cuando
+    la codificación del archivo es diferente.
+    """
+
+    for codificacion in (
+        "utf-8",
+        "utf-8-sig",
+        "latin-1",
+    ):
+        try:
+            return contenido_archivo.decode(
+                codificacion
+            )
+        except UnicodeDecodeError:
+            continue
+
+    return ""
+
+
+
+def _es_evidencia_visual_pdf_o_imagen(
+    nombre_archivo: str | None,
+    formato: str | None,
+) -> bool:
+    """
+    Retorna True cuando la evidencia puede incorporarse visualmente
+    al documento 03 principal sin alterar su contenido: PDF o imagen.
+    """
+
+    nombre = str(nombre_archivo or "").strip()
+    formato_normalizado = str(formato or "").strip().lower()
+    extension = Path(nombre).suffix.lower()
+
+    if (
+        extension == ".pdf"
+        or formato_normalizado == "application/pdf"
+    ):
+        return True
+
+    if (
+        extension
+        in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+        }
+        or formato_normalizado.startswith("image/")
+    ):
+        return True
+
+    return False
+
+
+def _extension_evidencia(
+    nombre_archivo: str | None,
+    formato: str | None,
+) -> str:
+    """
+    Conserva la extensión original cuando existe.
+    Si no existe, intenta inferirla desde el MIME type.
+    """
+
+    nombre = str(nombre_archivo or "").strip()
+    extension = Path(nombre).suffix.lower()
+
+    if extension:
+        return extension
+
+    formato_normalizado = str(formato or "").strip().lower()
+
+    extension_mime = mimetypes.guess_extension(
+        formato_normalizado
+    )
+
+    return extension_mime or ""
+
+
+def registrar_evidencias_no_visuales_operaciones_carpeta_digital(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+) -> dict:
+    """
+    Registra en Carpeta Digital las evidencias de Operaciones que no
+    se incorporan visualmente al PDF 03 principal.
+
+    Se nombran en suborden:
+    03.1, 03.2, 03.3...
+
+    Ejemplos:
+    03.1 - Evidencia de Operaciones - PD-2026-000056.xlsx
+    03.2 - Evidencia de Operaciones - PD-2026-000056.mp3
+
+    Es idempotente por trabajador + nombre controlado.
+    No ejecuta commit.
+    """
+
+    evidencias = obtener_evidencias_operaciones(
+        db=db,
+        id_proceso=proceso.IdProcesoDisciplinario,
+    )
+
+    expediente = _nombre_expediente_evidencias(
+        proceso
+    )
+
+    evidencias_no_visuales = []
+
+    for evidencia in evidencias:
+        nombre_evidencia = (
+            evidencia.NombreArchivo
+            or ""
+        )
+
+        contenido_archivo, formato = (
+            _obtener_contenido_documento(
+                db=db,
+                documento=evidencia,
+            )
+        )
+
+        if not contenido_archivo:
+            continue
+
+        if _es_evidencia_visual_pdf_o_imagen(
+            nombre_archivo=nombre_evidencia,
+            formato=formato,
+        ):
+            continue
+
+        evidencias_no_visuales.append(
+            {
+                "contenido": contenido_archivo,
+                "formato": (
+                    str(formato or "").strip()
+                    or "application/octet-stream"
+                ),
+                "extension": _extension_evidencia(
+                    nombre_archivo=nombre_evidencia,
+                    formato=formato,
+                ),
+            }
+        )
+
+    documentos = []
+
+    for indice, item in enumerate(
+        evidencias_no_visuales,
+        start=1,
+    ):
+        nombre_archivo = (
+            f"03.{indice} - Evidencia de Operaciones - "
+            f"{expediente}"
+            f"{item['extension']}"
+        )
+
+        existente = (
+            db.execute(
+                text(
+                    """
+                    SELECT
+                        d."IdDocumento"
+                    FROM public."Documentos" d
+                    INNER JOIN public."RelacionTipoDocumentacion" rtd
+                        ON rtd."IdDocumento" = d."IdDocumento"
+                    WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                      AND d."IdTipoDocumentacion" = 82
+                      AND d."Nombre" = :nombre_archivo
+                    ORDER BY d."IdDocumento" DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "id_registro_personal": (
+                        proceso.IdRegistroPersonal
+                    ),
+                    "nombre_archivo": nombre_archivo,
+                },
+            )
+            .mappings()
+            .first()
+        )
+
+        if existente:
+            id_documento = int(
+                existente["IdDocumento"]
+            )
+
+            db.execute(
+                text(
+                    """
+                    UPDATE public."Documentos"
+                    SET
+                        "DocumentoCargado" = :documento_cargado,
+                        "FechaActualizacion" = NOW(),
+                        "Formato" = :formato
+                    WHERE "IdDocumento" = :id_documento
+                    """
+                ),
+                {
+                    "documento_cargado": item["contenido"],
+                    "formato": item["formato"],
+                    "id_documento": id_documento,
+                },
+            )
+        else:
+            id_documento = registrar_documento_carpeta_digital(
+                db=db,
+                id_registro_personal=(
+                    proceso.IdRegistroPersonal
+                ),
+                id_tipo_documentacion=82,
+                contenido_archivo=(
+                    item["contenido"]
+                ),
+                nombre_archivo=(
+                    nombre_archivo
+                ),
+                formato=(
+                    item["formato"]
+                ),
+            )
+
+        documentos.append(
+            {
+                "IdDocumentoCarpetaDigital": (
+                    id_documento
+                ),
+                "NombreArchivo": nombre_archivo,
+                "Formato": item["formato"],
+            }
+        )
+
+    return {
+        "cantidad": len(documentos),
+        "documentos": documentos,
+    }
+
+
+def obtener_evidencias_operaciones(
+    db: Session,
+    id_proceso: int,
+) -> list[DocumentoProcesoDisciplinario]:
+    """
+    Obtiene únicamente las evidencias cargadas desde Operaciones,
+    respetando el orden en que fueron registradas.
+    """
+
+    return (
+        db.query(
+            DocumentoProcesoDisciplinario
+        )
+        .filter(
+            DocumentoProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso,
+            DocumentoProcesoDisciplinario
+            .TipoDocumento
+            == "EVIDENCIA_OPERACIONES",
+        )
+        .order_by(
+            DocumentoProcesoDisciplinario
+            .FechaCreacion
+            .asc(),
+            DocumentoProcesoDisciplinario
+            .IdDocumentoProcesoDisciplinario
+            .asc(),
+        )
+        .all()
+    )
+
+
+def generar_pdf_evidencias_operaciones(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+) -> dict:
+    """
+    Consolida las evidencias de Operaciones en un único PDF limpio.
+
+    Reglas:
+    - Sin evidencias: no genera documento 03.
+    - PDF: incorpora directamente todas sus páginas.
+    - Imágenes: las convierte directamente a PDF y las incorpora.
+    - Word, Excel, audio, video, texto y otros formatos:
+      conserva el archivo original asociado al expediente y, cuando
+      pypdf lo permite, lo adjunta internamente al PDF consolidado.
+    - No crea portadas, índices, avisos ni páginas descriptivas
+      antes de cada evidencia.
+    - Las evidencias originales NO se eliminan ni se modifican.
+
+    Importante:
+    El documento 03 solo se genera cuando por lo menos una evidencia
+    puede representarse visualmente como página PDF (PDF o imagen).
+    """
+
+    evidencias = obtener_evidencias_operaciones(
+        db=db,
+        id_proceso=(
+            proceso.IdProcesoDisciplinario
+        ),
+    )
+
+    if not evidencias:
+        return {
+            "generado": False,
+            "cantidadEvidencias": 0,
+            "cantidadIncorporadas": 0,
+            "cantidadAdjuntasInternas": 0,
+            "contenidoPdf": None,
+            "nombreArchivo": None,
+            "mensaje": (
+                "El proceso no tiene evidencias de Operaciones. "
+                "No se genera documento 03."
+            ),
+        }
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError as error:
+        raise RuntimeError(
+            "Para consolidar evidencias PDF se requiere "
+            "la librería pypdf en el backend."
+        ) from error
+
+    escritor = PdfWriter()
+
+    expediente = _nombre_expediente_evidencias(
+        proceso
+    )
+
+    nombre_consolidado = (
+        "03 - Evidencias de Operaciones - "
+        f"{expediente}.pdf"
+    )
+
+    total = len(evidencias)
+    cantidad_incorporadas = 0
+    cantidad_adjuntas_internas = 0
+
+    for indice, evidencia in enumerate(
+        evidencias,
+        start=1,
+    ):
+        nombre_evidencia = (
+            evidencia.NombreArchivo
+            or f"Evidencia {indice}"
+        )
+
+        contenido_archivo, formato = (
+            _obtener_contenido_documento(
+                db=db,
+                documento=evidencia,
+            )
+        )
+
+        if not contenido_archivo:
+            # La evidencia continúa registrada en el expediente.
+            # No se agrega ninguna página artificial al consolidado.
+            continue
+
+        formato_normalizado = str(
+            formato or ""
+        ).strip().lower()
+
+        extension = (
+            Path(nombre_evidencia)
+            .suffix
+            .lower()
+        )
+
+        es_pdf = (
+            extension == ".pdf"
+            or formato_normalizado
+            == "application/pdf"
+        )
+
+        es_imagen = (
+            extension
+            in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+                ".bmp",
+                ".tif",
+                ".tiff",
+            }
+            or formato_normalizado
+            .startswith("image/")
+        )
+
+        if es_pdf:
+            try:
+                lector_pdf = PdfReader(
+                    io.BytesIO(
+                        contenido_archivo
+                    )
+                )
+
+                paginas_agregadas = 0
+
+                for pagina in lector_pdf.pages:
+                    escritor.add_page(
+                        pagina
+                    )
+                    paginas_agregadas += 1
+
+                if paginas_agregadas > 0:
+                    cantidad_incorporadas += 1
+
+            except Exception:
+                # El PDF original se conserva en el expediente.
+                # No se crea una portada de error.
+                try:
+                    escritor.add_attachment(
+                        _nombre_seguro_adjunto_pdf(
+                            nombre_archivo=(
+                                nombre_evidencia
+                            ),
+                            indice=indice,
+                        ),
+                        contenido_archivo,
+                    )
+                    cantidad_adjuntas_internas += 1
+                except Exception:
+                    pass
+
+            continue
+
+        if es_imagen:
+            try:
+                pdf_imagen = (
+                    _convertir_imagen_a_pdf(
+                        contenido_archivo
+                    )
+                )
+
+                lector_imagen = PdfReader(
+                    io.BytesIO(
+                        pdf_imagen
+                    )
+                )
+
+                paginas_agregadas = 0
+
+                for pagina in lector_imagen.pages:
+                    escritor.add_page(
+                        pagina
+                    )
+                    paginas_agregadas += 1
+
+                if paginas_agregadas > 0:
+                    cantidad_incorporadas += 1
+
+            except Exception:
+                # La imagen original se conserva en el expediente.
+                # No se crea una portada de error.
+                try:
+                    escritor.add_attachment(
+                        _nombre_seguro_adjunto_pdf(
+                            nombre_archivo=(
+                                nombre_evidencia
+                            ),
+                            indice=indice,
+                        ),
+                        contenido_archivo,
+                    )
+                    cantidad_adjuntas_internas += 1
+                except Exception:
+                    pass
+
+            continue
+
+        # Word, Excel, audio, video, texto y cualquier otro formato
+        # permanecen como originales en DocumentoProcesoDisciplinario.
+        # Cuando es posible, también se adjuntan internamente al PDF,
+        # pero NO generan páginas artificiales ni contenido convertido.
+        try:
+            escritor.add_attachment(
+                _nombre_seguro_adjunto_pdf(
+                    nombre_archivo=(
+                        nombre_evidencia
+                    ),
+                    indice=indice,
+                ),
+                contenido_archivo,
+            )
+            cantidad_adjuntas_internas += 1
+
+        except Exception:
+            # El original continúa disponible en el expediente.
+            pass
+
+    if len(escritor.pages) == 0:
+        return {
+            "generado": False,
+            "cantidadEvidencias": total,
+            "cantidadIncorporadas": 0,
+            "cantidadAdjuntasInternas": (
+                cantidad_adjuntas_internas
+            ),
+            "contenidoPdf": None,
+            "nombreArchivo": None,
+            "mensaje": (
+                "El proceso tiene evidencias de Operaciones, pero "
+                "ninguna puede representarse visualmente dentro de "
+                "un PDF sin alterar el archivo original. "
+                "Los archivos permanecen asociados al expediente."
+            ),
+        }
+
+    buffer_salida = io.BytesIO()
+
+    escritor.write(
+        buffer_salida
+    )
+
+    buffer_salida.seek(0)
+
+    return {
+        "generado": True,
+        "cantidadEvidencias": total,
+        "cantidadIncorporadas": (
+            cantidad_incorporadas
+        ),
+        "cantidadAdjuntasInternas": (
+            cantidad_adjuntas_internas
+        ),
+        "contenidoPdf": (
+            buffer_salida.getvalue()
+        ),
+        "nombreArchivo": (
+            nombre_consolidado
+        ),
+        "mensaje": (
+            "Las evidencias visuales de Operaciones fueron "
+            "consolidadas directamente en un único PDF, sin "
+            "portadas ni páginas descriptivas adicionales."
+        ),
+    }
+
+def registrar_o_actualizar_evidencias_operaciones_carpeta_digital(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+) -> dict:
+    """
+    Genera el documento 03 de evidencias y lo registra en
+    Carpeta Digital > Activos > Procesos disciplinarios.
+
+    Es idempotente por trabajador y nombre controlado:
+    si ya existe, actualiza el contenido y no crea duplicados.
+
+    No ejecuta commit. El commit debe hacerlo el flujo principal
+    que envía el proceso a Relaciones Laborales.
+    """
+
+    resultado = generar_pdf_evidencias_operaciones(
+        db=db,
+        proceso=proceso,
+    )
+
+    if not resultado.get("generado"):
+        return {
+            "generado": False,
+            "guardadoCarpetaDigital": False,
+            "IdDocumentoCarpetaDigital": None,
+            "cantidadEvidencias": (
+                resultado.get(
+                    "cantidadEvidencias",
+                    0,
+                )
+            ),
+            "nombreArchivo": None,
+            "mensaje": resultado.get(
+                "mensaje"
+            ),
+        }
+
+    contenido_pdf = resultado[
+        "contenidoPdf"
+    ]
+
+    nombre_archivo = resultado[
+        "nombreArchivo"
+    ]
+
+    id_tipo_documentacion = 82
+
+    existente = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    d."IdDocumento"
+                FROM public."Documentos" d
+                INNER JOIN public."RelacionTipoDocumentacion" rtd
+                    ON rtd."IdDocumento" = d."IdDocumento"
+                WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                  AND d."IdTipoDocumentacion" = :id_tipo_documentacion
+                  AND d."Nombre" = :nombre_archivo
+                ORDER BY d."IdDocumento" DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "id_registro_personal": (
+                    proceso.IdRegistroPersonal
+                ),
+                "id_tipo_documentacion": (
+                    id_tipo_documentacion
+                ),
+                "nombre_archivo": (
+                    nombre_archivo
+                ),
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if existente:
+        id_documento = int(
+            existente["IdDocumento"]
+        )
+
+        db.execute(
+            text(
+                """
+                UPDATE public."Documentos"
+                SET
+                    "DocumentoCargado" = :documento_cargado,
+                    "FechaActualizacion" = NOW(),
+                    "Formato" = 'application/pdf'
+                WHERE "IdDocumento" = :id_documento
+                """
+            ),
+            {
+                "documento_cargado": (
+                    contenido_pdf
+                ),
+                "id_documento": (
+                    id_documento
+                ),
+            },
+        )
+
+    else:
+        id_documento = (
+            registrar_documento_carpeta_digital(
+                db=db,
+                id_registro_personal=(
+                    proceso.IdRegistroPersonal
+                ),
+                id_tipo_documentacion=(
+                    id_tipo_documentacion
+                ),
+                contenido_archivo=(
+                    contenido_pdf
+                ),
+                nombre_archivo=(
+                    nombre_archivo
+                ),
+                formato="application/pdf",
+            )
+        )
+
+    # También se conserva una copia física del consolidado.
+    carpeta_destino = (
+        STORAGE_DIR
+        / "rrll"
+        / "procesos_disciplinarios"
+        / str(
+            proceso.IdProcesoDisciplinario
+        )
+    )
+
+    carpeta_destino.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    ruta_consolidado = (
+        carpeta_destino
+        / "03_evidencias_operaciones.pdf"
+    )
+
+    ruta_consolidado.write_bytes(
+        contenido_pdf
+    )
+
+    resultado_no_visuales = (
+        registrar_evidencias_no_visuales_operaciones_carpeta_digital(
+            db=db,
+            proceso=proceso,
+        )
+    )
+
+    return {
+        "generado": True,
+        "guardadoCarpetaDigital": True,
+        "IdDocumentoCarpetaDigital": (
+            id_documento
+        ),
+        "cantidadEvidencias": (
+            resultado[
+                "cantidadEvidencias"
+            ]
+        ),
+        "nombreArchivo": (
+            nombre_archivo
+        ),
+        "EvidenciasNoVisuales": (
+            resultado_no_visuales
+        ),
+        "mensaje": (
+            "Las evidencias visuales de Operaciones fueron consolidadas "
+            "como documento 03 y los archivos no visuales fueron "
+            "registrados individualmente como 03.1, 03.2, 03.3, etc."
+        ),
+    }
+
 
 
 def registrar_documento_carpeta_digital(
@@ -560,14 +1522,32 @@ def construir_respuesta_documento(
             )
         )
 
+        nombre_seguro = (
+            nombre_archivo
+            .replace('"', "")
+            .replace("\r", "")
+            .replace("\n", "")
+        )
+
+        nombre_codificado = quote(
+            nombre_seguro,
+            safe="",
+        )
+
         return FileResponse(
             path=str(ruta_absoluta),
             media_type=(
                 tipo_contenido
                 or "application/octet-stream"
             ),
-            filename=nombre_archivo,
-            content_disposition_type=disposition,
+            headers={
+                "Content-Disposition": (
+                    f'{disposition}; '
+                    f'filename="{nombre_seguro}"; '
+                    f"filename*=UTF-8''{nombre_codificado}"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     respaldo = obtener_respaldo_documento(
@@ -627,11 +1607,14 @@ def construir_respuesta_documento(
         headers={
             "Content-Disposition": (
                 f'{disposition}; '
-                f'filename="{nombre_seguro}"'
+                f'filename="{nombre_seguro}"; '
+                f"filename*=UTF-8''"
+                f"{quote(nombre_seguro, safe='')}"
             ),
             "Content-Length": str(
                 len(contenido_archivo)
             ),
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -1027,7 +2010,7 @@ def _dibujar_encabezado_carta_descargos(
     documento,
 ):
     """
-    Encabezado corporativo de la Carta de Descargos.
+    Encabezado corporativo del Acta de Descargos.
 
     Usa exactamente los recursos gráficos aprobados para el
     PDF de Paz y Salvo:
@@ -1081,7 +2064,7 @@ def _dibujar_encabezado_carta_descargos(
 def _crear_firma_yeny_pdf():
     """
     Crea la firma institucional de Yeny para ubicarla en la sección
-    'Por la empresa' de la Carta de Descargos.
+    'Por la empresa' del Acta de Descargos.
 
     Si el archivo no está disponible, retorna None y el PDF conserva
     el respaldo textual actual.
@@ -1365,10 +2348,263 @@ def _obtener_evidencias_trabajador(
             DocumentoProcesoDisciplinario.IdProcesoDisciplinario == id_proceso,
             DocumentoProcesoDisciplinario.TipoDocumento == "EVIDENCIA_TRABAJADOR",
         )
-        .order_by(DocumentoProcesoDisciplinario.FechaCreacion.asc())
+        .order_by(
+            DocumentoProcesoDisciplinario.FechaCreacion.asc(),
+            DocumentoProcesoDisciplinario
+            .IdDocumentoProcesoDisciplinario.asc(),
+        )
         .all()
     )
 
+
+
+
+def _evidencia_trabajador_se_integra_en_acta(
+    nombre_archivo: str | None,
+    formato: str | None,
+) -> bool:
+    """
+    Define si la evidencia del trabajador queda integrada dentro del
+    documento 02 - Acta de Descargos.
+
+    Se integran:
+    - PDF: se incorpora completo al final del Acta.
+    - Imágenes: se muestran visualmente dentro del Acta.
+    - DOCX: se intenta recuperar y mostrar su contenido textual.
+
+    Excel, audio, video y otros formatos se conservan como archivos
+    originales independientes en Carpeta Digital con suborden
+    02.1, 02.2, 02.3...
+    """
+
+    nombre = str(
+        nombre_archivo or ""
+    ).strip()
+
+    formato_normalizado = str(
+        formato or ""
+    ).strip().lower()
+
+    extension = (
+        Path(nombre)
+        .suffix
+        .lower()
+    )
+
+    if (
+        extension == ".pdf"
+        or formato_normalizado == "application/pdf"
+    ):
+        return True
+
+    if (
+        extension
+        in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".bmp",
+            ".gif",
+            ".tif",
+            ".tiff",
+        }
+        or formato_normalizado.startswith("image/")
+    ):
+        return True
+
+    if (
+        extension == ".docx"
+        or formato_normalizado
+        == (
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        )
+    ):
+        return True
+
+    return False
+
+
+def registrar_evidencias_no_visuales_trabajador_carpeta_digital(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+    evidencias: list[DocumentoProcesoDisciplinario],
+) -> dict:
+    """
+    Registra en Carpeta Digital las evidencias aportadas por el
+    trabajador que no se integran visualmente dentro del Acta.
+
+    Orden controlado:
+    02.1, 02.2, 02.3...
+
+    Ejemplos:
+    02.1 - Evidencia del Trabajador - PD-2026-000056.xlsx
+    02.2 - Evidencia del Trabajador - PD-2026-000056.mp3
+
+    Los PDF, imágenes y DOCX que sí se integran en el Acta no crean
+    documentos 02.x adicionales.
+
+    Es idempotente por trabajador + nombre controlado.
+    No ejecuta commit.
+    """
+
+    expediente = (
+        _nombre_expediente_evidencias(
+            proceso
+        )
+    )
+
+    evidencias_no_visuales = []
+
+    for evidencia in evidencias:
+        nombre_evidencia = (
+            evidencia.NombreArchivo
+            or ""
+        )
+
+        contenido_archivo, formato = (
+            _obtener_contenido_documento(
+                db=db,
+                documento=evidencia,
+            )
+        )
+
+        if not contenido_archivo:
+            continue
+
+        if _evidencia_trabajador_se_integra_en_acta(
+            nombre_archivo=nombre_evidencia,
+            formato=formato,
+        ):
+            continue
+
+        extension = (
+            _extension_evidencia(
+                nombre_archivo=nombre_evidencia,
+                formato=formato,
+            )
+        )
+
+        evidencias_no_visuales.append(
+            {
+                "contenido": contenido_archivo,
+                "formato": (
+                    str(formato or "").strip()
+                    or "application/octet-stream"
+                ),
+                "extension": extension,
+            }
+        )
+
+    documentos = []
+
+    for indice, item in enumerate(
+        evidencias_no_visuales,
+        start=1,
+    ):
+        nombre_archivo = (
+            f"02.{indice} - Evidencia del Trabajador - "
+            f"{expediente}"
+            f"{item['extension']}"
+        )
+
+        existente = (
+            db.execute(
+                text(
+                    """
+                    SELECT
+                        d."IdDocumento"
+                    FROM public."Documentos" d
+                    INNER JOIN public."RelacionTipoDocumentacion" rtd
+                        ON rtd."IdDocumento" = d."IdDocumento"
+                    WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                      AND d."IdTipoDocumentacion" = 82
+                      AND d."Nombre" = :nombre_archivo
+                    ORDER BY d."IdDocumento" DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "id_registro_personal": (
+                        proceso.IdRegistroPersonal
+                    ),
+                    "nombre_archivo": (
+                        nombre_archivo
+                    ),
+                },
+            )
+            .mappings()
+            .first()
+        )
+
+        if existente:
+            id_documento = int(
+                existente["IdDocumento"]
+            )
+
+            db.execute(
+                text(
+                    """
+                    UPDATE public."Documentos"
+                    SET
+                        "DocumentoCargado" = :documento_cargado,
+                        "FechaActualizacion" = NOW(),
+                        "Formato" = :formato
+                    WHERE "IdDocumento" = :id_documento
+                    """
+                ),
+                {
+                    "documento_cargado": (
+                        item["contenido"]
+                    ),
+                    "formato": (
+                        item["formato"]
+                    ),
+                    "id_documento": (
+                        id_documento
+                    ),
+                },
+            )
+
+        else:
+            id_documento = (
+                registrar_documento_carpeta_digital(
+                    db=db,
+                    id_registro_personal=(
+                        proceso.IdRegistroPersonal
+                    ),
+                    id_tipo_documentacion=82,
+                    contenido_archivo=(
+                        item["contenido"]
+                    ),
+                    nombre_archivo=(
+                        nombre_archivo
+                    ),
+                    formato=(
+                        item["formato"]
+                    ),
+                )
+            )
+
+        documentos.append(
+            {
+                "IdDocumentoCarpetaDigital": (
+                    id_documento
+                ),
+                "NombreArchivo": (
+                    nombre_archivo
+                ),
+                "Formato": (
+                    item["formato"]
+                ),
+            }
+        )
+
+    return {
+        "cantidad": len(documentos),
+        "documentos": documentos,
+    }
 
 
 def _generar_pdf_carta_descargos(
@@ -1378,6 +2614,19 @@ def _generar_pdf_carta_descargos(
     trabajador: dict,
     evidencias: list[DocumentoProcesoDisciplinario],
 ) -> bytes:
+    """
+    Genera el Acta de Descargos y trata las evidencias aportadas por
+    el trabajador de acuerdo con su formato.
+
+    Reglas:
+    - Imágenes: se muestran visualmente dentro del Acta.
+    - PDF: se incorporan completas al final del Acta.
+    - DOCX: se intenta recuperar el texto y mostrarlo en el Acta.
+    - Excel, audio, video y otros formatos no visuales:
+      se identifican como anexos y el archivo original permanece
+      asociado al expediente disciplinario para consulta/descarga.
+    """
+
     buffer = io.BytesIO()
 
     documento_pdf = SimpleDocTemplate(
@@ -1387,12 +2636,16 @@ def _generar_pdf_carta_descargos(
         leftMargin=2.0 * cm,
         topMargin=3.55 * cm,
         bottomMargin=1.8 * cm,
-        title="Carta de Descargos",
+        title="Acta de Descargos",
         author="Aseos La Perfección",
     )
 
     estilos = _estilos_carta_descargos()
     contenido = []
+
+    # Los PDF aportados por el trabajador se anexan después de
+    # construir el Acta base para conservar todas sus páginas.
+    pdfs_evidencias = []
 
     fecha_generacion = _fecha_generacion_colombia()
     fecha_descargo = descargo.get("FechaDescargo") or fecha_generacion
@@ -1693,20 +2946,16 @@ def _generar_pdf_carta_descargos(
                 or f"Evidencia {indice}"
             )
 
-            contenido.append(
-                Paragraph(
-                    f"Anexo {indice}: {nombre_evidencia}",
-                    estilos["anexo"],
-                )
-            )
-            contenido.append(Spacer(1, 0.20 * cm))
-
             contenido_archivo, formato = (
                 _obtener_contenido_documento(
                     db=db,
                     documento=evidencia,
                 )
             )
+
+            formato_normalizado = str(
+                formato or ""
+            ).strip().lower()
 
             extension = (
                 Path(nombre_evidencia)
@@ -1721,35 +2970,75 @@ def _generar_pdf_carta_descargos(
                     ".jpg",
                     ".jpeg",
                     ".webp",
+                    ".bmp",
+                    ".gif",
+                    ".tif",
+                    ".tiff",
                 }
-                or str(formato)
-                .lower()
-                .startswith("image/")
+                or formato_normalizado.startswith(
+                    "image/"
+                )
+            )
+
+            es_pdf = (
+                extension == ".pdf"
+                or formato_normalizado
+                == "application/pdf"
+            )
+
+            es_docx = (
+                extension == ".docx"
+                or formato_normalizado
+                == (
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                )
+            )
+
+            contenido.append(
+                Paragraph(
+                    f"Anexo {indice}: {nombre_evidencia}",
+                    estilos["anexo"],
+                )
+            )
+            contenido.append(
+                Spacer(1, 0.20 * cm)
             )
 
             if contenido_archivo and es_imagen:
                 try:
                     imagen = Image(
-                        io.BytesIO(contenido_archivo)
+                        io.BytesIO(
+                            contenido_archivo
+                        )
                     )
 
                     ancho_maximo = 16.0 * cm
                     alto_maximo = 18.3 * cm
 
                     proporcion = min(
-                        ancho_maximo / imagen.imageWidth,
-                        alto_maximo / imagen.imageHeight,
+                        ancho_maximo
+                        / imagen.imageWidth,
+                        alto_maximo
+                        / imagen.imageHeight,
                         1,
                     )
 
                     imagen.drawWidth = (
-                        imagen.imageWidth * proporcion
-                    )
-                    imagen.drawHeight = (
-                        imagen.imageHeight * proporcion
+                        imagen.imageWidth
+                        * proporcion
                     )
 
-                    contenido.append(imagen)
+                    imagen.drawHeight = (
+                        imagen.imageHeight
+                        * proporcion
+                    )
+
+                    imagen.hAlign = "CENTER"
+
+                    contenido.append(
+                        imagen
+                    )
 
                 except Exception:
                     contenido.append(
@@ -1763,7 +3052,32 @@ def _generar_pdf_carta_descargos(
                         )
                     )
 
-            elif contenido_archivo and extension == ".docx":
+            elif contenido_archivo and es_pdf:
+                # El PDF completo se agrega al final del Acta,
+                # sin convertirlo en imagen ni perder páginas.
+                pdfs_evidencias.append(
+                    {
+                        "indice": indice,
+                        "nombre": (
+                            nombre_evidencia
+                        ),
+                        "contenido": (
+                            contenido_archivo
+                        ),
+                    }
+                )
+
+                contenido.append(
+                    Paragraph(
+                        (
+                            "El documento PDF aportado por el trabajador "
+                            "se incorpora completo al final del Acta."
+                        ),
+                        estilos["izquierda"],
+                    )
+                )
+
+            elif contenido_archivo and es_docx:
                 texto_docx = _extraer_texto_docx(
                     contenido_archivo
                 )
@@ -1775,7 +3089,12 @@ def _generar_pdf_carta_descargos(
                             estilos["negrilla"],
                         )
                     )
-                    contenido.append(Spacer(1, 0.10 * cm))
+                    contenido.append(
+                        Spacer(
+                            1,
+                            0.10 * cm,
+                        )
+                    )
                     contenido.extend(
                         _parrafos_preservando_saltos(
                             texto_docx,
@@ -1785,17 +3104,37 @@ def _generar_pdf_carta_descargos(
                 else:
                     contenido.append(
                         Paragraph(
-                            "Documento adjunto registrado como evidencia.",
+                            (
+                                "Documento Word registrado como evidencia. "
+                                "El archivo original permanece asociado "
+                                "al expediente."
+                            ),
                             estilos["izquierda"],
                         )
                     )
+
+            elif contenido_archivo:
+                # Excel, audio, video y otros formatos no visuales
+                # no se fuerzan a PDF para evitar alterar información.
+                contenido.append(
+                    Paragraph(
+                        (
+                            "Archivo original registrado como evidencia "
+                            "del trabajador. Por su formato no se representa "
+                            "visualmente dentro del Acta; permanece asociado "
+                            "al expediente para consulta y descarga."
+                        ),
+                        estilos["izquierda"],
+                    )
+                )
+
             else:
                 contenido.append(
                     Paragraph(
                         (
-                            "Documento adjunto registrado como evidencia "
-                            "en el expediente disciplinario. El archivo "
-                            "original se conserva asociado al proceso."
+                            "La evidencia está registrada en el expediente, "
+                            "pero actualmente no se encontró un archivo "
+                            "disponible para incorporarlo al Acta."
                         ),
                         estilos["izquierda"],
                     )
@@ -1803,11 +3142,18 @@ def _generar_pdf_carta_descargos(
 
             if indice < len(evidencias):
                 contenido.extend([
-                    Spacer(1, 0.45 * cm),
+                    Spacer(
+                        1,
+                        0.45 * cm,
+                    ),
                     Table(
                         [[""]],
-                        colWidths=[16.0 * cm],
-                        rowHeights=[0.02 * cm],
+                        colWidths=[
+                            16.0 * cm
+                        ],
+                        rowHeights=[
+                            0.02 * cm
+                        ],
                         style=TableStyle([
                             (
                                 "LINEABOVE",
@@ -1818,7 +3164,10 @@ def _generar_pdf_carta_descargos(
                             )
                         ]),
                     ),
-                    Spacer(1, 0.45 * cm),
+                    Spacer(
+                        1,
+                        0.45 * cm,
+                    ),
                 ])
 
     documento_pdf.build(
@@ -1828,7 +3177,69 @@ def _generar_pdf_carta_descargos(
     )
 
     buffer.seek(0)
-    return buffer.getvalue()
+
+    contenido_acta_base = (
+        buffer.getvalue()
+    )
+
+    if not pdfs_evidencias:
+        return contenido_acta_base
+
+    try:
+        from pypdf import (
+            PdfReader,
+            PdfWriter,
+        )
+    except ImportError as error:
+        raise RuntimeError(
+            "Para incorporar evidencias PDF al Acta de Descargos "
+            "se requiere la librería pypdf en el backend."
+        ) from error
+
+    escritor = PdfWriter()
+
+    lector_acta = PdfReader(
+        io.BytesIO(
+            contenido_acta_base
+        )
+    )
+
+    for pagina in lector_acta.pages:
+        escritor.add_page(
+            pagina
+        )
+
+    for evidencia_pdf in pdfs_evidencias:
+        try:
+            lector_evidencia = PdfReader(
+                io.BytesIO(
+                    evidencia_pdf[
+                        "contenido"
+                    ]
+                )
+            )
+
+            for pagina in lector_evidencia.pages:
+                escritor.add_page(
+                    pagina
+                )
+
+        except Exception:
+            # El archivo original sigue asociado al expediente.
+            # No se rompe la generación completa del Acta por un
+            # PDF de evidencia que resulte ilegible o esté dañado.
+            continue
+
+    salida = io.BytesIO()
+
+    escritor.write(
+        salida
+    )
+
+    salida.seek(0)
+
+    return salida.getvalue()
+
 
 
 def _guardar_carta_descargos_generada(
@@ -1844,7 +3255,7 @@ def _guardar_carta_descargos_generada(
     )
     carpeta_destino_absoluta.mkdir(parents=True, exist_ok=True)
 
-    nombre_archivo = f"carta_descargos_{id_proceso}.pdf"
+    nombre_archivo = f"acta_descargos_{id_proceso}.pdf"
     ruta_absoluta = carpeta_destino_absoluta / nombre_archivo
     ruta_relativa = (
         Path("storage")
@@ -1874,7 +3285,7 @@ def _guardar_carta_descargos_generada(
         existente.NombreArchivo = nombre_archivo
         existente.RutaArchivo = str(ruta_relativa)
         existente.Observacion = (
-            "Carta de Descargos generada por Relaciones Laborales."
+            "Acta de Descargos generada por Relaciones Laborales."
         )
         existente.DocumentoCargado = contenido_pdf
         existente.Formato = "application/pdf"
@@ -1886,7 +3297,7 @@ def _guardar_carta_descargos_generada(
         TipoDocumento="CARTA_DESCARGOS_GENERADA",
         NombreArchivo=nombre_archivo,
         RutaArchivo=str(ruta_relativa),
-        Observacion="Carta de Descargos generada por Relaciones Laborales.",
+        Observacion="Acta de Descargos generada por Relaciones Laborales.",
         DocumentoCargado=contenido_pdf,
         Formato="application/pdf",
     )
@@ -1942,11 +3353,11 @@ def subir_documento_proceso_disciplinario(
         id_proceso=IdProcesoDisciplinario,
     )
 
-    nombre_archivo = Path(
+    nombre_archivo_original = Path(
         archivo.filename or ""
     ).name.strip()
 
-    if not nombre_archivo:
+    if not nombre_archivo_original:
         raise HTTPException(
             status_code=400,
             detail="El archivo debe tener un nombre válido.",
@@ -1980,11 +3391,15 @@ def subir_documento_proceso_disciplinario(
         )
     )
 
-    extension = (
-        Path(nombre_archivo)
+    extension_archivo = (
+        Path(nombre_archivo_original)
         .suffix
-        .lstrip(".")
         .lower()
+    )
+
+    extension = (
+        extension_archivo
+        .lstrip(".")
     )
 
     formato_documento = (
@@ -1992,6 +3407,29 @@ def subir_documento_proceso_disciplinario(
         or extension
         or "application/octet-stream"
     )
+
+    # Documento oficial de cierre:
+    # se controla el nombre para que siempre quede como número 04
+    # dentro del expediente y de la Carpeta Digital.
+    if (
+        codigo_tipo_documento
+        == "DOCUMENTO_CIERRE_DISCIPLINARIO"
+    ):
+        codigo_expediente = (
+            _nombre_expediente_evidencias(
+                proceso
+            )
+        )
+
+        nombre_archivo = (
+            "04 - Documento de Cierre - "
+            f"{codigo_expediente}"
+            f"{extension_archivo}"
+        )
+    else:
+        nombre_archivo = (
+            nombre_archivo_original
+        )
 
     carpeta_destino_absoluta = (
         STORAGE_DIR
@@ -2026,47 +3464,309 @@ def subir_documento_proceso_disciplinario(
                 contenido_archivo
             )
 
-        nuevo = DocumentoProcesoDisciplinario(
-            IdProcesoDisciplinario=(
-                IdProcesoDisciplinario
-            ),
-            TipoDocumento=(
-                codigo_tipo_documento
-                or TipoDocumento
-            ),
-            NombreArchivo=nombre_archivo,
-            RutaArchivo=str(
-                ruta_archivo_relativa
-            ),
-            Observacion=Observacion,
-            DocumentoCargado=contenido_archivo,
-            Formato=formato_documento,
-        )
+        # Para el documento oficial de cierre se mantiene un único
+        # registro por expediente. Si Yeny vuelve a adjuntar una
+        # versión corregida, se actualiza el mismo documento.
+        if (
+            codigo_tipo_documento
+            == "DOCUMENTO_CIERRE_DISCIPLINARIO"
+        ):
+            existente_proceso = (
+                db.query(
+                    DocumentoProcesoDisciplinario
+                )
+                .filter(
+                    DocumentoProcesoDisciplinario
+                    .IdProcesoDisciplinario
+                    == IdProcesoDisciplinario,
+                    DocumentoProcesoDisciplinario
+                    .TipoDocumento
+                    == (
+                        "DOCUMENTO_CIERRE_DISCIPLINARIO"
+                    ),
+                )
+                .order_by(
+                    DocumentoProcesoDisciplinario
+                    .IdDocumentoProcesoDisciplinario
+                    .desc()
+                )
+                .first()
+            )
 
-        db.add(nuevo)
+            if existente_proceso:
+                nuevo = existente_proceso
+                nuevo.NombreArchivo = (
+                    nombre_archivo
+                )
+                nuevo.RutaArchivo = str(
+                    ruta_archivo_relativa
+                )
+                nuevo.Observacion = (
+                    Observacion
+                )
+                nuevo.DocumentoCargado = (
+                    contenido_archivo
+                )
+                nuevo.Formato = (
+                    formato_documento
+                )
+                nuevo.FechaActualizacion = (
+                    datetime.now(
+                        timezone.utc
+                    )
+                )
+            else:
+                nuevo = (
+                    DocumentoProcesoDisciplinario(
+                        IdProcesoDisciplinario=(
+                            IdProcesoDisciplinario
+                        ),
+                        TipoDocumento=(
+                            "DOCUMENTO_CIERRE_DISCIPLINARIO"
+                        ),
+                        NombreArchivo=(
+                            nombre_archivo
+                        ),
+                        RutaArchivo=str(
+                            ruta_archivo_relativa
+                        ),
+                        Observacion=(
+                            Observacion
+                        ),
+                        DocumentoCargado=(
+                            contenido_archivo
+                        ),
+                        Formato=(
+                            formato_documento
+                        ),
+                    )
+                )
+
+                db.add(nuevo)
+
+        else:
+            nuevo = DocumentoProcesoDisciplinario(
+                IdProcesoDisciplinario=(
+                    IdProcesoDisciplinario
+                ),
+                TipoDocumento=(
+                    codigo_tipo_documento
+                    or TipoDocumento
+                ),
+                NombreArchivo=nombre_archivo,
+                RutaArchivo=str(
+                    ruta_archivo_relativa
+                ),
+                Observacion=Observacion,
+                DocumentoCargado=contenido_archivo,
+                Formato=formato_documento,
+            )
+
+            db.add(nuevo)
+
         db.flush()
 
         if id_tipo_carpeta_digital is not None:
-            nombre_carpeta_digital = (
-                f"Carta de descargos{Path(nombre_archivo).suffix.lower()}"
-                if codigo_tipo_documento == "CARTA_DESCARGOS_FIRMADA"
-                else nombre_archivo
-            )
+            if (
+                codigo_tipo_documento
+                == "CARTA_DESCARGOS_FIRMADA"
+            ):
+                codigo_expediente = (
+                    _nombre_expediente_evidencias(
+                        proceso
+                    )
+                )
 
-            registrar_documento_carpeta_digital(
-                db=db,
-                id_registro_personal=(
-                    proceso.IdRegistroPersonal
-                ),
-                id_tipo_documentacion=(
-                    id_tipo_carpeta_digital
-                ),
-                contenido_archivo=(
-                    contenido_archivo
-                ),
-                nombre_archivo=nombre_carpeta_digital,
-                formato=formato_documento,
-            )
+                extension_carpeta = (
+                    Path(nombre_archivo)
+                    .suffix
+                    .lower()
+                    or ".pdf"
+                )
+
+                nombre_carpeta_digital = (
+                    "02 - Acta de Descargos - "
+                    f"{codigo_expediente}"
+                    f"{extension_carpeta}"
+                )
+
+                existente_carpeta = (
+                    db.execute(
+                        text(
+                            """
+                            SELECT
+                                d."IdDocumento"
+                            FROM public."Documentos" d
+                            INNER JOIN public."RelacionTipoDocumentacion" rtd
+                                ON rtd."IdDocumento" = d."IdDocumento"
+                            WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                              AND d."IdTipoDocumentacion" = :id_tipo_documentacion
+                              AND d."Nombre" = :nombre_archivo
+                            ORDER BY d."IdDocumento" DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "id_registro_personal": (
+                                proceso.IdRegistroPersonal
+                            ),
+                            "id_tipo_documentacion": (
+                                id_tipo_carpeta_digital
+                            ),
+                            "nombre_archivo": (
+                                nombre_carpeta_digital
+                            ),
+                        },
+                    )
+                    .mappings()
+                    .first()
+                )
+
+                if existente_carpeta:
+                    db.execute(
+                        text(
+                            """
+                            UPDATE public."Documentos"
+                            SET
+                                "DocumentoCargado" = :documento_cargado,
+                                "FechaActualizacion" = NOW(),
+                                "Formato" = :formato
+                            WHERE "IdDocumento" = :id_documento
+                            """
+                        ),
+                        {
+                            "documento_cargado": (
+                                contenido_archivo
+                            ),
+                            "formato": (
+                                formato_documento
+                            ),
+                            "id_documento": int(
+                                existente_carpeta[
+                                    "IdDocumento"
+                                ]
+                            ),
+                        },
+                    )
+                else:
+                    registrar_documento_carpeta_digital(
+                        db=db,
+                        id_registro_personal=(
+                            proceso.IdRegistroPersonal
+                        ),
+                        id_tipo_documentacion=(
+                            id_tipo_carpeta_digital
+                        ),
+                        contenido_archivo=(
+                            contenido_archivo
+                        ),
+                        nombre_archivo=(
+                            nombre_carpeta_digital
+                        ),
+                        formato=formato_documento,
+                    )
+
+            elif (
+                codigo_tipo_documento
+                == "DOCUMENTO_CIERRE_DISCIPLINARIO"
+            ):
+                # El cierre debe quedar como 04 y debe ser idempotente
+                # para no crear duplicados en Carpeta Digital.
+                nombre_carpeta_digital = (
+                    nombre_archivo
+                )
+
+                existente_carpeta = (
+                    db.execute(
+                        text(
+                            """
+                            SELECT
+                                d."IdDocumento"
+                            FROM public."Documentos" d
+                            INNER JOIN public."RelacionTipoDocumentacion" rtd
+                                ON rtd."IdDocumento" = d."IdDocumento"
+                            WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                              AND d."IdTipoDocumentacion" = :id_tipo_documentacion
+                              AND d."Nombre" = :nombre_archivo
+                            ORDER BY d."IdDocumento" DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "id_registro_personal": (
+                                proceso.IdRegistroPersonal
+                            ),
+                            "id_tipo_documentacion": (
+                                id_tipo_carpeta_digital
+                            ),
+                            "nombre_archivo": (
+                                nombre_carpeta_digital
+                            ),
+                        },
+                    )
+                    .mappings()
+                    .first()
+                )
+
+                if existente_carpeta:
+                    db.execute(
+                        text(
+                            """
+                            UPDATE public."Documentos"
+                            SET
+                                "DocumentoCargado" = :documento_cargado,
+                                "FechaActualizacion" = NOW(),
+                                "Formato" = :formato
+                            WHERE "IdDocumento" = :id_documento
+                            """
+                        ),
+                        {
+                            "documento_cargado": (
+                                contenido_archivo
+                            ),
+                            "formato": (
+                                formato_documento
+                            ),
+                            "id_documento": int(
+                                existente_carpeta[
+                                    "IdDocumento"
+                                ]
+                            ),
+                        },
+                    )
+                else:
+                    registrar_documento_carpeta_digital(
+                        db=db,
+                        id_registro_personal=(
+                            proceso.IdRegistroPersonal
+                        ),
+                        id_tipo_documentacion=(
+                            id_tipo_carpeta_digital
+                        ),
+                        contenido_archivo=(
+                            contenido_archivo
+                        ),
+                        nombre_archivo=(
+                            nombre_carpeta_digital
+                        ),
+                        formato=formato_documento,
+                    )
+
+            else:
+                registrar_documento_carpeta_digital(
+                    db=db,
+                    id_registro_personal=(
+                        proceso.IdRegistroPersonal
+                    ),
+                    id_tipo_documentacion=(
+                        id_tipo_carpeta_digital
+                    ),
+                    contenido_archivo=(
+                        contenido_archivo
+                    ),
+                    nombre_archivo=nombre_archivo,
+                    formato=formato_documento,
+                )
 
         db.commit()
         db.refresh(nuevo)
@@ -2151,7 +3851,7 @@ def generar_carta_descargos(
             status_code=400,
             detail=(
                 "Debe registrar la manifestación del trabajador "
-                "antes de generar la Carta de Descargos."
+                "antes de generar el Acta de Descargos."
             ),
         )
 
@@ -2181,12 +3881,20 @@ def generar_carta_descargos(
             contenido_pdf=contenido_pdf,
         )
 
+        evidencias_no_visuales = (
+            registrar_evidencias_no_visuales_trabajador_carpeta_digital(
+                db=db,
+                proceso=proceso,
+                evidencias=evidencias,
+            )
+        )
+
         db.commit()
         db.refresh(documento)
 
         return {
             "success": True,
-            "message": "La Carta de Descargos fue generada correctamente.",
+            "message": "El Acta de Descargos fue generada correctamente.",
             "data": {
                 "IdDocumentoProcesoDisciplinario": (
                     documento.IdDocumentoProcesoDisciplinario
@@ -2197,6 +3905,9 @@ def generar_carta_descargos(
                 "RutaArchivo": documento.RutaArchivo,
                 "Formato": documento.Formato,
                 "CantidadEvidencias": len(evidencias),
+                "EvidenciasNoVisualesCarpetaDigital": (
+                    evidencias_no_visuales
+                ),
             },
         }
 
@@ -2209,7 +3920,7 @@ def generar_carta_descargos(
         raise HTTPException(
             status_code=500,
             detail={
-                "mensaje": "No fue posible generar la Carta de Descargos.",
+                "mensaje": "No fue posible generar el Acta de Descargos.",
                 "IdProcesoDisciplinario": data.IdProcesoDisciplinario,
                 "IdDescargoProcesoDisciplinario": (
                     data.IdDescargoProcesoDisciplinario
@@ -2382,8 +4093,8 @@ def eliminar_evidencia_trabajador_rrll(
 
     No modifica:
     - Evidencias de Operaciones.
-    - Carta de Descargos generada.
-    - Carta de Descargos firmada.
+    - Acta de Descargos generada.
+    - Acta de Descargos firmada.
     - Documentos de Carpeta Digital.
 
     Si la carta ya había sido generada, RRLL debe usar

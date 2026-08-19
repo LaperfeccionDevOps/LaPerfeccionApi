@@ -423,6 +423,21 @@ def _construir_contenido_correo(
         )
     )
 
+    detalle_lugar_texto = (
+        (
+            "Enlace: será suministrado por Relaciones Laborales "
+            "a través de WhatsApp interno"
+        )
+        if (
+            _limpiar_texto(modalidad).upper() == "VIRTUAL"
+            and (
+                not lugar
+                or lugar == "Por confirmar"
+            )
+        )
+        else f"Lugar o enlace: {lugar}"
+    )
+
     cuerpo_texto = (
         f"{titulo}\n\n"
         f"Señor(a): {nombre_completo}\n"
@@ -431,7 +446,7 @@ def _construir_contenido_correo(
         f"Fecha: {fecha}\n"
         f"Hora: {hora_inicio} a {hora_fin}\n"
         f"Modalidad: {modalidad}\n"
-        f"Lugar o enlace: {lugar}\n"
+        f"{detalle_lugar_texto}\n"
         f"Motivo: {motivo}\n"
         f"Cliente: {cliente or 'No registrado'}\n"
         f"Sede: {sede or 'No registrada'}\n"
@@ -820,6 +835,21 @@ def _construir_contenido_correo_supervisor(
             "colaborador para su conocimiento y seguimiento."
         )
 
+    detalle_lugar_texto = (
+        (
+            "Enlace: será suministrado por Relaciones Laborales "
+            "a través de WhatsApp interno"
+        )
+        if (
+            _limpiar_texto(modalidad).upper() == "VIRTUAL"
+            and (
+                not lugar
+                or lugar == "Por confirmar"
+            )
+        )
+        else f"Lugar o enlace: {lugar}"
+    )
+
     cuerpo_texto = (
         f"{titulo_supervisor}\n\n"
         f"Señor(a): {supervisor}\n\n"
@@ -829,7 +859,7 @@ def _construir_contenido_correo_supervisor(
         f"Fecha: {fecha}\n"
         f"Hora: {hora_inicio} a {hora_fin}\n"
         f"Modalidad: {modalidad}\n"
-        f"Lugar o enlace: {lugar}\n"
+        f"{detalle_lugar_texto}\n"
         f"Motivo: {motivo}\n"
         f"Cliente: {cliente or 'No registrado'}\n"
         f"Sede: {sede or 'No registrada'}\n\n"
@@ -1210,20 +1240,12 @@ def enviar_notificacion_agenda_disciplinaria(
     contenido_carta = None
 
     try:
-        enlace_virtual = _limpiar_texto(
-            datos.get("LugarCitacion")
-        )
-
         citacion_inicial_lista_para_envio = (
             tipo_normalizado == TIPO_CITACION_INICIAL
-            and (
-                modalidad_normalizada == "PRESENCIAL"
-                or (
-                    modalidad_normalizada == "VIRTUAL"
-                    and bool(enlace_virtual)
-                    and enlace_virtual != "Por confirmar"
-                )
-            )
+            and modalidad_normalizada in {
+                "PRESENCIAL",
+                "VIRTUAL",
+            }
         )
 
         if citacion_inicial_lista_para_envio:
@@ -1250,36 +1272,6 @@ def enviar_notificacion_agenda_disciplinaria(
             carta_adjunta = True
 
         else:
-            if (
-                tipo_normalizado == TIPO_CITACION_INICIAL
-                and modalidad_normalizada == "VIRTUAL"
-            ):
-                mensaje_error = (
-                    "La citación virtual todavía no tiene enlace "
-                    "registrado por Relaciones Laborales."
-                )
-
-                notificacion_trabajador = marcar_notificacion_error(
-                    db=db,
-                    notificacion=notificacion_trabajador,
-                    error=mensaje_error,
-                    usuario=usuario,
-                )
-
-                return {
-                    "enviado": False,
-                    "estado": "PENDIENTE_ENLACE_RRLL",
-                    "correo": correo_trabajador,
-                    "CartaAdjunta": False,
-                    "NombreCartaAdjunta": None,
-                    "mensaje": mensaje_error,
-                    "IdNotificacionProcesoDisciplinario": (
-                        notificacion_trabajador
-                        .IdNotificacionProcesoDisciplinario
-                    ),
-                    "NotificacionSupervisor": None,
-                }
-
             enviar_correo_sin_adjunto(
                 destinatario=correo_trabajador,
                 asunto=asunto,
@@ -1320,17 +1312,10 @@ def enviar_notificacion_agenda_disciplinaria(
     notificar_supervisor = (
         (
             tipo_normalizado == TIPO_CITACION_INICIAL
-            and (
-                modalidad_normalizada == "PRESENCIAL"
-                or (
-                    modalidad_normalizada == "VIRTUAL"
-                    and bool(
-                        _limpiar_texto(
-                            datos.get("LugarCitacion")
-                        )
-                    )
-                )
-            )
+            and modalidad_normalizada in {
+                "PRESENCIAL",
+                "VIRTUAL",
+            }
         )
         or tipo_normalizado == TIPO_REPROGRAMACION
         or tipo_normalizado == TIPO_CANCELACION
