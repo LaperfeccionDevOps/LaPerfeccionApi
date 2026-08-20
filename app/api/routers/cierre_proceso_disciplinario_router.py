@@ -16,6 +16,9 @@ from domain.models.agenda_proceso_disciplinario import (
 from domain.models.cierre_proceso_disciplinario import (
     CierreProcesoDisciplinario,
 )
+from domain.models.documento_proceso_disciplinario import (
+    DocumentoProcesoDisciplinario,
+)
 from domain.models.proceso_disciplinario import (
     ProcesoDisciplinario,
 )
@@ -163,6 +166,44 @@ def validar_cierre_completo(
             detail={
                 "mensaje": errores[0],
                 "errores": errores,
+            },
+        )
+
+
+def validar_documento_cierre_disciplinario(
+    db: Session,
+    id_proceso: int,
+) -> None:
+    documento_cierre = (
+        db.query(
+            DocumentoProcesoDisciplinario
+        )
+        .filter(
+            DocumentoProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso,
+            DocumentoProcesoDisciplinario
+            .TipoDocumento
+            == "DOCUMENTO_CIERRE_DISCIPLINARIO",
+        )
+        .first()
+    )
+
+    if not documento_cierre:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": (
+                    "Debe adjuntar al menos un "
+                    "Documento de cierre disciplinario "
+                    "antes de finalizar el proceso."
+                ),
+                "IdProcesoDisciplinario": (
+                    id_proceso
+                ),
+                "TipoDocumentoRequerido": (
+                    "DOCUMENTO_CIERRE_DISCIPLINARIO"
+                ),
             },
         )
 
@@ -439,6 +480,13 @@ def finalizar_cierre(
 
     validar_cierre_completo(
         cierre
+    )
+
+    validar_documento_cierre_disciplinario(
+        db=db,
+        id_proceso=(
+            cierre.IdProcesoDisciplinario
+        ),
     )
 
     usuario = (
