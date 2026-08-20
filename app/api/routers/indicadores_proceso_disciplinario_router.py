@@ -18,28 +18,55 @@ router = APIRouter(
 
 @router.get("/kpi3")
 def obtener_kpi3_procesos_disciplinarios(
-    fecha_inicio: date = Query(...),
-    fecha_fin: date = Query(...),
+    fecha_inicio: date | None = Query(None),
+    fecha_fin: date | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     KPI 3 - Cobertura de atención de procesos disciplinarios.
 
     Universo:
-    Procesos originados en Operaciones que fueron enviados
-    a RRLL dentro del periodo consultado.
+    Procesos originados en Operaciones que fueron enviados a RRLL.
+
+    - Sin fechas: retorna la información global del módulo.
+    - Con fecha inicial y fecha final: retorna únicamente los procesos
+      cuya primera entrada a RRLL se encuentra dentro del periodo consultado.
 
     Agendado:
     Tiene al menos una agenda activa creada en el periodo.
 
     Atendido:
-    Tiene al menos una agenda activa con EstadoAgenda ATENDIDO.
+    Tiene al menos un registro en DescargoProcesoDisciplinario.
+    El descargo confirma que la atención disciplinaria realmente ocurrió,
+    aunque el estado de la agenda no haya sido actualizado a ATENDIDO.
 
     Cerrado:
     Tiene al menos un registro en CierreProcesoDisciplinario.
+
+    Cobertura de atención KPI 3:
+    Se calcula con trabajadores únicos:
+    trabajadores atendidos / trabajadores agendados * 100.
+
+    Las tarjetas Agendados, Atendidos, Pendientes y Cerrados
+    continúan expresadas en cantidad de procesos.
     """
 
-    if fecha_fin < fecha_inicio:
+    if (fecha_inicio is None) != (fecha_fin is None):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "Para filtrar por periodo debe enviar "
+                    "la fecha inicial y la fecha final."
+                )
+            },
+        )
+
+    if (
+        fecha_inicio is not None
+        and fecha_fin is not None
+        and fecha_fin < fecha_inicio
+    ):
         raise HTTPException(
             status_code=400,
             detail={
@@ -50,26 +77,22 @@ def obtener_kpi3_procesos_disciplinarios(
             },
         )
 
-    fecha_fin_exclusiva = fecha_fin + timedelta(days=1)
+    fecha_fin_exclusiva = (
+        fecha_fin + timedelta(days=1)
+        if fecha_fin is not None
+        else None
+    )
 
     consulta_resumen = text(
         """
         WITH procesos_periodo AS (
             SELECT
                 pd."IdProcesoDisciplinario",
+                pd."IdRegistroPersonal",
 
                 MIN(
                     ag."FechaCreacion"
-                ) AS "FechaEntradaRRLL",
-
-                BOOL_OR(
-                    UPPER(
-                        COALESCE(
-                            ag."EstadoAgenda",
-                            ''
-                        )
-                    ) = 'ATENDIDO'
-                ) AS "FueAtendido"
+                ) AS "FechaEntradaRRLL"
 
             FROM public."ProcesoDisciplinario" pd
 
@@ -91,22 +114,37 @@ def obtener_kpi3_procesos_disciplinarios(
                 ) = TRUE
 
             GROUP BY
-                pd."IdProcesoDisciplinario"
+                pd."IdProcesoDisciplinario",
+                pd."IdRegistroPersonal"
 
             HAVING
-                MIN(
-                    ag."FechaCreacion"
-                ) >= :fecha_inicio
+                (
+                    CAST(:fecha_inicio AS date) IS NULL
+                    OR MIN(
+                        ag."FechaCreacion"
+                    ) >= CAST(:fecha_inicio AS date)
+                )
 
-                AND MIN(
-                    ag."FechaCreacion"
-                ) < :fecha_fin_exclusiva
+                AND (
+                    CAST(:fecha_fin_exclusiva AS date) IS NULL
+                    OR MIN(
+                        ag."FechaCreacion"
+                    ) < CAST(:fecha_fin_exclusiva AS date)
+                )
         ),
 
         resultado AS (
             SELECT
                 pp."IdProcesoDisciplinario",
-                pp."FueAtendido",
+                pp."IdRegistroPersonal",
+
+                EXISTS (
+                    SELECT 1
+                    FROM public."DescargoProcesoDisciplinario" dpd
+                    WHERE
+                        dpd."IdProcesoDisciplinario"
+                        = pp."IdProcesoDisciplinario"
+                ) AS "FueAtendido",
 
                 EXISTS (
                     SELECT 1
@@ -140,12 +178,26 @@ def obtener_kpi3_procesos_disciplinarios(
                     AND "FueCerrado" = FALSE
             ) AS "AtendidosPendientesCierre",
 
+            COUNT(
+                DISTINCT "IdRegistroPersonal"
+            ) AS "TrabajadoresAgendados",
+
+            COUNT(
+                DISTINCT "IdRegistroPersonal"
+            ) FILTER (
+                WHERE "FueAtendido" = TRUE
+            ) AS "TrabajadoresAtendidos",
+
             ROUND(
-                COUNT(*) FILTER (
+                COUNT(
+                    DISTINCT "IdRegistroPersonal"
+                ) FILTER (
                     WHERE "FueAtendido" = TRUE
                 )::numeric
                 / NULLIF(
-                    COUNT(*),
+                    COUNT(
+                        DISTINCT "IdRegistroPersonal"
+                    ),
                     0
                 )
                 * 100,
@@ -181,15 +233,6 @@ def obtener_kpi3_procesos_disciplinarios(
                 MIN(
                     ag."FechaEvento"
                 ) AS "PrimeraFechaEvento",
-
-                BOOL_OR(
-                    UPPER(
-                        COALESCE(
-                            ag."EstadoAgenda",
-                            ''
-                        )
-                    ) = 'ATENDIDO'
-                ) AS "FueAtendido",
 
                 COUNT(*) AS "CantidadAgendas"
 
@@ -258,8 +301,13 @@ def obtener_kpi3_procesos_disciplinarios(
             ar."CantidadAgendas"
                 AS "CantidadAgendas",
 
-            ar."FueAtendido"
-                AS "FueAtendido",
+            EXISTS (
+                SELECT 1
+                FROM public."DescargoProcesoDisciplinario" dpd
+                WHERE
+                    dpd."IdProcesoDisciplinario"
+                    = pd."IdProcesoDisciplinario"
+            ) AS "FueAtendido",
 
             CASE
                 WHEN cr."IdProcesoDisciplinario"
@@ -293,11 +341,17 @@ def obtener_kpi3_procesos_disciplinarios(
                 )
             ) = 'OPERACIONES'
 
-            AND ar."FechaEntradaRRLL"
-                >= :fecha_inicio
+            AND (
+                CAST(:fecha_inicio AS date) IS NULL
+                OR ar."FechaEntradaRRLL"
+                    >= CAST(:fecha_inicio AS date)
+            )
 
-            AND ar."FechaEntradaRRLL"
-                < :fecha_fin_exclusiva
+            AND (
+                CAST(:fecha_fin_exclusiva AS date) IS NULL
+                OR ar."FechaEntradaRRLL"
+                    < CAST(:fecha_fin_exclusiva AS date)
+            )
 
         ORDER BY
             ar."FechaEntradaRRLL" ASC,
@@ -352,6 +406,14 @@ def obtener_kpi3_procesos_disciplinarios(
             or 0
         )
 
+        trabajadores_agendados = int(
+            resumen["TrabajadoresAgendados"] or 0
+        )
+
+        trabajadores_atendidos = int(
+            resumen["TrabajadoresAtendidos"] or 0
+        )
+
         cobertura_atencion = float(
             resumen["CoberturaAtencion"] or 0
         )
@@ -365,6 +427,10 @@ def obtener_kpi3_procesos_disciplinarios(
             "periodo": {
                 "fechaInicio": fecha_inicio,
                 "fechaFin": fecha_fin,
+                "esGlobal": (
+                    fecha_inicio is None
+                    and fecha_fin is None
+                ),
             },
             "kpi3": {
                 "agendados": agendados,
@@ -375,6 +441,12 @@ def obtener_kpi3_procesos_disciplinarios(
                 "cerrados": cerrados,
                 "atendidosPendientesCierre": (
                     atendidos_pendientes_cierre
+                ),
+                "trabajadoresAgendados": (
+                    trabajadores_agendados
+                ),
+                "trabajadoresAtendidos": (
+                    trabajadores_atendidos
                 ),
                 "coberturaAtencion": (
                     cobertura_atencion
