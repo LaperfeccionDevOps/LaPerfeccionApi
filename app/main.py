@@ -48,6 +48,7 @@ from api.routers import documentos_activos_routers
 from api.routers.nomina_retiros_routers import router as nomina_retiros_router
 from api.routers import nomina_comunicaciones_routers
 from api.routers.panel_gerencial_rrll_routers import router as panel_gerencial_rrll_router
+from api.routers.reintegros_routers import router as reintegros_router
 
 
 app = FastAPI(
@@ -133,6 +134,7 @@ app.include_router(documentos_activos_routers.router)
 app.include_router(nomina_retiros_router)
 app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(panel_gerencial_rrll_router)
+app.include_router(reintegros_router)
 
 
 # ─────────────────────────────────────────────

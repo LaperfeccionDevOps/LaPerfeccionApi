@@ -1,27 +1,27 @@
+# ruff: noqa: B008, BLE001, DTZ003
 # app/api/routers/aspirante_routers.py
 
 from datetime import date, datetime, timedelta
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from infrastructure.db.deps import get_db
-from domain.schemas.aspirante import (
-    RegistroPersonalCreate,
-    RegistroPersonalOut,
-    ExperienciaLaboralCreateSeleccionSchema,
-)
-from domain.models.aspirante import RegistroPersonal
 from application.services.aspirante_service import (
-    crear_registro,
     actualizar_registro,
     crear_experiencia_laboral_seleccion,
+    crear_registro,
     eliminar_experiencia_laboral_seleccion,
 )
+from domain.models.aspirante import RegistroPersonal
+from domain.schemas.aspirante import (
+    ExperienciaLaboralCreateSeleccionSchema,
+    RegistroPersonalCreate,
+    RegistroPersonalOut,
+)
+from infrastructure.db.deps import get_db
 from infrastructure.security.role_guard import require_roles_ids
 
 router = APIRouter()
@@ -90,18 +90,18 @@ def crear_registro_personal(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error controlado {str(e)}",
+            detail=f"Error controlado {e!s}",
         )
 
 
 class RegistroPersonalUpdate(BaseModel):
-    IdFondoPensiones: Optional[int] = None
-    IdFondoCesantias: Optional[int] = None
-    PesoKilogramos: Optional[float] = None
-    AlturaMetros: Optional[float] = None
-    ContactoEmergencia: Optional[str] = None
-    TelefonoContactoEmergencia: Optional[str] = None
-    UsuarioActualizacion: Optional[str] = None
+    IdFondoPensiones: int | None = None
+    IdFondoCesantias: int | None = None
+    PesoKilogramos: float | None = None
+    AlturaMetros: float | None = None
+    ContactoEmergencia: str | None = None
+    TelefonoContactoEmergencia: str | None = None
+    UsuarioActualizacion: str | None = None
 
 
 @router.put("/registro-personal/{id_registro}")
@@ -155,7 +155,7 @@ def actualizar_registro_personal(
         db.commit()
     except SQLAlchemyError as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error al actualizar RegistroPersonal: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al actualizar RegistroPersonal: {e!s}")
 
     return {"message": "Registro actualizado correctamente", "idRegistroPersonal": id_registro}
 
@@ -163,10 +163,10 @@ def actualizar_registro_personal(
 @router.get("/aspirantes")
 def listar_aspirantes(
     db: Session = Depends(get_db),
-    fecha_desde: Optional[date] = Query(None),
-    fecha_hasta: Optional[date] = Query(None),
-    id_estado: Optional[int] = Query(None),
-    search: Optional[str] = Query(None),
+    fecha_desde: date | None = Query(None),
+    fecha_hasta: date | None = Query(None),
+    id_estado: int | None = Query(None),
+    search: str | None = Query(None),
     current=Depends(
        require_roles_ids(
            ROL_SUPER_ADMIN,
@@ -344,7 +344,7 @@ def listar_aspirantes(
     except SQLAlchemyError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al listar aspirantes con detalles: {str(e)}"
+            detail=f"Error al listar aspirantes con detalles: {e!s}"
         )
 
 
@@ -382,7 +382,7 @@ def buscar_aspirantes_por_fecha_y_estado(
         return [dict(r) for r in rows]
 
     except SQLAlchemyError as e:
-        raise HTTPException(status_code=500, detail=f"Error en busqueda: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en busqueda: {e!s}")
 
 
 @router.get("/aspirantes/documento")
@@ -523,7 +523,7 @@ def actualizar_estado_aspirante(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error al actualizar el estado: {str(e)}",
+            detail=f"Error al actualizar el estado: {e!s}",
         )
 
     return {
@@ -542,10 +542,267 @@ def obtener_registro_personal(
     db: Session = Depends(get_db),
     current=Depends(require_roles_ids(ROL_SELECCION)),
 ):
-    referencias = db.query(RegistroPersonal).filter(RegistroPersonal.IdRegistroPersonal == id).all()
+    """
+    Endpoint legado del detalle de Selección.
+
+    Se conserva exactamente con la forma de respuesta actual para no romper
+    AspiranteDetailModal ni otros consumidores existentes. La separación por
+    ciclos se expone en /aspirante_detalle/{id}/ciclos.
+    """
+    referencias = (
+        db.query(RegistroPersonal)
+        .filter(RegistroPersonal.IdRegistroPersonal == id)
+        .all()
+    )
+
     if not referencias:
-        raise HTTPException(status_code=404, detail="No se encontraron registros de aspirante para ese ID")
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron registros de aspirante para ese ID",
+        )
+
     return referencias
+
+
+@router.get("/aspirante_detalle/{id}/ciclos")
+def obtener_detalle_aspirante_por_ciclos(
+    id: int,
+    db: Session = Depends(get_db),
+    current=Depends(
+        require_roles_ids(
+            ROL_SUPER_ADMIN,
+            ROL_SELECCION,
+            ROL_TALENTO_HUMANO,
+            ROL_CONTRATACION,
+            ROL_DESARROLLADOR,
+        )
+    ),
+):
+    """
+    Consulta de apoyo para Selección que separa la información laboral
+    dependiente de VinculacionLaboral.
+
+    IMPORTANTE:
+    - Solo consulta; no inserta, no actualiza y no elimina.
+    - No reemplaza el endpoint legado /aspirante_detalle/{id}.
+    - No toca Documentos, DatosSeleccion ni Entrevista en esta fase.
+    - Conserva registros legacy cuyo IdVinculacionLaboral es NULL dentro
+      del histórico, para no perder información anterior a la separación
+      por ciclos.
+    """
+
+    persona = db.execute(
+        text(
+            """
+            SELECT
+                rp."IdRegistroPersonal",
+                rp."NumeroIdentificacion",
+                rp."Nombres",
+                rp."Apellidos",
+                rp."IdEstadoProceso",
+                rp."FechaCreacion",
+                rp."FechaActualizacion",
+                rp."UsuarioActualizacion"
+            FROM public."RegistroPersonal" rp
+            WHERE rp."IdRegistroPersonal" = :id
+            LIMIT 1;
+            """
+        ),
+        {"id": id},
+    ).mappings().first()
+
+    if not persona:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron registros de aspirante para ese ID",
+        )
+
+    vinculaciones = db.execute(
+        text(
+            """
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdRegistroPersonal",
+                vl."NumeroCiclo",
+                vl."TipoVinculacion",
+                vl."EstadoVinculacion",
+                vl."FechaInicioProceso",
+                vl."FechaIngreso",
+                vl."FechaRetiro",
+                vl."IdCargo",
+                vl."IdCliente",
+                vl."Salario",
+                vl."IdTipoContrato",
+                vl."FechaCreacion",
+                vl."FechaActualizacion",
+                vl."UsuarioActualizacion"
+            FROM public."VinculacionLaboral" vl
+            WHERE vl."IdRegistroPersonal" = :id
+            ORDER BY
+                vl."NumeroCiclo" DESC,
+                vl."IdVinculacionLaboral" DESC;
+            """
+        ),
+        {"id": id},
+    ).mappings().all()
+
+    vinculacion_actual = next(
+        (
+            dict(v)
+            for v in vinculaciones
+            if str(v.get("EstadoVinculacion") or "").strip().upper()
+            in {"EN_PROCESO", "ACTIVO"}
+        ),
+        None,
+    )
+
+    if vinculacion_actual is None and vinculaciones:
+        vinculacion_actual = dict(vinculaciones[0])
+
+    id_vinculacion_actual = (
+        int(vinculacion_actual["IdVinculacionLaboral"])
+        if vinculacion_actual
+        and vinculacion_actual.get("IdVinculacionLaboral") is not None
+        else None
+    )
+
+    nucleo_rows = db.execute(
+        text(
+            """
+            SELECT
+                nf."IdNucleoFamiliar",
+                nf."IdRegistroPersonal",
+                nf."IdVinculacionLaboral",
+                nf."Nombre",
+                nf."Parentesco",
+                nf."Edad",
+                nf."Ocupacion",
+                nf."Telefono",
+                nf."Observaciones",
+                nf."DependeEconomicamente",
+                nf."TieneparentescoEnLaEmpresa",
+                nf."NombreFamiliarEmpresa",
+                nf."CargoDesempenaEmpresa",
+                nf."CedulaFamiliarEmpresa",
+                nf."ParentescoFamiliarEmpresa"
+            FROM public."NucleoFamiliar" nf
+            WHERE nf."IdRegistroPersonal" = :id
+            ORDER BY nf."IdNucleoFamiliar";
+            """
+        ),
+        {"id": id},
+    ).mappings().all()
+
+    referencias_rows = db.execute(
+        text(
+            """
+            SELECT
+                r."IdReferencia",
+                r."IdRegistroPersonal",
+                r."IdVinculacionLaboral",
+                r."IdTipoReferencia",
+                r."Nombre",
+                r."Telefono",
+                r."Parentesco",
+                r."TiempoConocerlo",
+                r."FechaCreacion",
+                r."FechaActualizacion"
+            FROM public."Referencia" r
+            WHERE r."IdRegistroPersonal" = :id
+            ORDER BY r."IdReferencia";
+            """
+        ),
+        {"id": id},
+    ).mappings().all()
+
+    experiencia_rows = db.execute(
+        text(
+            """
+            SELECT
+                el."IdExperienciaLaboral",
+                el."IdRegistroPersonal",
+                el."IdVinculacionLaboral",
+                el."Cargo",
+                el."Compania",
+                el."TiempoDuracion",
+                el."Funciones",
+                el."JefeInmediato",
+                el."TelefonoJefe",
+                el."TieneExperienciaPrevia"
+            FROM public."ExperienciaLaboral" el
+            WHERE el."IdRegistroPersonal" = :id
+            ORDER BY el."IdExperienciaLaboral";
+            """
+        ),
+        {"id": id},
+    ).mappings().all()
+
+    def separar_por_ciclo(rows):
+        actuales = []
+        historicos = []
+
+        for row in rows:
+            item = dict(row)
+            id_vinc = item.get("IdVinculacionLaboral")
+
+            if (
+                id_vinculacion_actual is not None
+                and id_vinc is not None
+                and int(id_vinc) == id_vinculacion_actual
+            ):
+                actuales.append(item)
+            else:
+                historicos.append(item)
+
+        return actuales, historicos
+
+    nucleo_actual, nucleo_historico = separar_por_ciclo(nucleo_rows)
+    referencias_actuales, referencias_historicas = separar_por_ciclo(
+        referencias_rows
+    )
+    experiencia_actual, experiencia_historica = separar_por_ciclo(
+        experiencia_rows
+    )
+
+    vinculaciones_historicas = [
+        dict(v)
+        for v in vinculaciones
+        if (
+            id_vinculacion_actual is None
+            or v.get("IdVinculacionLaboral") is None
+            or int(v["IdVinculacionLaboral"]) != id_vinculacion_actual
+        )
+    ]
+
+    return {
+        "ok": True,
+        "soloConsulta": True,
+        "persona": dict(persona),
+        "esReintegroActual": bool(
+            vinculacion_actual
+            and str(
+                vinculacion_actual.get("TipoVinculacion") or ""
+            ).strip().upper()
+            == "REINTEGRO"
+        ),
+        "vinculacionActual": vinculacion_actual,
+        "vinculacionesHistoricas": vinculaciones_historicas,
+        "actual": {
+            "nucleoFamiliar": nucleo_actual,
+            "referencias": referencias_actuales,
+            "experienciaLaboral": experiencia_actual,
+        },
+        "historico": {
+            "nucleoFamiliar": nucleo_historico,
+            "referencias": referencias_historicas,
+            "experienciaLaboral": experiencia_historica,
+        },
+        "pendienteSepararEnSiguientesFases": [
+            "Documentos",
+            "DatosSeleccion",
+            "Entrevista",
+        ],
+    }
 
 
 @router.put("/registro-personal/full/{id_registro}", response_model=RegistroPersonalOut)
@@ -589,7 +846,7 @@ def actualizar_registro_personal_full(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error controlado {str(e)}",
+            detail=f"Error controlado {e!s}",
         )
 
 

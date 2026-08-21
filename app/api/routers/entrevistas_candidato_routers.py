@@ -1,8 +1,9 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 
@@ -16,11 +17,11 @@ ENT_FULL = f'{ENT_SCHEMA}."{ENT_TABLE}"'
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
-def to_regclass(db: Session, full_name: str) -> Optional[str]:
+def to_regclass(db: Session, full_name: str) -> str | None:
     return db.execute(text("SELECT to_regclass(:t)"), {"t": full_name}).scalar()
 
 
-def get_columns(db: Session, schema: str, table: str) -> set:
+def get_columns(db: Session, schema: str, table: str) -> set[str]:
     rows = db.execute(
         text("""
             SELECT column_name
@@ -39,14 +40,14 @@ def split_schema_table(full: str) -> tuple[str, str]:
     return (schema.replace('"', ""), rest.replace('"', ""))
 
 
-def first_existing_table(db: Session, candidates: list[str]) -> Optional[str]:
+def first_existing_table(db: Session, candidates: list[str]) -> str | None:
     for t in candidates:
         if to_regclass(db, t):
             return t
     return None
 
 
-def detect_first(cols: set, candidates: list[str]) -> Optional[str]:
+def detect_first(cols: set[str], candidates: list[str]) -> str | None:
     for c in candidates:
         if c in cols:
             return c
@@ -75,7 +76,7 @@ def normalize_date_value(val: Any) -> Any:
 
 
 # 🔁 Aliases: si el front manda nombres "cortos" pero en BD existen nombres "largos"
-ALIAS_MAP: Dict[str, list[str]] = {
+ALIAS_MAP: dict[str, list[str]] = {
     "IdRegistroPerso": ["IdRegistroPerso", "IdRegistroPersonal"],
     "IdRegistroPersonal": ["IdRegistroPersonal", "IdRegistroPerso"],
 
@@ -94,7 +95,7 @@ ALIAS_MAP: Dict[str, list[str]] = {
 }
 
 
-def resolve_column(ent_cols: set, incoming_key: str) -> Optional[str]:
+def resolve_column(ent_cols: set[str], incoming_key: str) -> str | None:
     if incoming_key in ent_cols:
         return incoming_key
     if incoming_key in ALIAS_MAP:
@@ -133,7 +134,7 @@ def get_ent_fk_columns(db: Session) -> list[str]:
     return fk_cols
 
 
-def get_audit_columns(db: Session) -> tuple[Optional[str], Optional[str]]:
+def get_audit_columns(db: Session) -> tuple[str | None, str | None]:
     ent_cols = get_columns(db, ENT_SCHEMA, ENT_TABLE)
     fecha_crea = detect_first(ent_cols, ["FechaCreacion", "Fecha_Creacion", "CreatedAt", "created_at"])
     fecha_act = detect_first(ent_cols, ["FechaActualizacion", "FechaActualiza", "Fecha_Actualizacion", "UpdatedAt", "updated_at"])
@@ -149,73 +150,83 @@ def build_fk_where_clause(fk_cols: list[str]) -> str:
 # Modelos
 # ─────────────────────────────────────────────
 class EntrevistaGuardar(BaseModel):
-    IdRegistroPerso: Optional[int] = None
-    IdRegistroPersonal: Optional[int] = None
+    IdRegistroPerso: int | None = None
+    IdRegistroPersonal: int | None = None
 
-    Cargo: Optional[str] = None
-    HaTenidoAccide: Optional[bool] = None
-    HaTenidoAccidentes: Optional[bool] = None
-    AccidenteCual: Optional[str] = None
+    # Ciclo laboral actual. Opcional para conservar compatibilidad
+    # con los flujos existentes que todavía no envían este dato.
+    IdVinculacionLaboral: int | None = None
 
-    Fortalezas: Optional[str] = None
-    AreasDeMejora: Optional[str] = None
+    Cargo: str | None = None
+    HaTenidoAccide: bool | None = None
+    HaTenidoAccidentes: bool | None = None
+    AccidenteCual: str | None = None
 
-    ConceptoFinalS: Optional[str] = None
-    ConceptoFinalSeleccion: Optional[str] = None
-    ObservacionesF: Optional[str] = None
-    ObservacionesFinales: Optional[str] = None
-    EntrevistadorPo: Optional[str] = None
-    EntrevistadorPor: Optional[str] = None
+    Fortalezas: str | None = None
+    AreasDeMejora: str | None = None
+
+    ConceptoFinalS: str | None = None
+    ConceptoFinalSeleccion: str | None = None
+    ObservacionesF: str | None = None
+    ObservacionesFinales: str | None = None
+    EntrevistadorPo: str | None = None
+    EntrevistadorPor: str | None = None
 
     # ✅ NUEVO
-    ObservacionesNucleoFamiliar: Optional[str] = None
+    ObservacionesNucleoFamiliar: str | None = None
 
     # ✅ NUEVO: Patologías / Enfermedades (ya existen en BD)
-    HaTenidoPatologias: Optional[bool] = None
-    HaTenidoPatolo: Optional[bool] = None
-    PatologiaCual: Optional[str] = None
+    HaTenidoPatologias: bool | None = None
+    HaTenidoPatolo: bool | None = None
+    PatologiaCual: str | None = None
 
 
 class EntrevistaActualizar(BaseModel):
-    Cargo: Optional[str] = None
-    HaTenidoAccide: Optional[bool] = None
-    HaTenidoAccidentes: Optional[bool] = None
-    AccidenteCual: Optional[str] = None
+    # Opcional para permitir actualizaciones protegidas por ciclo
+    # cuando el front ya conoce la vinculación actual.
+    IdVinculacionLaboral: int | None = None
 
-    Fortalezas: Optional[str] = None
-    AreasDeMejora: Optional[str] = None
+    Cargo: str | None = None
+    HaTenidoAccide: bool | None = None
+    HaTenidoAccidentes: bool | None = None
+    AccidenteCual: str | None = None
 
-    ConceptoFinalS: Optional[str] = None
-    ConceptoFinalSeleccion: Optional[str] = None
-    ObservacionesF: Optional[str] = None
-    ObservacionesFinales: Optional[str] = None
-    EntrevistadorPo: Optional[str] = None
-    EntrevistadorPor: Optional[str] = None
+    Fortalezas: str | None = None
+    AreasDeMejora: str | None = None
 
-    Expedicion: Optional[Any] = None
-    Barrio: Optional[str] = None
-    Localidad: Optional[str] = None
-    Edad: Optional[int] = None
-    EstadoCivil: Optional[Any] = None
-    Hijos: Optional[int] = None
-    Celular: Optional[str] = None
+    ConceptoFinalS: str | None = None
+    ConceptoFinalSeleccion: str | None = None
+    ObservacionesF: str | None = None
+    ObservacionesFinales: str | None = None
+    EntrevistadorPo: str | None = None
+    EntrevistadorPor: str | None = None
+
+    Expedicion: Any | None = None
+    Barrio: str | None = None
+    Localidad: str | None = None
+    Edad: int | None = None
+    EstadoCivil: Any | None = None
+    Hijos: int | None = None
+    Celular: str | None = None
 
     # ✅ NUEVO
-    ObservacionesNucleoFamiliar: Optional[str] = None
+    ObservacionesNucleoFamiliar: str | None = None
 
     # ✅ NUEVO: Patologías / Enfermedades (para PUT por id / por registro)
-    HaTenidoPatologias: Optional[bool] = None
-    HaTenidoPatolo: Optional[bool] = None
-    PatologiaCual: Optional[str] = None
+    HaTenidoPatologias: bool | None = None
+    HaTenidoPatolo: bool | None = None
+    PatologiaCual: str | None = None
 
 
 class DecisionFinalPayload(BaseModel):
-    ConceptoFinalSeleccion: Optional[str] = None
-    ConceptoFinalS: Optional[str] = None
-    ObservacionesFinales: Optional[str] = None
-    ObservacionesF: Optional[str] = None
-    EntrevistadorPor: Optional[str] = None
-    EntrevistadorPo: Optional[str] = None
+    IdVinculacionLaboral: int | None = None
+
+    ConceptoFinalSeleccion: str | None = None
+    ConceptoFinalS: str | None = None
+    ObservacionesFinales: str | None = None
+    ObservacionesF: str | None = None
+    EntrevistadorPor: str | None = None
+    EntrevistadorPo: str | None = None
 
 
 # ✅ NUEVO: payload para observaciones del Núcleo Familiar (en EntrevistaCandidato)
@@ -226,7 +237,7 @@ class ObservacionesNucleoFamiliarPayload(BaseModel):
 # ─────────────────────────────────────────────
 # Datos personales (autollenado)
 # ─────────────────────────────────────────────
-def fetch_datos_personales(db: Session, id_registro_perso: int) -> Dict[str, Any]:
+def fetch_datos_personales(db: Session, id_registro_perso: int) -> dict[str, Any]:
     candidates = [
         'public."RegistroPersonal"',
         'public."Registro_Personal"',
@@ -290,13 +301,25 @@ def fetch_datos_personales(db: Session, id_registro_perso: int) -> Dict[str, Any
     return dict(row._mapping) if row else {}
 
 
-def fetch_ultima_entrevista_por_registro(db: Session, id_registro_perso: int) -> Optional[Dict[str, Any]]:
+def fetch_ultima_entrevista_por_registro(
+    db: Session,
+    id_registro_perso: int,
+    id_vinculacion_laboral: int | None = None,
+) -> dict[str, Any] | None:
+    """
+    Devuelve la entrevista más reciente del trabajador.
+
+    Compatibilidad:
+    - Si id_vinculacion_laboral es None, conserva el comportamiento legado.
+    - Si se envía id_vinculacion_laboral, consulta únicamente ese ciclo.
+
+    De esta forma un reintegro no reutiliza ni modifica una entrevista
+    perteneciente a un ciclo anterior.
+    """
     fk_cols = get_ent_fk_columns(db)
     ent_cols = get_columns(db, ENT_SCHEMA, ENT_TABLE)
     pk_col = get_ent_pk_column(db)
 
-    # ✅ FIX: cuando FechaCreacion tiene muchos NULL, el ORDER BY se vuelve incorrecto.
-    # Usamos: FechaCreacion DESC NULLS LAST, y desempate por PK DESC.
     fecha_crea, _ = get_audit_columns(db)
     if fecha_crea and fecha_crea in ent_cols:
         order_by = f'"{fecha_crea}" DESC NULLS LAST, "{pk_col}" DESC'
@@ -305,18 +328,35 @@ def fetch_ultima_entrevista_por_registro(db: Session, id_registro_perso: int) ->
 
     where_fk = build_fk_where_clause(fk_cols)
 
-    q = text(f"""
+    where_parts = [where_fk]
+    params: dict[str, Any] = {"id": id_registro_perso}
+
+    if (
+        id_vinculacion_laboral is not None
+        and "IdVinculacionLaboral" in ent_cols
+    ):
+        where_parts.append(
+            '"IdVinculacionLaboral" = :id_vinculacion_laboral'
+        )
+        params["id_vinculacion_laboral"] = id_vinculacion_laboral
+
+    where_sql = " AND ".join(where_parts)
+
+    q = text(
+        f"""
         SELECT *
         FROM {ENT_FULL}
-        WHERE {where_fk}
+        WHERE {where_sql}
         ORDER BY {order_by}
         LIMIT 1
-    """)
-    row = db.execute(q, {"id": id_registro_perso}).fetchone()
+        """
+    )
+
+    row = db.execute(q, params).fetchone()
     return dict(row._mapping) if row else None
 
 
-def pick_current_value(current: Dict[str, Any], candidates: list[str]) -> Any:
+def pick_current_value(current: dict[str, Any], candidates: list[str]) -> Any:
     for c in candidates:
         if c in current:
             return current.get(c)
@@ -352,15 +392,38 @@ def guardar(payload: EntrevistaGuardar, db: Session = Depends(get_db)):
 
         id_registro = payload.IdRegistroPerso or payload.IdRegistroPersonal
         if not id_registro:
-            raise HTTPException(status_code=400, detail="Falta IdRegistroPerso / IdRegistroPersonal")
+            raise HTTPException(
+                status_code=400,
+                detail="Falta IdRegistroPerso / IdRegistroPersonal",
+            )
+
+        id_vinculacion_laboral = payload.IdVinculacionLaboral
+
+        if (
+            id_vinculacion_laboral is not None
+            and "IdVinculacionLaboral" not in ent_cols
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "EntrevistaCandidato no tiene la columna "
+                    "IdVinculacionLaboral."
+                ),
+            )
 
         datos = fetch_datos_personales(db, id_registro)
 
         # data_to_save: GUARDA EN TODAS LAS FK QUE EXISTAN
-        data_to_save: Dict[str, Any] = {}
+        data_to_save: dict[str, Any] = {}
         for fk in fk_cols:
             if fk in ent_cols:
                 data_to_save[fk] = id_registro
+
+        if (
+            id_vinculacion_laboral is not None
+            and "IdVinculacionLaboral" in ent_cols
+        ):
+            data_to_save["IdVinculacionLaboral"] = id_vinculacion_laboral
 
         # Autollenado (si existen columnas en EntrevistaCandidato)
         mapping_personal = {
@@ -410,7 +473,11 @@ def guardar(payload: EntrevistaGuardar, db: Session = Depends(get_db)):
             manual["PatologiaCual"] = None
 
         for k, v in manual.items():
-            if k in ("IdRegistroPerso", "IdRegistroPersonal"):
+            if k in (
+                "IdRegistroPerso",
+                "IdRegistroPersonal",
+                "IdVinculacionLaboral",
+            ):
                 continue
 
             # normalizar inputs alternos
@@ -442,12 +509,16 @@ def guardar(payload: EntrevistaGuardar, db: Session = Depends(get_db)):
             else:
                 data_to_save[col] = v
 
-        current = fetch_ultima_entrevista_por_registro(db, id_registro)
+        current = fetch_ultima_entrevista_por_registro(
+            db,
+            id_registro,
+            id_vinculacion_laboral=id_vinculacion_laboral,
+        )
 
         # ───────── UPDATE (última) ─────────
         if current and pk_col in current:
             set_parts = []
-            params: Dict[str, Any] = {"pk": current[pk_col]}
+            params: dict[str, Any] = {"pk": current[pk_col]}
 
             for col, val in data_to_save.items():
                 if col not in ent_cols:
@@ -479,7 +550,7 @@ def guardar(payload: EntrevistaGuardar, db: Session = Depends(get_db)):
         # ───────── INSERT ─────────
         cols = []
         vals = []
-        params: Dict[str, Any] = {}
+        params: dict[str, Any] = {}
 
         for col, val in data_to_save.items():
             if col not in ent_cols:
@@ -520,7 +591,11 @@ def guardar(payload: EntrevistaGuardar, db: Session = Depends(get_db)):
 
 
 @router.get("/por-registro/{id_registro_perso}")
-def listar_por_registro(id_registro_perso: int, db: Session = Depends(get_db)):
+def listar_por_registro(
+    id_registro_perso: int,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
     fk_cols = get_ent_fk_columns(db)
     ent_cols = get_columns(db, ENT_SCHEMA, ENT_TABLE)
     pk_col = get_ent_pk_column(db)
@@ -534,16 +609,133 @@ def listar_por_registro(id_registro_perso: int, db: Session = Depends(get_db)):
 
     where_fk = build_fk_where_clause(fk_cols)
 
-    q = text(f"""
+    where_parts = [where_fk]
+    params: dict[str, Any] = {"id": id_registro_perso}
+
+    if (
+        id_vinculacion_laboral is not None
+        and "IdVinculacionLaboral" in ent_cols
+    ):
+        where_parts.append(
+            '"IdVinculacionLaboral" = :id_vinculacion_laboral'
+        )
+        params["id_vinculacion_laboral"] = id_vinculacion_laboral
+
+    where_sql = " AND ".join(where_parts)
+
+    q = text(
+        f"""
         SELECT *
         FROM {ENT_FULL}
-        WHERE {where_fk}
+        WHERE {where_sql}
         ORDER BY {order_by}
-    """)
-    rows = db.execute(q, {"id": id_registro_perso}).fetchall()
+        """
+    )
+    rows = db.execute(q, params).fetchall()
     data = [dict(r._mapping) for r in rows]
 
     return {"ok": True, "data": data, "datos": data}
+
+
+@router.get("/por-registro/{id_registro_perso}/ciclos")
+def listar_entrevistas_por_ciclos(
+    id_registro_perso: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Solo consulta.
+
+    Separa entrevistas por IdVinculacionLaboral:
+    - actual: entrevista del ciclo laboral abierto más reciente.
+    - historico: entrevistas de ciclos anteriores o legacy (NULL).
+    """
+    ent_cols = get_columns(db, ENT_SCHEMA, ENT_TABLE)
+    fk_cols = get_ent_fk_columns(db)
+    pk_col = get_ent_pk_column(db)
+    fecha_crea, _ = get_audit_columns(db)
+
+    if "IdVinculacionLaboral" not in ent_cols:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "EntrevistaCandidato no tiene la columna "
+                "IdVinculacionLaboral."
+            ),
+        )
+
+    where_fk = build_fk_where_clause(fk_cols)
+
+    if fecha_crea and fecha_crea in ent_cols:
+        order_by = f'"{fecha_crea}" DESC NULLS LAST, "{pk_col}" DESC'
+    else:
+        order_by = f'"{pk_col}" DESC'
+
+    vinculacion_actual = db.execute(
+        text(
+            """
+            SELECT
+                "IdVinculacionLaboral",
+                "NumeroCiclo",
+                "TipoVinculacion",
+                "EstadoVinculacion"
+            FROM public."VinculacionLaboral"
+            WHERE "IdRegistroPersonal" = :id
+              AND "EstadoVinculacion" IN ('EN_PROCESO', 'ACTIVO')
+            ORDER BY
+                "NumeroCiclo" DESC,
+                "IdVinculacionLaboral" DESC
+            LIMIT 1
+            """
+        ),
+        {"id": id_registro_perso},
+    ).mappings().first()
+
+    rows = db.execute(
+        text(
+            f"""
+            SELECT *
+            FROM {ENT_FULL}
+            WHERE {where_fk}
+            ORDER BY {order_by}
+            """
+        ),
+        {"id": id_registro_perso},
+    ).fetchall()
+
+    entrevistas = [dict(row._mapping) for row in rows]
+
+    id_actual = (
+        int(vinculacion_actual["IdVinculacionLaboral"])
+        if vinculacion_actual
+        else None
+    )
+
+    actual = [
+        entrevista
+        for entrevista in entrevistas
+        if (
+            id_actual is not None
+            and entrevista.get("IdVinculacionLaboral") == id_actual
+        )
+    ]
+
+    historico = [
+        entrevista
+        for entrevista in entrevistas
+        if (
+            id_actual is None
+            or entrevista.get("IdVinculacionLaboral") != id_actual
+        )
+    ]
+
+    return {
+        "ok": True,
+        "soloConsulta": True,
+        "IdRegistroPersonal": id_registro_perso,
+        "vinculacionActual": dict(vinculacion_actual) if vinculacion_actual else None,
+        "actual": actual,
+        "historico": historico,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -601,24 +793,47 @@ def guardar_observaciones_nucleo_familiar(
 # ─────────────────────────────────────────────
 
 @router.get("/{id_registro_perso}")
-def obtener_ultima_por_registro_alias(id_registro_perso: int, db: Session = Depends(get_db)):
+def obtener_ultima_por_registro_alias(
+    id_registro_perso: int,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
     """
     ✅ FRONT: GET /api/entrevistas-candidato/{idRegistro}
     Devuelve la última entrevista del registro.
     """
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=id_vinculacion_laboral,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
     return {"ok": True, "data": current}
 
 
 @router.put("/{id_registro_perso}")
-def actualizar_ultima_por_registro_alias(id_registro_perso: int, payload: EntrevistaActualizar, db: Session = Depends(get_db)):
+def actualizar_ultima_por_registro_alias(
+    id_registro_perso: int,
+    payload: EntrevistaActualizar,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
     """
     ✅ FRONT (fallback): PUT /api/entrevistas-candidato/{idRegistro}
     Actualiza la ÚLTIMA entrevista por registro.
     """
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+    ciclo = (
+        id_vinculacion_laboral
+        if id_vinculacion_laboral is not None
+        else payload.IdVinculacionLaboral
+    )
+
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=ciclo,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
@@ -631,11 +846,19 @@ def actualizar_ultima_por_registro_alias(id_registro_perso: int, payload: Entrev
 
 
 @router.get("/{id_registro_perso}/decision-final")
-def obtener_decision_final_alias(id_registro_perso: int, db: Session = Depends(get_db)):
+def obtener_decision_final_alias(
+    id_registro_perso: int,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
     """
     ✅ FRONT: GET /api/entrevistas-candidato/{idRegistro}/decision-final
     """
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=id_vinculacion_laboral,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
@@ -653,12 +876,27 @@ def obtener_decision_final_alias(id_registro_perso: int, db: Session = Depends(g
 
 
 @router.put("/{id_registro_perso}/decision-final")
-def actualizar_decision_final_alias(id_registro_perso: int, payload: DecisionFinalPayload, db: Session = Depends(get_db)):
+def actualizar_decision_final_alias(
+    id_registro_perso: int,
+    payload: DecisionFinalPayload,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
     """
     ✅ FRONT: PUT /api/entrevistas-candidato/{idRegistro}/decision-final
     Actualiza la decisión final en la ÚLTIMA entrevista por registro.
     """
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+    ciclo = (
+        id_vinculacion_laboral
+        if id_vinculacion_laboral is not None
+        else payload.IdVinculacionLaboral
+    )
+
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=ciclo,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
@@ -740,9 +978,12 @@ def actualizar_por_id(id_entrevista: int, payload: EntrevistaActualizar, db: Ses
             data["HaTenidoPatolo"] = True
 
         set_parts = []
-        params: Dict[str, Any] = {"id": id_entrevista}
+        params: dict[str, Any] = {"id": id_entrevista}
 
         for incoming_key, val in data.items():
+            if incoming_key == "IdVinculacionLaboral":
+                continue
+
             col = resolve_column(ent_cols, incoming_key)
             if not col:
                 continue
@@ -783,8 +1024,16 @@ def actualizar_por_id(id_entrevista: int, payload: EntrevistaActualizar, db: Ses
 
 # ✅ Se dejan estas rutas tal cual estaban (compatibilidad)
 @router.get("/por-registro/{id_registro_perso}/decision-final")
-def obtener_decision_final(id_registro_perso: int, db: Session = Depends(get_db)):
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+def obtener_decision_final(
+    id_registro_perso: int,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=id_vinculacion_laboral,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
@@ -802,8 +1051,23 @@ def obtener_decision_final(id_registro_perso: int, db: Session = Depends(get_db)
 
 
 @router.put("/por-registro/{id_registro_perso}/decision-final")
-def actualizar_decision_final(id_registro_perso: int, payload: DecisionFinalPayload, db: Session = Depends(get_db)):
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+def actualizar_decision_final(
+    id_registro_perso: int,
+    payload: DecisionFinalPayload,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
+    ciclo = (
+        id_vinculacion_laboral
+        if id_vinculacion_laboral is not None
+        else payload.IdVinculacionLaboral
+    )
+
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=ciclo,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
@@ -825,8 +1089,23 @@ def actualizar_decision_final(id_registro_perso: int, payload: DecisionFinalPayl
 
 
 @router.put("/por-registro/{id_registro_perso}")
-def actualizar_ultima_por_registro(id_registro_perso: int, payload: EntrevistaActualizar, db: Session = Depends(get_db)):
-    current = fetch_ultima_entrevista_por_registro(db, id_registro_perso)
+def actualizar_ultima_por_registro(
+    id_registro_perso: int,
+    payload: EntrevistaActualizar,
+    id_vinculacion_laboral: int | None = None,
+    db: Session = Depends(get_db),
+):
+    ciclo = (
+        id_vinculacion_laboral
+        if id_vinculacion_laboral is not None
+        else payload.IdVinculacionLaboral
+    )
+
+    current = fetch_ultima_entrevista_por_registro(
+        db,
+        id_registro_perso,
+        id_vinculacion_laboral=ciclo,
+    )
     if not current:
         raise HTTPException(status_code=404, detail="Entrevista no encontrada")
 
