@@ -1,45 +1,68 @@
 # app/services/contratacion_basica_service.py
 
-from typing import Optional, Dict, Any
-from sqlalchemy.orm import Session
-from repositories.contratacion_basica_repo import ContratacionBasicaRepo
 import inspect
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from repositories.contratacion_basica_repo import ContratacionBasicaRepo
 
 
 class ContratacionBasicaService:
     def __init__(self) -> None:
         self.repo = ContratacionBasicaRepo()
 
-        # DEBUG TEMPORAL: muestra el archivo REAL del repo en ejecución
-        print(" REPO REAL EN USO:", inspect.getsourcefile(self.repo.__class__))
+        # DEBUG TEMPORAL:
+        # muestra el archivo real del repo en ejecución.
+        print(
+            "REPO REAL EN USO:",
+            inspect.getsourcefile(self.repo.__class__),
+        )
 
-    def obtener(self, db: Session, id_registro_personal: int) -> Optional[Dict[str, Any]]:
-        return self.repo.get_by_registro_personal(db, id_registro_personal)
+    def obtener(
+        self,
+        db: Session,
+        id_registro_personal: int,
+    ) -> dict[str, Any] | None:
+        return self.repo.get_by_registro_personal(
+            db,
+            id_registro_personal,
+        )
 
-    def guardar(self, db: Session, data: Dict[str, Any]) -> Dict[str, Any]:
-        # Reglas mínimas
+    def guardar(
+        self,
+        db: Session,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
         if not data.get("IdRegistroPersonal"):
-            raise ValueError("IdRegistroPersonal es obligatorio")
+            raise ValueError(
+                "IdRegistroPersonal es obligatorio"
+            )
 
-        # Riesgo laboral opcional (validación suave)
+        # IdVinculacionLaboral pertenece al flujo por ciclos,
+        # pero ContratacionBasica no tiene esa columna.
+        # Lo conservamos aparte para que el repo no intente
+        # insertarlo o actualizarlo directamente.
+        id_vinculacion_laboral = data.pop(
+            "IdVinculacionLaboral",
+            None,
+        )
+
         riesgo = data.get("RiesgoLaboral")
         if riesgo is not None:
             riesgo = str(riesgo).strip().upper()
-            data["RiesgoLaboral"] = riesgo
+            data["RiesgoLaboral"] = riesgo or None
 
-        # Posicion: texto manual (código numérico, pero lo guardamos como string)
         pos = data.get("Posicion")
         if pos is not None:
             pos = str(pos).strip()
-            data["Posicion"] = pos if pos != "" else None
+            data["Posicion"] = pos or None
 
-        # NumeroCuenta: texto manual (NO numérico)
         num_cuenta = data.get("NumeroCuenta")
         if num_cuenta is not None:
             num_cuenta = str(num_cuenta).strip()
-            data["NumeroCuenta"] = num_cuenta if num_cuenta != "" else None
+            data["NumeroCuenta"] = num_cuenta or None
 
-        # Escalafon: permite 200, 210 y 220
         esc = data.get("Escalafon")
         if esc is not None:
             esc = str(esc).strip()
@@ -49,12 +72,12 @@ class ContratacionBasicaService:
             else:
                 if esc not in ("200", "210", "220"):
                     raise ValueError(
-                        "Escalafon inválido. Valores permitidos: 200, 210 o 220."
+                        "Escalafon inválido. Valores permitidos: "
+                        "200, 210 o 220."
                     )
 
                 data["Escalafon"] = esc
 
-        # TetanosDosis: de 1 a 5
         tetanos_dosis = data.get("TetanosDosis")
         if tetanos_dosis is not None:
             if str(tetanos_dosis).strip() == "":
@@ -62,15 +85,19 @@ class ContratacionBasicaService:
             else:
                 try:
                     tetanos_dosis = int(tetanos_dosis)
-                except ValueError:
-                    raise ValueError("TetanosDosis debe ser un número entre 1 y 5.")
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "TetanosDosis debe ser un número entre 1 y 5."
+                    ) from exc
 
-                if tetanos_dosis < 1 or tetanos_dosis > 5:
-                    raise ValueError("TetanosDosis inválida. Valores permitidos: 1 a 5.")
+                if not 1 <= tetanos_dosis <= 5:
+                    raise ValueError(
+                        "TetanosDosis inválida. "
+                        "Valores permitidos: 1 a 5."
+                    )
 
                 data["TetanosDosis"] = tetanos_dosis
 
-        # HepatitisDosis: de 1 a 4
         hepatitis_dosis = data.get("HepatitisDosis")
         if hepatitis_dosis is not None:
             if str(hepatitis_dosis).strip() == "":
@@ -78,23 +105,44 @@ class ContratacionBasicaService:
             else:
                 try:
                     hepatitis_dosis = int(hepatitis_dosis)
-                except ValueError:
-                    raise ValueError("HepatitisDosis debe ser un número entre 1 y 4.")
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "HepatitisDosis debe ser un número entre 1 y 4."
+                    ) from exc
 
-                if hepatitis_dosis < 1 or hepatitis_dosis > 4:
-                    raise ValueError("HepatitisDosis inválida. Valores permitidos: 1 a 4.")
+                if not 1 <= hepatitis_dosis <= 4:
+                    raise ValueError(
+                        "HepatitisDosis inválida. "
+                        "Valores permitidos: 1 a 4."
+                    )
 
                 data["HepatitisDosis"] = hepatitis_dosis
 
-        # Ejecutar UPSERT y mostrar qué devuelve realmente
-        result = self.repo.upsert_by_registro_personal(db, data)
-        print(" RESULTADO UPSERT:", result)
+        result = self.repo.upsert_by_registro_personal(
+            db,
+            data,
+        )
 
-        # Si por alguna razón retorna None, explotamos con mensaje claro
+        print(
+            "RESULTADO UPSERT:",
+            result,
+        )
+
         if result is None:
             raise ValueError(
                 "El repo upsert_by_registro_personal retornó None. "
-                "Esto indica que se está usando un repo distinto al que editaste o falta un return."
+                "Esto indica que se está usando un repo distinto "
+                "al esperado o que falta un return."
+            )
+
+        # Se vuelve a incluir en la respuesta únicamente para
+        # que el flujo pueda conservar el contexto del ciclo.
+        if (
+            id_vinculacion_laboral is not None
+            and isinstance(result, dict)
+        ):
+            result["IdVinculacionLaboral"] = (
+                id_vinculacion_laboral
             )
 
         return result

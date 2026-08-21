@@ -1,22 +1,18 @@
+# app/api/routers/documentos_contratacion_routers.py
+
 import base64
 import re
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    status,
-)
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from infrastructure.db.deps import get_db
-from domain.schemas.aspirante import (
-    RegistrarDocumentosContratacionSchema,
-)
 from domain.models.aspirante import (
     DocumentacionORM,
     RelacionTipoDocumentacionORM,
 )
+from domain.schemas.aspirante import RegistrarDocumentosContratacionSchema
+from infrastructure.db.deps import get_db
 
 
 router = APIRouter(
@@ -26,7 +22,7 @@ router = APIRouter(
 
 
 # Solamente estos tipos permiten conservar varios documentos
-# para el mismo trabajador.
+# para el mismo trabajador dentro del mismo ciclo laboral.
 TIPOS_DOCUMENTALES_MULTIPLES = {
     36,  # Entrega de dotación
     64,  # Otro sí
@@ -52,6 +48,46 @@ def limpiar_base64(base64_str: str) -> str:
     return base64_str
 
 
+def obtener_vinculacion_actual(
+    db: Session,
+    id_registro_personal: int,
+) -> int | None:
+    """
+    Obtiene la vinculación laboral abierta más reciente.
+
+    Para reintegros permite que los documentos de contratación
+    se guarden separados del ciclo histórico.
+
+    Si el trabajador no tiene una vinculación abierta, retorna None
+    y el flujo conserva el comportamiento anterior.
+    """
+    row = db.execute(
+        text(
+            """
+            SELECT
+                vl."IdVinculacionLaboral"
+            FROM public."VinculacionLaboral" vl
+            WHERE vl."IdRegistroPersonal" = :id_registro_personal
+              AND UPPER(
+                  COALESCE(vl."EstadoVinculacion", '')
+              ) = 'EN_PROCESO'
+            ORDER BY
+                vl."NumeroCiclo" DESC,
+                vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "id_registro_personal": id_registro_personal,
+        },
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    return int(row["IdVinculacionLaboral"])
+
+
 @router.post(
     "/upload",
     status_code=status.HTTP_201_CREATED,
@@ -63,19 +99,33 @@ async def subir_documento_contratacion(
     """
     Registra documentos de contratación.
 
-    Para los tipos documentales 36 y 64 se conserva cada carga
-    como un documento independiente.
-
-    Para los demás tipos se mantiene el comportamiento anterior:
-    si ya existe un documento del mismo tipo para el trabajador,
-    se actualiza.
+    Reglas:
+    - Si existe una vinculación laboral abierta, los documentos quedan
+      asociados a esa vinculación.
+    - Los documentos históricos de ciclos anteriores no se reemplazan.
+    - Los tipos 36 y 64 permiten múltiples documentos dentro del ciclo.
+    - Para personal sin vinculación abierta se conserva el comportamiento
+      anterior por IdRegistroPersonal.
     """
     try:
         id_registro_personal = payload.idRegistroPersonal
+
+        id_vinculacion_laboral = getattr(
+            payload,
+            "idVinculacionLaboral",
+            None,
+        )
+
+        if id_vinculacion_laboral is None:
+            id_vinculacion_laboral = obtener_vinculacion_actual(
+                db,
+                id_registro_personal,
+            )
+
         resultado = []
 
         for doc in payload.documentos_contratacion:
-            doc_data = doc.dict()
+            doc_data = doc.model_dump()
 
             tipo_documentacion = int(
                 doc_data["IdTipoDocumentacion"]
@@ -102,22 +152,16 @@ async def subir_documento_contratacion(
 
                 except Exception as error_base64:
                     print(
-                        "Error al procesar "
-                        f"DocumentoCargado: {error_base64}"
+                        "Error al procesar DocumentoCargado: "
+                        f"{error_base64}"
                     )
 
                     doc_data["DocumentoCargado"] = None
 
             existe_relacion = None
 
-            # Para los tipos normales se conserva el comportamiento
-            # actual: si el documento ya existe, se actualiza.
-            #
-            # Para Entrega de dotación y Otro sí no se busca un
-            # documento anterior, porque cada carga debe crear un
-            # registro nuevo.
             if not permite_multiples:
-                existe_relacion = (
+                query = (
                     db.query(
                         RelacionTipoDocumentacionORM
                     )
@@ -140,8 +184,18 @@ async def subir_documento_contratacion(
                             == tipo_documentacion
                         ),
                     )
-                    .first()
                 )
+
+                if id_vinculacion_laboral is not None:
+                    query = query.filter(
+                        (
+                            RelacionTipoDocumentacionORM
+                            .IdVinculacionLaboral
+                            == id_vinculacion_laboral
+                        )
+                    )
+
+                existe_relacion = query.first()
 
             if existe_relacion:
                 documento_existente = (
@@ -174,9 +228,6 @@ async def subir_documento_contratacion(
 
                 continue
 
-            # Para los tipos 36 y 64 siempre entra aquí
-            # y crea un documento nuevo sin reemplazar
-            # los documentos anteriores.
             nuevo_documento = DocumentacionORM(
                 IdTipoDocumentacion=tipo_documentacion,
                 DocumentoCargado=doc_data[
@@ -189,15 +240,10 @@ async def subir_documento_contratacion(
             db.add(nuevo_documento)
             db.flush()
 
-            nueva_relacion = (
-                RelacionTipoDocumentacionORM(
-                    IdRegistroPersonal=(
-                        id_registro_personal
-                    ),
-                    IdDocumento=(
-                        nuevo_documento.IdDocumento
-                    ),
-                )
+            nueva_relacion = RelacionTipoDocumentacionORM(
+                IdRegistroPersonal=id_registro_personal,
+                IdDocumento=nuevo_documento.IdDocumento,
+                IdVinculacionLaboral=id_vinculacion_laboral,
             )
 
             db.add(nueva_relacion)
@@ -210,6 +256,8 @@ async def subir_documento_contratacion(
 
         return {
             "ok": True,
+            "IdRegistroPersonal": id_registro_personal,
+            "IdVinculacionLaboral": id_vinculacion_laboral,
             "nombres": [
                 documento.Nombre
                 for documento in resultado
@@ -225,7 +273,7 @@ async def subir_documento_contratacion(
             ),
             detail=(
                 "Error al subir documentos: "
-                f"{str(error)}"
+                f"{error}"
             ),
         ) from error
 
@@ -311,13 +359,9 @@ def eliminar_documento_contratacion(
                 ),
             )
 
-        # Primero se elimina la relación porque contiene
-        # la llave foránea hacia la tabla Documentos.
         db.delete(relacion)
         db.flush()
 
-        # Después se elimina únicamente el documento
-        # seleccionado mediante su IdDocumento.
         db.delete(documento)
 
         db.commit()
@@ -330,6 +374,11 @@ def eliminar_documento_contratacion(
             "IdDocumento": id_documento,
             "IdTipoDocumentacion": (
                 tipo_documentacion
+            ),
+            "IdVinculacionLaboral": getattr(
+                relacion,
+                "IdVinculacionLaboral",
+                None,
             ),
         }
 
@@ -346,6 +395,6 @@ def eliminar_documento_contratacion(
             ),
             detail=(
                 "Error al eliminar el documento "
-                f"de contratación: {str(error)}"
+                f"de contratación: {error}"
             ),
         ) from error

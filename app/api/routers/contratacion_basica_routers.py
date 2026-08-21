@@ -1,7 +1,6 @@
 # app/api/routers/contratacion_basica_routers.py
 
 import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 from services.contratacion_basica_service import ContratacionBasicaService
+
 
 router = APIRouter(
     prefix="/api/contratacion-basica",
@@ -18,31 +18,52 @@ router = APIRouter(
 service = ContratacionBasicaService()
 
 
-# ---------- Schemas ----------
+# ---------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------
 class ContratacionBasicaIn(BaseModel):
     IdRegistroPersonal: int
-    IdBanco: Optional[int] = None
-    IdTipoContrato: Optional[int] = None
-    FechaIngreso: Optional[datetime.date] = None
-    RiesgoLaboral: Optional[str] = None
 
-    Posicion: Optional[str] = Field(default=None, max_length=100)
+    # Se deja opcional para mantener compatibilidad con procesos
+    # anteriores que todavía no trabajan por ciclo laboral.
+    IdVinculacionLaboral: int | None = None
 
-    Escalafon: Optional[str] = Field(
+    IdBanco: int | None = None
+    IdTipoContrato: int | None = None
+    FechaIngreso: datetime.date | None = None
+    RiesgoLaboral: str | None = None
+
+    Posicion: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+
+    Escalafon: str | None = Field(
         default=None,
         max_length=4,
         pattern=r"^(200|210|220)$",
     )
 
-    NumeroCuenta: Optional[str] = Field(default=None, max_length=40)
+    NumeroCuenta: str | None = Field(
+        default=None,
+        max_length=40,
+    )
 
-    TetanosDosis: Optional[int] = Field(default=None, ge=1, le=5)
-    TetanosFechaUltimaDosis: Optional[datetime.date] = None
-    TetanosDescontable: Optional[bool] = None
+    TetanosDosis: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+    )
+    TetanosFechaUltimaDosis: datetime.date | None = None
+    TetanosDescontable: bool | None = None
 
-    HepatitisDosis: Optional[int] = Field(default=None, ge=1, le=4)
-    HepatitisFechaUltimaDosis: Optional[datetime.date] = None
-    HepatitisDescontable: Optional[bool] = None
+    HepatitisDosis: int | None = Field(
+        default=None,
+        ge=1,
+        le=4,
+    )
+    HepatitisFechaUltimaDosis: datetime.date | None = None
+    HepatitisDescontable: bool | None = None
 
 
 class ContratacionBasicaOut(ContratacionBasicaIn):
@@ -51,32 +72,44 @@ class ContratacionBasicaOut(ContratacionBasicaIn):
     FechaActualizacion: datetime.datetime
 
 
-# ---------- Endpoints ----------
+# ---------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------
 @router.get(
     "/registro-personal/{id_registro_personal}",
-    response_model=Optional[ContratacionBasicaOut],
+    response_model=ContratacionBasicaOut | None,
 )
 def obtener_por_registro_personal(
     id_registro_personal: int,
     db: Session = Depends(get_db),
 ):
-    return service.obtener(db, id_registro_personal)
+    return service.obtener(
+        db,
+        id_registro_personal,
+    )
 
 
-@router.post("", response_model=ContratacionBasicaOut)
+@router.post(
+    "",
+    response_model=ContratacionBasicaOut,
+)
 def upsert(
     payload: ContratacionBasicaIn,
     db: Session = Depends(get_db),
 ):
     try:
-        result = service.guardar(db, payload.model_dump())
+        result = service.guardar(
+            db,
+            payload.model_dump(),
+        )
 
         if result is None:
             raise HTTPException(
                 status_code=500,
                 detail=(
                     "ContratacionBasicaService.guardar() retornó None. "
-                    "Revisa el repo: create/update/returning y que upsert esté retornando dict."
+                    "Revisa create/update/returning y verifica que "
+                    "el servicio esté retornando un dict."
                 ),
             )
 
@@ -84,19 +117,27 @@ def upsert(
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    f"Respuesta inesperada del service: {type(result)}. "
-                    "Se esperaba dict."
+                    "Respuesta inesperada del servicio: "
+                    f"{type(result)}. Se esperaba dict."
                 ),
             )
 
         return result
 
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
     except HTTPException:
         raise
-    except Exception as e:
+
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Error guardando ContratacionBasica: {str(e)}",
-        )
+            detail=(
+                "Error guardando ContratacionBasica: "
+                f"{exc}"
+            ),
+        ) from exc
