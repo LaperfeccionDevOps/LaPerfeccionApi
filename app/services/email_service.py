@@ -9,36 +9,13 @@ def _obtener_configuracion_smtp() -> dict:
     Obtiene y valida la configuración SMTP compartida por los módulos
     de Nómina, RRLL y Procesos Disciplinarios.
     """
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_from = os.getenv("SMTP_FROM", smtp_user)
 
-    smtp_host = os.getenv(
-        "SMTP_HOST"
-    )
-
-    smtp_port = int(
-        os.getenv(
-            "SMTP_PORT",
-            "587",
-        )
-    )
-
-    smtp_user = os.getenv(
-        "SMTP_USER"
-    )
-
-    smtp_password = os.getenv(
-        "SMTP_PASSWORD"
-    )
-
-    smtp_from = os.getenv(
-        "SMTP_FROM",
-        smtp_user,
-    )
-
-    if (
-        not smtp_host
-        or not smtp_user
-        or not smtp_password
-    ):
+    if not smtp_host or not smtp_user or not smtp_password:
         raise ValueError(
             "Falta configuración SMTP en el .env: "
             "SMTP_HOST, SMTP_USER o SMTP_PASSWORD."
@@ -58,24 +35,18 @@ def _enviar_mensaje_smtp(
     configuracion: dict,
 ) -> None:
     """
-    Envía un EmailMessage utilizando la
-    configuración SMTP existente.
+    Envía un EmailMessage utilizando la configuración SMTP existente.
     """
-
     with smtplib.SMTP(
         configuracion["host"],
         configuracion["port"],
     ) as smtp:
         smtp.starttls()
-
         smtp.login(
             configuracion["user"],
             configuracion["password"],
         )
-
-        smtp.send_message(
-            mensaje
-        )
+        smtp.send_message(mensaje)
 
 
 def enviar_correo_sin_adjunto(
@@ -87,24 +58,15 @@ def enviar_correo_sin_adjunto(
     """
     Envía una notificación por correo sin archivo adjunto.
 
-    Esta función es utilizada por Procesos Disciplinarios para
-    notificaciones que no requieren documento adjunto.
+    Esta función puede ser utilizada por Procesos Disciplinarios
+    para notificaciones que no requieren documento adjunto.
 
     Si se proporciona cuerpo_html, el correo contiene una versión
     alternativa HTML conservando también el texto plano.
     """
-
-    destinatario_limpio = str(
-        destinatario or ""
-    ).strip()
-
-    asunto_limpio = str(
-        asunto or ""
-    ).strip()
-
-    cuerpo_limpio = str(
-        cuerpo or ""
-    ).strip()
+    destinatario_limpio = str(destinatario or "").strip()
+    asunto_limpio = str(asunto or "").strip()
+    cuerpo_limpio = str(cuerpo or "").strip()
 
     if not destinatario_limpio:
         raise ValueError(
@@ -121,27 +83,13 @@ def enviar_correo_sin_adjunto(
             "El cuerpo del correo es obligatorio."
         )
 
-    configuracion = (
-        _obtener_configuracion_smtp()
-    )
+    configuracion = _obtener_configuracion_smtp()
 
     mensaje = EmailMessage()
-
-    mensaje["From"] = (
-        configuracion["from"]
-    )
-
-    mensaje["To"] = (
-        destinatario_limpio
-    )
-
-    mensaje["Subject"] = (
-        asunto_limpio
-    )
-
-    mensaje.set_content(
-        cuerpo_limpio
-    )
+    mensaje["From"] = configuracion["from"]
+    mensaje["To"] = destinatario_limpio
+    mensaje["Subject"] = asunto_limpio
+    mensaje.set_content(cuerpo_limpio)
 
     if cuerpo_html:
         mensaje.add_alternative(
@@ -162,81 +110,44 @@ def enviar_correo_con_adjunto(
     asunto: str,
     cuerpo: str,
     ruta_adjunto: str,
-) -> tuple[bool, str]:
+):
     """
-    Envía un correo con un archivo PDF adjunto
-    existente físicamente en disco.
+    Envía un correo con un archivo PDF adjunto existente físicamente en disco.
 
-    Se conserva para Nómina Comunicaciones y
-    cualquier módulo que actualmente utilice
-    documentos almacenados físicamente.
+    IMPORTANTE:
+    Esta función conserva el contrato que ya tenía en producción:
+    retorna True.
+
+    Se mantiene compatible con Nómina Comunicaciones y cualquier otro
+    consumidor existente que utilice una ruta física de archivo.
     """
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    smtp_from = os.getenv("SMTP_FROM", smtp_user)
 
-    destinatario_limpio = str(
-        destinatario or ""
-    ).strip()
-
-    asunto_limpio = str(
-        asunto or ""
-    ).strip()
-
-    cuerpo_limpio = str(
-        cuerpo or ""
-    ).strip()
-
-    if not destinatario_limpio:
+    if not smtp_host or not smtp_user or not smtp_password:
         raise ValueError(
-            "El destinatario del correo es obligatorio."
+            "Falta configuración SMTP en el .env: "
+            "SMTP_HOST, SMTP_USER o SMTP_PASSWORD."
         )
 
-    if not asunto_limpio:
-        raise ValueError(
-            "El asunto del correo es obligatorio."
-        )
-
-    if not cuerpo_limpio:
-        raise ValueError(
-            "El cuerpo del correo es obligatorio."
-        )
-
-    configuracion = (
-        _obtener_configuracion_smtp()
-    )
-
-    archivo = Path(
-        ruta_adjunto
-    )
+    archivo = Path(ruta_adjunto)
 
     if not archivo.exists():
         raise FileNotFoundError(
-            "No existe el archivo adjunto: "
-            f"{ruta_adjunto}"
+            f"No existe el archivo adjunto: {ruta_adjunto}"
         )
 
     mensaje = EmailMessage()
+    mensaje["From"] = smtp_from
+    mensaje["To"] = destinatario
+    mensaje["Subject"] = asunto
+    mensaje.set_content(cuerpo)
 
-    mensaje["From"] = (
-        configuracion["from"]
-    )
-
-    mensaje["To"] = (
-        destinatario_limpio
-    )
-
-    mensaje["Subject"] = (
-        asunto_limpio
-    )
-
-    mensaje.set_content(
-        cuerpo_limpio
-    )
-
-    with archivo.open(
-        "rb"
-    ) as archivo_pdf:
-        contenido = (
-            archivo_pdf.read()
-        )
+    with open(archivo, "rb") as f:
+        contenido = f.read()
 
     mensaje.add_attachment(
         contenido,
@@ -245,15 +156,12 @@ def enviar_correo_con_adjunto(
         filename=archivo.name,
     )
 
-    _enviar_mensaje_smtp(
-        mensaje=mensaje,
-        configuracion=configuracion,
-    )
+    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+        smtp.starttls()
+        smtp.login(smtp_user, smtp_password)
+        smtp.send_message(mensaje)
 
-    return (
-        True,
-        destinatario_limpio,
-    )
+    return True
 
 
 def enviar_correo_con_adjunto_bytes(
@@ -265,30 +173,18 @@ def enviar_correo_con_adjunto_bytes(
     cuerpo_html: str | None = None,
 ) -> tuple[bool, str]:
     """
-    Envía un correo con un PDF generado directamente
-    en memoria.
+    Envía un correo con un PDF generado directamente en memoria.
 
-    Esta función es utilizada por Procesos
-    Disciplinarios para adjuntar automáticamente
-    la carta oficial de citación a descargos sin
-    crear archivos temporales en disco.
+    Esta función está separada de enviar_correo_con_adjunto para no
+    modificar el comportamiento existente de Nómina Comunicaciones.
+
+    Procesos Disciplinarios puede usar esta opción para adjuntar una carta
+    o notificación PDF generada en memoria, sin crear archivos temporales.
     """
-
-    destinatario_limpio = str(
-        destinatario or ""
-    ).strip()
-
-    asunto_limpio = str(
-        asunto or ""
-    ).strip()
-
-    cuerpo_limpio = str(
-        cuerpo or ""
-    ).strip()
-
-    nombre_adjunto_limpio = str(
-        nombre_adjunto or ""
-    ).strip()
+    destinatario_limpio = str(destinatario or "").strip()
+    asunto_limpio = str(asunto or "").strip()
+    cuerpo_limpio = str(cuerpo or "").strip()
+    nombre_adjunto_limpio = str(nombre_adjunto or "").strip()
 
     if not destinatario_limpio:
         raise ValueError(
@@ -315,34 +211,16 @@ def enviar_correo_con_adjunto_bytes(
             "El nombre del archivo adjunto es obligatorio."
         )
 
-    if not nombre_adjunto_limpio.lower().endswith(
-        ".pdf"
-    ):
-        nombre_adjunto_limpio = (
-            f"{nombre_adjunto_limpio}.pdf"
-        )
+    if not nombre_adjunto_limpio.lower().endswith(".pdf"):
+        nombre_adjunto_limpio = f"{nombre_adjunto_limpio}.pdf"
 
-    configuracion = (
-        _obtener_configuracion_smtp()
-    )
+    configuracion = _obtener_configuracion_smtp()
 
     mensaje = EmailMessage()
-
-    mensaje["From"] = (
-        configuracion["from"]
-    )
-
-    mensaje["To"] = (
-        destinatario_limpio
-    )
-
-    mensaje["Subject"] = (
-        asunto_limpio
-    )
-
-    mensaje.set_content(
-        cuerpo_limpio
-    )
+    mensaje["From"] = configuracion["from"]
+    mensaje["To"] = destinatario_limpio
+    mensaje["Subject"] = asunto_limpio
+    mensaje.set_content(cuerpo_limpio)
 
     if cuerpo_html:
         mensaje.add_alternative(

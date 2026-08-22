@@ -306,7 +306,7 @@ def buscar_trabajador_por_numero(
     return dict(row)
 
 
-@router.get("/trabajador/buscar", response_model=list[TrabajadorBusquedaOut])
+@router.get("/trabajador/buscar-texto", response_model=list[TrabajadorBusquedaOut])
 def buscar_trabajador_por_texto(
     texto: str = Query(..., description="Número, nombres, apellidos o nombre completo"),
     limite: int = Query(10, ge=1, le=50, description="Cantidad máxima de resultados"),

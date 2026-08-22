@@ -146,9 +146,10 @@ def obtener_dashboard_indicadores_seleccion(
     - Rechazados en Selección: personas en estado 28 que no presentan
       evidencia de rechazo originado en Contratación.
     - Rechazados en Contratación: personas en estado 28 que llegaron al estado
-      24, llegaron al estado 25, tienen información en ContratacionBasica
-      o poseen un movimiento de rechazo del módulo Contratación. Estos casos
-      no alimentan los indicadores ni los motivos de rechazo de Selección.
+      24, llegaron al estado 25, tienen información en ContratacionBasica,
+      poseen un movimiento de rechazo del módulo Contratación o conservan el
+      motivo histórico "No asiste a Contratación". Estos casos no alimentan
+      los indicadores ni los motivos de rechazo de Selección.
     - Motivos de Selección: se toma el cierre más reciente de
       MotivoCierreProceso únicamente para los rechazos originados en Selección.
 
@@ -336,6 +337,12 @@ def obtener_dashboard_indicadores_seleccion(
                         OR us.tiene_estado_25
                         OR us.tiene_contratacion_basica
                         OR us.tiene_rechazo_contratacion_historial
+                        OR UPPER(
+                            TRIM(COALESCE(mcp."MotivoCierre", ''))
+                        ) IN (
+                            'NO ASISTE A CONTRATACION',
+                            'NO ASISTE A CONTRATACIÓN'
+                        )
                     )
                     THEN 'CONTRATACION'
                     ELSE 'SELECCION'
@@ -481,6 +488,7 @@ def obtener_dashboard_indicadores_seleccion(
             or bool(fila.get("tiene_estado_25"))
             or bool(fila.get("tiene_contratacion_basica"))
             or bool(fila.get("tiene_rechazo_contratacion_historial"))
+            or motivo_normalizado == "NO ASISTE A CONTRATACIÓN"
         )
 
         if es_rechazo_contratacion:
@@ -599,8 +607,9 @@ def obtener_dashboard_indicadores_seleccion(
                 "Estado 28 sin evidencia de rechazo de Contratación"
             ),
             "rechazo_contratacion_excluido": (
-                "Estado 28 con estado 24, estado 25, ContratacionBasica "
-                "o movimiento de rechazo en Contratación"
+                "Estado 28 con estado 24, estado 25, ContratacionBasica, "
+                "movimiento de rechazo en Contratación o motivo histórico "
+                "No asiste a Contratación"
             ),
             "excluye_migrados": True,
             "solo_consulta": True,

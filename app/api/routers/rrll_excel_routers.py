@@ -82,15 +82,22 @@ def _convertir_a_fecha(valor):
     if not texto_fecha:
         return None
 
-    try:
-        return date.fromisoformat(texto_fecha[:10])
-    except ValueError:
-        pass
+    formatos = (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d/%m/%Y",
+    )
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(texto_fecha[:19], formato).date()
+        except ValueError:
+            continue
 
     try:
-        dia, mes, anio = texto_fecha[:10].split("/")
-        return date(int(anio), int(mes), int(dia))
-    except (TypeError, ValueError):
+        return datetime.fromisoformat(texto_fecha.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
         return None
 
 
@@ -424,24 +431,18 @@ def _agregar_motivo_oficial_validado_rrll(db: Session, resultados):
 
 @router.get("/exportar-retiros")
 def exportar_excel_retiros(
-    fecha_inicio: Annotated[
-        str,
-        Query(description="Fecha inicio en formato YYYY-MM-DD"),
-    ],
-    fecha_fin: Annotated[
-        str,
-        Query(description="Fecha fin en formato YYYY-MM-DD"),
-    ],
-    db: Annotated[Session, Depends(get_db)],
+    fecha_inicio: str = Query(..., description="Fecha inicio en formato YYYY-MM-DD"),
+    fecha_fin: str = Query(..., description="Fecha fin en formato YYYY-MM-DD"),
+    db: Session = Depends(get_db)
 ):
     try:
-        fecha_inicio_dt = date.fromisoformat(fecha_inicio)
-        fecha_fin_dt = date.fromisoformat(fecha_fin)
-    except ValueError as error:
+        fecha_inicio_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d")
+        fecha_fin_dt = datetime.strptime(fecha_fin, "%Y-%m-%d")
+    except ValueError:
         raise HTTPException(
             status_code=400,
-            detail="Las fechas deben estar en formato YYYY-MM-DD.",
-        ) from error
+            detail="Las fechas deben estar en formato YYYY-MM-DD."
+        )
 
     if fecha_inicio_dt > fecha_fin_dt:
         raise HTTPException(
@@ -936,6 +937,8 @@ def exportar_excel_retiros(
 
             ws_dashboard.row_dimensions[idx].height = 34
 
+        fila_tip_fin = max(fila_tip_inicio, fila_tip_inicio + len(top_tipificaciones) - 1)
+
         # ==================================================
         # BLOQUE 3 - MOTIVOS DE RETIRO (TABLA + GRÁFICA)
         # ==================================================
@@ -1007,9 +1010,20 @@ def exportar_excel_retiros(
         bar_motivos.dLbls.showLegendKey = False
         bar_motivos.dLbls.position = "outEnd"
 
-        bar_motivos.x_axis.delete = True
-        bar_motivos.y_axis.delete = True
-        bar_motivos.x_axis.majorGridlines = None
+        try:
+            bar_motivos.x_axis.delete = True
+        except Exception:
+            pass
+
+        try:
+            bar_motivos.y_axis.delete = True
+        except Exception:
+            pass
+
+        try:
+            bar_motivos.x_axis.majorGridlines = None
+        except Exception:
+            pass
 
         ws_dashboard.add_chart(bar_motivos, "D45")
 
@@ -1050,18 +1064,13 @@ def exportar_excel_retiros(
             }
         )
 
-    except (
-        SQLAlchemyError,
-        AttributeError,
-        KeyError,
-        OSError,
-        TypeError,
-        ValueError,
-    ) as error:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al generar el Excel de retiros: {error!s}",
-        ) from error
+            detail=f"Error al generar el Excel de retiros: {str(e)}"
+        )
+
+
 # ============================================================
 # EXCEL DE PROCESOS DISCIPLINARIOS
 # Una fila = un expediente disciplinario
