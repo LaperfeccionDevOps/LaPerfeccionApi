@@ -11,7 +11,6 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from api.routers import documentos_activos_routers
@@ -139,15 +138,6 @@ app = FastAPI(
         "y portal interno."
     ),
     debug=True,
-)
-
-BASE_DIR = os.path.dirname(__file__)
-STORAGE_DIR = os.path.join(BASE_DIR, "storage")
-
-app.mount(
-    "/storage",
-    StaticFiles(directory=STORAGE_DIR),
-    name="storage",
 )
 
 origins = [

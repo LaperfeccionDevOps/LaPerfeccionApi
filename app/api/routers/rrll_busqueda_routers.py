@@ -13,10 +13,17 @@ from sqlalchemy.orm import Session
 from infrastructure.db.deps import get_db
 
 
+# =========================
+# CONFIG: Estados globales
+# =========================
+# Estos IDs salen de public."EstadoProceso"
+
 ESTADO_GLOBAL_CONTRATADO = 25
 ESTADO_GLOBAL_ABIERTO = 30
 ESTADO_GLOBAL_ENVIADO_NOMINA = 32
 ESTADO_GLOBAL_DEVUELTO_NOMINA = 33
+
+# FUTURO: cuando exista el módulo Nómina, Nómina pondrá el estado final RETIRADO.
 
 
 class TrabajadorBusquedaOut(BaseModel):
