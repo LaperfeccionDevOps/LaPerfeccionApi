@@ -64,7 +64,57 @@ def listar_documentos_activos(
                AND d."IdTipoDocumentacion" = td."IdTipoDocumentacion"
             WHERE td."IdTipoDocumentacion" = ANY(:tipos_activos)
             ORDER BY
-                array_position(:tipos_activos, td."IdTipoDocumentacion"),
+                array_position(
+                    :tipos_activos,
+                    td."IdTipoDocumentacion"
+                ),
+
+                CASE
+                    WHEN td."IdTipoDocumentacion" = 82
+                     AND COALESCE(d."Nombre", '') ~
+                         'PD-[0-9]{4}-[0-9]{6}'
+                    THEN
+                        CAST(
+                            substring(
+                                d."Nombre"
+                                from 'PD-[0-9]{4}-([0-9]{6})'
+                            )
+                            AS INTEGER
+                        )
+                    ELSE NULL
+                END DESC NULLS LAST,
+
+                CASE
+                    WHEN td."IdTipoDocumentacion" = 82
+                     AND COALESCE(d."Nombre", '') ~
+                         'PD-[0-9]{4}-[0-9]{6}'
+                    THEN
+                        CASE
+                            WHEN d."Nombre" ~ '^01 - ' THEN 100
+                            WHEN d."Nombre" ~ '^02 - ' THEN 200
+                            WHEN d."Nombre" ~ '^02\\.[0-9]+ - ' THEN
+                                200 + CAST(
+                                    substring(
+                                        d."Nombre"
+                                        from '^02\\.([0-9]+) - '
+                                    )
+                                    AS INTEGER
+                                )
+                            WHEN d."Nombre" ~ '^03 - ' THEN 300
+                            WHEN d."Nombre" ~ '^03\\.[0-9]+ - ' THEN
+                                300 + CAST(
+                                    substring(
+                                        d."Nombre"
+                                        from '^03\\.([0-9]+) - '
+                                    )
+                                    AS INTEGER
+                                )
+                            WHEN d."Nombre" ~ '^04 - ' THEN 400
+                            ELSE 9999
+                        END
+                    ELSE 9999
+                END ASC,
+
                 d."IdDocumento" DESC
         """),
         {
@@ -81,7 +131,11 @@ def listar_documentos_activos(
         if id_tipo not in agrupado:
             agrupado[id_tipo] = {
                 "IdTipoDocumentacion": id_tipo,
-                "tipo_documento": "Certificaciones" if id_tipo == 60 else row["tipo_documento"],
+                "tipo_documento": (
+                    "Certificaciones"
+                    if id_tipo == 60
+                    else row["tipo_documento"]
+                ),
                 "documentos": [],
             }
 
@@ -107,7 +161,10 @@ def subir_documentos_activos(
             if doc.IdTipoDocumentacion not in TIPOS_ACTIVOS:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"El tipo {doc.IdTipoDocumentacion} no pertenece a carpeta Activos.",
+                    detail=(
+                        f"El tipo {doc.IdTipoDocumentacion} "
+                        "no pertenece a carpeta Activos."
+                    ),
                 )
 
             documento_binario = base64.b64decode(
@@ -172,13 +229,18 @@ def subir_documentos_activos(
 
         db.commit()
 
-        return {"ok": True, "documentos": resultado}
+        return {
+            "ok": True,
+            "documentos": resultado,
+        }
 
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail=f"Error al subir documentos activos: {str(e)}",
@@ -209,14 +271,21 @@ def obtener_documento_activo(
     ).mappings().first()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Documento activo no encontrado.")
+        raise HTTPException(
+            status_code=404,
+            detail="Documento activo no encontrado.",
+        )
 
     return {
         "IdDocumento": row["IdDocumento"],
         "IdTipoDocumentacion": row["IdTipoDocumentacion"],
         "Nombre": row["Nombre"],
         "Formato": row["Formato"],
-        "DocumentoBase64": base64.b64encode(row["DocumentoCargado"]).decode("utf-8"),
+        "DocumentoBase64": (
+            base64.b64encode(
+                row["DocumentoCargado"]
+            ).decode("utf-8")
+        ),
     }
 
 
@@ -240,14 +309,19 @@ def eliminar_documento_activo(
         ).mappings().first()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Documento activo no encontrado.")
+            raise HTTPException(
+                status_code=404,
+                detail="Documento activo no encontrado.",
+            )
 
         db.execute(
             text("""
                 DELETE FROM public."RelacionTipoDocumentacion"
                 WHERE "IdDocumento" = :id_documento
             """),
-            {"id_documento": id_documento},
+            {
+                "id_documento": id_documento,
+            },
         )
 
         db.execute(
@@ -255,18 +329,25 @@ def eliminar_documento_activo(
                 DELETE FROM public."Documentos"
                 WHERE "IdDocumento" = :id_documento
             """),
-            {"id_documento": id_documento},
+            {
+                "id_documento": id_documento,
+            },
         )
 
         db.commit()
 
-        return {"ok": True, "detail": "Documento activo eliminado correctamente."}
+        return {
+            "ok": True,
+            "detail": "Documento activo eliminado correctamente.",
+        }
 
     except HTTPException:
         db.rollback()
         raise
+
     except Exception as e:
         db.rollback()
+
         raise HTTPException(
             status_code=500,
             detail=f"Error al eliminar documento activo: {str(e)}",

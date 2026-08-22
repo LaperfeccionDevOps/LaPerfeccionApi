@@ -1,32 +1,24 @@
-from typing import Optional, List
-from datetime import date, datetime, timedelta, timezone
-import unicodedata
+# ruff: noqa: B008, BLE001, RUF010, SIM114
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+import unicodedata
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 
 
-# =========================
-# CONFIG: Estados globales
-# =========================
-# Estos IDs salen de public."EstadoProceso"
 ESTADO_GLOBAL_CONTRATADO = 25
 ESTADO_GLOBAL_ABIERTO = 30
 ESTADO_GLOBAL_ENVIADO_NOMINA = 32
 ESTADO_GLOBAL_DEVUELTO_NOMINA = 33
 
-# FUTURO: cuando exista el módulo Nómina, Nómina pondrá el estado final RETIRADO.
-# EJ: ESTADO_GLOBAL_RETIRADO = 34
 
-
-# =========================
-# Schemas
-# =========================
 class TrabajadorBusquedaOut(BaseModel):
     IdRegistroPersonal: int
     IdTipoIdentificacion: int
@@ -44,28 +36,28 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     Apellidos: str
     NombreCompleto: str
 
-    Direccion: Optional[str] = None
-    Barrio: Optional[str] = None
-    Telefono: Optional[str] = None
-    Correo: Optional[str] = None
-    Cargo: Optional[str] = None
+    Direccion: str | None = None
+    Barrio: str | None = None
+    Telefono: str | None = None
+    Correo: str | None = None
+    Cargo: str | None = None
 
-    IdCliente: Optional[int] = None
-    ClienteNombre: Optional[str] = None
+    IdCliente: int | None = None
+    ClienteNombre: str | None = None
 
-    IdRetiroLaboral: Optional[int] = None
-    IdMotivoRetiro: Optional[int] = None
-    MotivoRetiroNombre: Optional[str] = None
-    FechaProceso: Optional[str] = None
-    FechaCierre: Optional[str] = None
-    FechaEnvioOperaciones: Optional[str] = None
+    IdRetiroLaboral: int | None = None
+    IdMotivoRetiro: int | None = None
+    MotivoRetiroNombre: str | None = None
+    FechaProceso: str | None = None
+    FechaCierre: str | None = None
+    FechaEnvioOperaciones: str | None = None
 
-    IdTipificacionRetiro: Optional[int] = None
-    ObservacionRetiro: Optional[str] = None
-    DevolucionCarnet: Optional[bool] = None
+    IdTipificacionRetiro: int | None = None
+    ObservacionRetiro: str | None = None
+    DevolucionCarnet: bool | None = None
 
-    FechaInicio: Optional[str] = None
-    FechaUltimoDiaLaborado: Optional[str] = None
+    FechaInicio: str | None = None
+    FechaUltimoDiaLaborado: str | None = None
 
 
 class RetiroLaboralCreate(BaseModel):
@@ -73,11 +65,9 @@ class RetiroLaboralCreate(BaseModel):
     IdCliente: int
     IdMotivoRetiro: int
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
-    UsuarioActualizacion: Optional[str] = None
-
-    # ✅ Estado del caso RRLL (no del trabajador)
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
+    UsuarioActualizacion: str | None = None
     EstadoCasoRRLL: str = Field(default="ABIERTO")
 
 
@@ -88,8 +78,8 @@ class RetiroLaboralCreateOut(BaseModel):
     IdMotivoRetiro: int
     EstadoCasoRRLL: str
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
     Activo: bool
 
 
@@ -116,8 +106,8 @@ class RetiroLaboralUpdateOut(BaseModel):
     IdMotivoRetiro: int
     EstadoCasoRRLL: str
     FechaProceso: date
-    FechaRetiro: Optional[date] = None
-    ObservacionGeneral: Optional[str] = None
+    FechaRetiro: date | None = None
+    ObservacionGeneral: str | None = None
     Activo: bool
 
 
@@ -129,11 +119,11 @@ class RetiroMotivoRRLLUpdate(BaseModel):
 class RetiroMotivoRRLLOut(BaseModel):
     IdRetiroLaboral: int
     IdRegistroPersonal: int
-    DescripcionTrabajador: Optional[str] = None
-    DescripcionRetiroRRLL: Optional[str] = None
+    DescripcionTrabajador: str | None = None
+    DescripcionRetiroRRLL: str | None = None
     EstadoValidacionRRLL: str
-    UsuarioValidacionRRLL: Optional[str] = None
-    FechaValidacionRRLL: Optional[datetime] = None
+    UsuarioValidacionRRLL: str | None = None
+    FechaValidacionRRLL: datetime | None = None
 
 
 router = APIRouter(prefix="/api/rrll", tags=["RRLL - Búsqueda"])
@@ -168,9 +158,6 @@ TIPO_DOC_TO_ID = {
 }
 
 
-# =========================
-# Helpers
-# =========================
 def _actualizar_estado_global_trabajador(db: Session, id_registro_personal: int, id_estado_proceso: int):
     q = text("""
         UPDATE public."RegistroPersonal"
@@ -206,15 +193,6 @@ def _validar_estado_caso(valor: str) -> str:
 
 
 def _obtener_fecha_ultimo_dia_laborado(db: Session, id_registro_personal: int):
-
-
-    
-    """
-    Regla de negocio para cabecera:
-    1) Intentar desde PazYSalvoOperaciones
-    2) Si no existe tabla o falla, intentar desde PazYSalvo
-    3) Si no hay dato, devolver None
-    """
     try:
         q_paz_ops = text("""
             SELECT "FechaUltimoDiaLaborado"
@@ -247,15 +225,12 @@ def _obtener_fecha_ultimo_dia_laborado(db: Session, id_registro_personal: int):
 
     return None
 
+
 def _vincular_entrevista_pendiente_a_retiro(
     db: Session,
     id_registro_personal: int,
     id_retiro_laboral: int
 ):
-    """
-    Busca la entrevista de retiro más reciente pendiente de vincular
-    para el trabajador y la asocia al retiro recién creado/actualizado.
-    """
     entrevista_pendiente = db.execute(
         text("""
             SELECT "IdEntrevistaRetiro"
@@ -289,12 +264,7 @@ def _vincular_entrevista_pendiente_a_retiro(
 
     return vinculada
 
-    
 
-
-# =========================
-# Endpoints Trabajador
-# =========================
 @router.get("/trabajador/por-numero")
 def buscar_trabajador_por_numero(
     numero_documento: str = Query(..., description="Número de documento (sin puntos)"),
@@ -327,6 +297,53 @@ def buscar_trabajador_por_numero(
         )
 
     return dict(row)
+
+
+@router.get("/trabajador/buscar", response_model=list[TrabajadorBusquedaOut])
+def buscar_trabajador_por_texto(
+    texto: str = Query(..., description="Número, nombres, apellidos o nombre completo"),
+    limite: int = Query(10, ge=1, le=50, description="Cantidad máxima de resultados"),
+    db: Session = Depends(get_db),
+):
+    texto_limpio = (texto or "").strip()
+    numero = _norm_num(texto_limpio)
+
+    if not texto_limpio:
+        raise HTTPException(status_code=400, detail="texto es obligatorio.")
+
+    q = text("""
+        SELECT
+          rp."IdRegistroPersonal"      AS "IdRegistroPersonal",
+          rp."IdTipoIdentificacion"    AS "IdTipoIdentificacion",
+          rp."NumeroIdentificacion"    AS "NumeroDocumento",
+          rp."Nombres"                 AS "Nombres",
+          rp."Apellidos"               AS "Apellidos",
+          COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'') AS "NombreCompleto"
+        FROM public."RegistroPersonal" rp
+        WHERE
+          (
+            :numero <> ''
+            AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') LIKE :numero_like
+          )
+          OR UPPER(COALESCE(rp."Nombres", '')) LIKE :texto_like
+          OR UPPER(COALESCE(rp."Apellidos", '')) LIKE :texto_like
+          OR UPPER(COALESCE(rp."Nombres",'') || ' ' || COALESCE(rp."Apellidos",'')) LIKE :texto_like
+        ORDER BY rp."FechaCreacion" DESC NULLS LAST, rp."IdRegistroPersonal" DESC
+        LIMIT :limite;
+    """)
+
+    rows = db.execute(
+        q,
+        {
+            "numero": numero,
+            "numero_like": f"%{numero}%",
+            "texto_like": f"%{texto_limpio.upper()}%",
+            "limite": limite,
+        },
+    ).mappings().all()
+
+    return [dict(row) for row in rows]
+
 
 @router.get("/trabajador", response_model=TrabajadorBusquedaOut)
 def buscar_trabajador_por_documento(
@@ -364,10 +381,10 @@ def buscar_trabajador_por_documento(
     return dict(row)
 
 
-@router.get("/trabajador/buscar", response_model=List[TrabajadorBusquedaOut])
+@router.get("/trabajador/buscar", response_model=list[TrabajadorBusquedaOut])
 def buscar_trabajadores_por_documento_o_nombre(
     busqueda: str = Query(..., min_length=2, description="Número de documento o nombre del trabajador"),
-    tipo_documento: Optional[str] = Query(None, description="CC | CE | TI | PPT. Opcional para búsqueda por nombre"),
+    tipo_documento: str | None = Query(None, description="CC | CE | TI | PPT. Opcional para búsqueda por nombre"),
     limite: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
@@ -545,36 +562,37 @@ def buscar_trabajador_detalle_por_documento(
             LIMIT 1
         ) acc ON true
 
-       LEFT JOIN LATERAL (
-    SELECT
-      rl."IdRetiroLaboral",
-      rl."IdCliente",
-      rl."IdMotivoRetiro",
-      rl."FechaProceso",
-      rl."FechaRetiro",
-      rl."FechaCierre",
-      rl."FechaEnvioOperaciones",
-      rl."IdTipificacionRetiro",
-      rl."ObservacionRetiro",
-      rl."DevolucionCarnet",
-      rl."EstadoCasoRRLL",
-      rl."Activo"
-    FROM public."RetiroLaboral" rl
-    WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-    ORDER BY rl."IdRetiroLaboral" DESC
-    LIMIT 1
-) rrll ON true
-             
-  LEFT JOIN LATERAL (
-    SELECT
-        COALESCE(p."FechaCarga", p."FechaCreacion") AS "FechaCreacion",
-        p."FechaUltimoDiaLaborado",
-        p."IdRetiroLaboral"
-        FROM public."PazYSalvoOperaciones" p
-        WHERE p."IdRetiroLaboral" = rrll."IdRetiroLaboral"
-        ORDER BY p."IdPazYSalvo" DESC
-        LIMIT 1
-    ) pys ON true
+        LEFT JOIN LATERAL (
+            SELECT
+              rl."IdRetiroLaboral",
+              rl."IdCliente",
+              rl."IdMotivoRetiro",
+              rl."FechaProceso",
+              rl."FechaRetiro",
+              rl."FechaCierre",
+              rl."FechaEnvioOperaciones",
+              rl."IdTipificacionRetiro",
+              rl."ObservacionRetiro",
+              rl."DevolucionCarnet",
+              rl."EstadoCasoRRLL",
+              rl."Activo"
+            FROM public."RetiroLaboral" rl
+            WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            ORDER BY rl."IdRetiroLaboral" DESC
+            LIMIT 1
+        ) rrll ON true
+
+        LEFT JOIN LATERAL (
+            SELECT
+                COALESCE(p."FechaCarga", p."FechaCreacion") AS "FechaCreacion",
+                p."FechaUltimoDiaLaborado",
+                p."IdRetiroLaboral"
+            FROM public."PazYSalvoOperaciones" p
+            WHERE p."IdRetiroLaboral" = rrll."IdRetiroLaboral"
+            ORDER BY p."IdPazYSalvo" DESC
+            LIMIT 1
+        ) pys ON true
+
         LEFT JOIN public."Cliente" c
           ON c."IdCliente" = COALESCE(rrll."IdCliente", acc."IdCliente")
 
@@ -609,9 +627,6 @@ def buscar_trabajador_detalle_por_documento(
     return out
 
 
-# =========================
-# Validar retiro activo (por Activo=true)
-# =========================
 @router.get("/retiro/activo/{id_registro_personal}")
 def validar_retiro_activo(
     id_registro_personal: int,
@@ -677,7 +692,6 @@ def crear_retiro_laboral(
 ):
     estado_caso = _validar_estado_caso(payload.EstadoCasoRRLL)
 
-    # ✅ Regla: solo 1 retiro ACTIVO por trabajador
     q_active = text("""
         SELECT "IdRetiroLaboral"
         FROM public."RetiroLaboral"
@@ -693,7 +707,6 @@ def crear_retiro_laboral(
             detail=f"Ya existe un retiro ACTIVO para este trabajador (IdRetiroLaboral={active['IdRetiroLaboral']})."
         )
 
-    # ✅ Si lo crean como CERRADO o ENVIADO_NOMINA, debe nacer INACTIVO
     activo_inicial = True
     if estado_caso in ("CERRADO", "ENVIADO_NOMINA"):
         activo_inicial = False

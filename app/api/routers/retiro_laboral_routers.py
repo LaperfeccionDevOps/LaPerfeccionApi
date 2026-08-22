@@ -30,7 +30,7 @@ router = APIRouter(prefix="/api/retiros-laborales", tags=["Retiros Laborales"])
 def listar_motivos_retiro(db: Session = Depends(get_db)):
     try:
         query = text("""
-            SELECT 
+            SELECT
                 "IdMotivoRetiro",
                 "Nombre",
                 "Descripcion",
@@ -61,7 +61,7 @@ def listar_motivos_retiro(db: Session = Depends(get_db)):
 def listar_documentos_por_motivo(id_motivo_retiro: int, db: Session = Depends(get_db)):
     try:
         query = text("""
-            SELECT 
+            SELECT
                 mrd."IdMotivoRetiroDocumento",
                 mrd."IdMotivoRetiro",
                 tdr."IdTipoDocumentoRetiro",
@@ -154,7 +154,7 @@ def crear_retiro_laboral(payload: RetiroLaboralCreate, db: Session = Depends(get
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error al crear retiro laboral: {str(e)}")
-    
+
 
 
 
@@ -1213,7 +1213,7 @@ def actualizar_detalle_retiro_laboral(
         raise HTTPException(
             status_code=500,
             detail=f"Error actualizando detalle del retiro: {str(e)}"
-        )        
+        )
 @router.post("/{id_retiro_laboral}/documentos/primer-llamado/generar")
 def generar_primer_llamado_endpoint(
     id_retiro_laboral: int,
@@ -1324,7 +1324,7 @@ def generar_paquete_retiro_endpoint(
             status_code=500,
             detail=f"Error al generar y registrar el paquete de retiro: {str(e)}"
         )
-    
+
 @router.get("/carpeta-digital/{id_registro_personal}/documentos")
 def obtener_documentos_retiro_carpeta_digital(
     id_registro_personal: int,
@@ -1469,7 +1469,7 @@ LIMIT 1;
             status_code=500,
             detail=f"Error al consultar documentos de retiro para carpeta digital: {str(e)}"
         )
-    
+
 @router.get("/carpeta-digital/entrevista-retiro/{id_entrevista_retiro}/descargar")
 def descargar_entrevista_retiro_carpeta_digital(
     id_entrevista_retiro: int,

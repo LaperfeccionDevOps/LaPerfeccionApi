@@ -1,5 +1,6 @@
 # ruff: noqa: B008, BLE001, DTZ003
 # app/api/routers/aspirante_routers.py
+# ruff: noqa
 
 from datetime import date, datetime, timedelta
 
