@@ -170,6 +170,45 @@ def validar_cierre_completo(
         )
 
 
+
+def validar_acta_descargos_firmada(
+    db: Session,
+    id_proceso: int,
+) -> None:
+    acta_firmada = (
+        db.query(
+            DocumentoProcesoDisciplinario
+        )
+        .filter(
+            DocumentoProcesoDisciplinario
+            .IdProcesoDisciplinario
+            == id_proceso,
+            DocumentoProcesoDisciplinario
+            .TipoDocumento
+            == "CARTA_DESCARGOS_FIRMADA",
+        )
+        .first()
+    )
+
+    if not acta_firmada:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "Debe adjuntar el Acta de Descargos "
+                    "firmada antes de continuar al cierre "
+                    "del proceso disciplinario."
+                ),
+                "IdProcesoDisciplinario": (
+                    id_proceso
+                ),
+                "TipoDocumentoRequerido": (
+                    "CARTA_DESCARGOS_FIRMADA"
+                ),
+            },
+        )
+
+
 def validar_documento_cierre_disciplinario(
     db: Session,
     id_proceso: int,
@@ -270,6 +309,13 @@ def crear_borrador_cierre(
 
     validar_proceso_abierto(
         proceso
+    )
+
+    validar_acta_descargos_firmada(
+        db=db,
+        id_proceso=(
+            data.IdProcesoDisciplinario
+        ),
     )
 
     cierre_existente = (
@@ -480,6 +526,13 @@ def finalizar_cierre(
 
     validar_cierre_completo(
         cierre
+    )
+
+    validar_acta_descargos_firmada(
+        db=db,
+        id_proceso=(
+            cierre.IdProcesoDisciplinario
+        ),
     )
 
     validar_documento_cierre_disciplinario(

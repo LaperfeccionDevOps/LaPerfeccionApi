@@ -1140,6 +1140,16 @@ def enviar_notificacion_agenda_disciplinaria(
     tipo_notificacion: str,
     usuario: str | None = None,
 ) -> dict:
+    """
+    Envía la notificación disciplinaria al trabajador y, cuando aplica,
+    al supervisor/líder que reportó el caso.
+
+    Los dos envíos son independientes:
+    - Un error del trabajador no impide intentar el envío al supervisor.
+    - Un error del supervisor no modifica el resultado del trabajador.
+    - Cada destinatario conserva su propia trazabilidad en
+      NotificacionProcesoDisciplinario.
+    """
     datos = obtener_datos_notificacion_agenda(
         db=db,
         id_agenda=id_agenda,
@@ -1187,6 +1197,48 @@ def enviar_notificacion_agenda_disciplinaria(
         or datos.get("ModalidadCitacion")
     ).upper()
 
+    citacion_inicial_lista_para_envio = (
+        tipo_normalizado == TIPO_CITACION_INICIAL
+        and modalidad_normalizada in {
+            "PRESENCIAL",
+            "VIRTUAL",
+        }
+    )
+
+    notificar_supervisor = (
+        citacion_inicial_lista_para_envio
+        or tipo_normalizado == TIPO_REPROGRAMACION
+        or tipo_normalizado == TIPO_CANCELACION
+    )
+
+    cuerpo_texto, cuerpo_html = (
+        _construir_contenido_correo(
+            datos=datos,
+            tipo_notificacion=tipo_notificacion,
+        )
+    )
+
+    carta_adjunta = False
+    nombre_carta = None
+    contenido_carta = None
+    error_generacion_carta = None
+
+    if citacion_inicial_lista_para_envio:
+        try:
+            buffer_carta = generar_carta_citacion_descargos_pdf(
+                db=db,
+                id_proceso=id_proceso,
+            )
+
+            contenido_carta = buffer_carta.getvalue()
+
+            nombre_carta = _nombre_archivo_carta_citacion(
+                id_proceso=id_proceso,
+            )
+
+        except Exception as error:
+            error_generacion_carta = str(error)
+
     destinatario_trabajador = (
         correo_trabajador
         if correo_trabajador
@@ -1203,123 +1255,135 @@ def enviar_notificacion_agenda_disciplinaria(
         usuario=usuario,
     )
 
+    resultado_trabajador = None
+
     if not correo_trabajador:
         mensaje_error = (
             "El trabajador no tiene correo registrado "
             "en RegistroPersonal.Email."
         )
 
-        marcar_notificacion_error(
+        notificacion_trabajador = marcar_notificacion_error(
             db=db,
             notificacion=notificacion_trabajador,
             error=mensaje_error,
             usuario=usuario,
         )
 
-        return {
+        resultado_trabajador = {
             "enviado": False,
             "estado": "ERROR",
             "correo": None,
+            "CartaAdjunta": False,
+            "NombreCartaAdjunta": None,
             "mensaje": mensaje_error,
             "IdNotificacionProcesoDisciplinario": (
                 notificacion_trabajador
                 .IdNotificacionProcesoDisciplinario
             ),
-            "NotificacionSupervisor": None,
         }
 
-    cuerpo_texto, cuerpo_html = (
-        _construir_contenido_correo(
-            datos=datos,
-            tipo_notificacion=tipo_notificacion,
-        )
-    )
-
-    carta_adjunta = False
-    nombre_carta = None
-    contenido_carta = None
-
-    try:
-        citacion_inicial_lista_para_envio = (
-            tipo_normalizado == TIPO_CITACION_INICIAL
-            and modalidad_normalizada in {
-                "PRESENCIAL",
-                "VIRTUAL",
-            }
+    elif (
+        citacion_inicial_lista_para_envio
+        and error_generacion_carta
+    ):
+        mensaje_error = (
+            "No fue posible generar la carta oficial de citación. "
+            f"Detalle: {error_generacion_carta}"
         )
 
-        if citacion_inicial_lista_para_envio:
-            buffer_carta = generar_carta_citacion_descargos_pdf(
-                db=db,
-                id_proceso=id_proceso,
-            )
-
-            contenido_carta = buffer_carta.getvalue()
-
-            nombre_carta = _nombre_archivo_carta_citacion(
-                id_proceso=id_proceso,
-            )
-
-            enviar_correo_con_adjunto_bytes(
-                destinatario=correo_trabajador,
-                asunto=asunto,
-                cuerpo=cuerpo_texto,
-                cuerpo_html=cuerpo_html,
-                contenido_adjunto=contenido_carta,
-                nombre_adjunto=nombre_carta,
-            )
-
-            carta_adjunta = True
-
-        else:
-            enviar_correo_sin_adjunto(
-                destinatario=correo_trabajador,
-                asunto=asunto,
-                cuerpo=cuerpo_texto,
-                cuerpo_html=cuerpo_html,
-            )
-
-        notificacion_trabajador = marcar_notificacion_enviada(
-            db=db,
-            notificacion=notificacion_trabajador,
-            usuario=usuario,
-        )
-
-    except Exception as error:
         notificacion_trabajador = marcar_notificacion_error(
             db=db,
             notificacion=notificacion_trabajador,
-            error=str(error),
+            error=mensaje_error,
             usuario=usuario,
         )
 
-        return {
+        resultado_trabajador = {
             "enviado": False,
             "estado": "ERROR",
             "correo": correo_trabajador,
-            "CartaAdjunta": carta_adjunta,
-            "NombreCartaAdjunta": nombre_carta,
-            "mensaje": str(error),
+            "CartaAdjunta": False,
+            "NombreCartaAdjunta": None,
+            "mensaje": mensaje_error,
             "IdNotificacionProcesoDisciplinario": (
                 notificacion_trabajador
                 .IdNotificacionProcesoDisciplinario
             ),
-            "NotificacionSupervisor": None,
         }
 
-    resultado_supervisor = None
+    else:
+        try:
+            if contenido_carta and nombre_carta:
+                enviar_correo_con_adjunto_bytes(
+                    destinatario=correo_trabajador,
+                    asunto=asunto,
+                    cuerpo=cuerpo_texto,
+                    cuerpo_html=cuerpo_html,
+                    contenido_adjunto=contenido_carta,
+                    nombre_adjunto=nombre_carta,
+                )
 
-    notificar_supervisor = (
-        (
-            tipo_normalizado == TIPO_CITACION_INICIAL
-            and modalidad_normalizada in {
-                "PRESENCIAL",
-                "VIRTUAL",
+                carta_adjunta = True
+
+            else:
+                enviar_correo_sin_adjunto(
+                    destinatario=correo_trabajador,
+                    asunto=asunto,
+                    cuerpo=cuerpo_texto,
+                    cuerpo_html=cuerpo_html,
+                )
+
+            notificacion_trabajador = marcar_notificacion_enviada(
+                db=db,
+                notificacion=notificacion_trabajador,
+                usuario=usuario,
+            )
+
+            resultado_trabajador = {
+                "enviado": True,
+                "estado": "ENVIADO",
+                "correo": correo_trabajador,
+                "CartaAdjunta": carta_adjunta,
+                "NombreCartaAdjunta": nombre_carta,
+                "mensaje": (
+                    "Notificación enviada correctamente "
+                    "al correo del trabajador con la carta "
+                    "oficial de citación adjunta."
+                    if carta_adjunta
+                    else (
+                        "Notificación enviada correctamente "
+                        "al correo del trabajador."
+                    )
+                ),
+                "IdNotificacionProcesoDisciplinario": (
+                    notificacion_trabajador
+                    .IdNotificacionProcesoDisciplinario
+                ),
             }
-        )
-        or tipo_normalizado == TIPO_REPROGRAMACION
-        or tipo_normalizado == TIPO_CANCELACION
-    )
+
+        except Exception as error:
+            notificacion_trabajador = marcar_notificacion_error(
+                db=db,
+                notificacion=notificacion_trabajador,
+                error=str(error),
+                usuario=usuario,
+            )
+
+            resultado_trabajador = {
+                "enviado": False,
+                "estado": "ERROR",
+                "correo": correo_trabajador,
+                "CartaAdjunta": carta_adjunta,
+                "NombreCartaAdjunta": nombre_carta,
+                "mensaje": str(error),
+                "IdNotificacionProcesoDisciplinario": (
+                    notificacion_trabajador
+                    .IdNotificacionProcesoDisciplinario
+                ),
+            }
+
+    resultado_supervisor = None
 
     if notificar_supervisor:
         if not correo_supervisor:
@@ -1327,6 +1391,8 @@ def enviar_notificacion_agenda_disciplinaria(
                 "enviado": False,
                 "estado": "SIN_CORREO",
                 "correo": None,
+                "CartaAdjunta": False,
+                "NombreCartaAdjunta": None,
                 "mensaje": (
                     "No se envió copia al supervisor porque "
                     "CorreoSupervisorReporta está vacío."
@@ -1354,12 +1420,14 @@ def enviar_notificacion_agenda_disciplinaria(
                     f"- {nombre_trabajador_asunto} "
                     f"- {codigo_expediente}"
                 )
+
             elif tipo_normalizado == TIPO_CANCELACION:
                 asunto_supervisor = (
                     "Confirmación de cancelación "
                     f"- {nombre_trabajador_asunto} "
                     f"- {codigo_expediente}"
                 )
+
             else:
                 asunto_supervisor = (
                     "Confirmación de citación "
@@ -1385,57 +1453,19 @@ def enviar_notificacion_agenda_disciplinaria(
                 tipo_notificacion=tipo_notificacion,
             )
 
-            try:
-                if contenido_carta and nombre_carta:
-                    enviar_correo_con_adjunto_bytes(
-                        destinatario=correo_supervisor,
-                        asunto=asunto_supervisor,
-                        cuerpo=cuerpo_supervisor_texto,
-                        cuerpo_html=cuerpo_supervisor_html,
-                        contenido_adjunto=contenido_carta,
-                        nombre_adjunto=nombre_carta,
-                    )
-                else:
-                    enviar_correo_sin_adjunto(
-                        destinatario=correo_supervisor,
-                        asunto=asunto_supervisor,
-                        cuerpo=cuerpo_supervisor_texto,
-                        cuerpo_html=cuerpo_supervisor_html,
-                    )
-
-                notificacion_supervisor = marcar_notificacion_enviada(
-                    db=db,
-                    notificacion=notificacion_supervisor,
-                    usuario=usuario,
+            if (
+                citacion_inicial_lista_para_envio
+                and error_generacion_carta
+            ):
+                mensaje_error_supervisor = (
+                    "No fue posible generar la carta oficial de citación. "
+                    f"Detalle: {error_generacion_carta}"
                 )
 
-                resultado_supervisor = {
-                    "enviado": True,
-                    "estado": "ENVIADO",
-                    "correo": correo_supervisor,
-                    "CartaAdjunta": bool(
-                        contenido_carta and nombre_carta
-                    ),
-                    "NombreCartaAdjunta": (
-                        nombre_carta
-                        if contenido_carta
-                        else None
-                    ),
-                    "mensaje": (
-                        "Notificación enviada correctamente "
-                        "al correo del supervisor que reportó el caso."
-                    ),
-                    "IdNotificacionProcesoDisciplinario": (
-                        notificacion_supervisor
-                        .IdNotificacionProcesoDisciplinario
-                    ),
-                }
-
-            except Exception as error:
                 notificacion_supervisor = marcar_notificacion_error(
                     db=db,
                     notificacion=notificacion_supervisor,
-                    error=str(error),
+                    error=mensaje_error_supervisor,
                     usuario=usuario,
                 )
 
@@ -1445,32 +1475,95 @@ def enviar_notificacion_agenda_disciplinaria(
                     "correo": correo_supervisor,
                     "CartaAdjunta": False,
                     "NombreCartaAdjunta": None,
-                    "mensaje": str(error),
+                    "mensaje": mensaje_error_supervisor,
                     "IdNotificacionProcesoDisciplinario": (
                         notificacion_supervisor
                         .IdNotificacionProcesoDisciplinario
                     ),
                 }
 
+            else:
+                try:
+                    if contenido_carta and nombre_carta:
+                        enviar_correo_con_adjunto_bytes(
+                            destinatario=correo_supervisor,
+                            asunto=asunto_supervisor,
+                            cuerpo=cuerpo_supervisor_texto,
+                            cuerpo_html=cuerpo_supervisor_html,
+                            contenido_adjunto=contenido_carta,
+                            nombre_adjunto=nombre_carta,
+                        )
+
+                    else:
+                        enviar_correo_sin_adjunto(
+                            destinatario=correo_supervisor,
+                            asunto=asunto_supervisor,
+                            cuerpo=cuerpo_supervisor_texto,
+                            cuerpo_html=cuerpo_supervisor_html,
+                        )
+
+                    notificacion_supervisor = marcar_notificacion_enviada(
+                        db=db,
+                        notificacion=notificacion_supervisor,
+                        usuario=usuario,
+                    )
+
+                    resultado_supervisor = {
+                        "enviado": True,
+                        "estado": "ENVIADO",
+                        "correo": correo_supervisor,
+                        "CartaAdjunta": bool(
+                            contenido_carta and nombre_carta
+                        ),
+                        "NombreCartaAdjunta": (
+                            nombre_carta
+                            if contenido_carta
+                            else None
+                        ),
+                        "mensaje": (
+                            "Notificación enviada correctamente "
+                            "al correo del supervisor que reportó el caso."
+                        ),
+                        "IdNotificacionProcesoDisciplinario": (
+                            notificacion_supervisor
+                            .IdNotificacionProcesoDisciplinario
+                        ),
+                    }
+
+                except Exception as error:
+                    notificacion_supervisor = marcar_notificacion_error(
+                        db=db,
+                        notificacion=notificacion_supervisor,
+                        error=str(error),
+                        usuario=usuario,
+                    )
+
+                    resultado_supervisor = {
+                        "enviado": False,
+                        "estado": "ERROR",
+                        "correo": correo_supervisor,
+                        "CartaAdjunta": False,
+                        "NombreCartaAdjunta": None,
+                        "mensaje": str(error),
+                        "IdNotificacionProcesoDisciplinario": (
+                            notificacion_supervisor
+                            .IdNotificacionProcesoDisciplinario
+                        ),
+                    }
+
     return {
-        "enviado": True,
-        "estado": "ENVIADO",
-        "correo": correo_trabajador,
-        "CartaAdjunta": carta_adjunta,
-        "NombreCartaAdjunta": nombre_carta,
-        "mensaje": (
-            "Notificación enviada correctamente "
-            "al correo del trabajador con la carta "
-            "oficial de citación adjunta."
-            if carta_adjunta
-            else (
-                "Notificación enviada correctamente "
-                "al correo del trabajador."
-            )
+        "enviado": resultado_trabajador["enviado"],
+        "estado": resultado_trabajador["estado"],
+        "correo": resultado_trabajador["correo"],
+        "CartaAdjunta": resultado_trabajador["CartaAdjunta"],
+        "NombreCartaAdjunta": (
+            resultado_trabajador["NombreCartaAdjunta"]
         ),
+        "mensaje": resultado_trabajador["mensaje"],
         "IdNotificacionProcesoDisciplinario": (
-            notificacion_trabajador
-            .IdNotificacionProcesoDisciplinario
+            resultado_trabajador[
+                "IdNotificacionProcesoDisciplinario"
+            ]
         ),
         "NotificacionSupervisor": resultado_supervisor,
     }
