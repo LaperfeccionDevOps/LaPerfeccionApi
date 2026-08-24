@@ -1850,8 +1850,7 @@ def _obtener_horario_agenda_descargos(
             a."HoraInicio",
             a."HoraFin",
             a."Modalidad",
-            a."EstadoAgenda",
-            a."LugarCitacion"
+            a."EstadoAgenda"
         FROM public."AgendaProcesoDisciplinario" a
         WHERE a."IdProcesoDisciplinario" = :id_proceso
           AND a."Activo" = TRUE
