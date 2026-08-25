@@ -28,6 +28,10 @@ class CierreProcesoDisciplinarioBase(BaseModel):
     FechaCierre: Optional[date] = None
     TipoCierre: Optional[str] = None
     MedidaDisciplinaria: Optional[str] = None
+
+    FechaInicioSuspension: Optional[date] = None
+    FechaFinSuspension: Optional[date] = None
+
     ConclusionRRLL: Optional[str] = None
     ResponsableCierre: Optional[str] = None
 
@@ -49,6 +53,9 @@ class CierreProcesoDisciplinarioCreate(BaseModel):
         default=None,
         max_length=500,
     )
+
+    FechaInicioSuspension: Optional[date] = None
+    FechaFinSuspension: Optional[date] = None
 
     ConclusionRRLL: Optional[str] = Field(
         default=None,
@@ -74,18 +81,12 @@ class CierreProcesoDisciplinarioCreate(BaseModel):
         if texto is None:
             return None
 
-        codigo = (
-            texto.upper()
-            .replace(" ", "_")
-        )
+        codigo = texto.upper().replace(" ", "_")
 
         equivalencias = {
-            "CON_MEDIDA_DISCIPLINARIA":
-                "CON_MEDIDA_DISCIPLINARIA",
-            "SIN_MEDIDA_DISCIPLINARIA":
-                "SIN_MEDIDA_DISCIPLINARIA",
-            "ARCHIVO_DEL_PROCESO":
-                "ARCHIVO_DEL_PROCESO",
+            "CON_MEDIDA_DISCIPLINARIA": "CON_MEDIDA_DISCIPLINARIA",
+            "SIN_MEDIDA_DISCIPLINARIA": "SIN_MEDIDA_DISCIPLINARIA",
+            "ARCHIVO_DEL_PROCESO": "ARCHIVO_DEL_PROCESO",
         }
 
         codigo = equivalencias.get(
@@ -128,6 +129,9 @@ class CierreProcesoDisciplinarioUpdate(
         default=None,
         max_length=500,
     )
+
+    FechaInicioSuspension: Optional[date] = None
+    FechaFinSuspension: Optional[date] = None
 
     ConclusionRRLL: Optional[str] = Field(
         default=None,

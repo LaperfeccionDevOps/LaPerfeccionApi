@@ -89,6 +89,21 @@ class CitacionProcesoDisciplinario(Base):
         nullable=True,
     )
 
+    FechaUltimoDiaLaborado = Column(
+        Date,
+        nullable=True,
+    )
+
+    FechaInicioAusencia = Column(
+        Date,
+        nullable=True,
+    )
+
+    FechaFinAusencia = Column(
+        Date,
+        nullable=True,
+    )
+
     DesempenoContinua = Column(
         String(20),
         nullable=True,

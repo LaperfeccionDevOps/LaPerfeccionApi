@@ -39,6 +39,16 @@ class CierreProcesoDisciplinario(Base):
         nullable=True,
     )
 
+    FechaInicioSuspension = Column(
+        Date,
+        nullable=True,
+    )
+
+    FechaFinSuspension = Column(
+        Date,
+        nullable=True,
+    )
+
     ConclusionRRLL = Column(
         Text,
         nullable=True,

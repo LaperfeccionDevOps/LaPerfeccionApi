@@ -27,6 +27,10 @@ class CitacionProcesoDisciplinarioBase(
 
     ObservacionOperaciones: str | None = None
 
+    FechaUltimoDiaLaborado: date | None = None
+    FechaInicioAusencia: date | None = None
+    FechaFinAusencia: date | None = None
+
     DesempenoContinua: str | None = None
 
     JustificacionDesempeno: str | None = None
@@ -69,6 +73,10 @@ class CitacionProcesoDisciplinarioUpdate(
     RelatoHechos: str | None = None
 
     ObservacionOperaciones: str | None = None
+
+    FechaUltimoDiaLaborado: date | None = None
+    FechaInicioAusencia: date | None = None
+    FechaFinAusencia: date | None = None
 
     DesempenoContinua: str | None = None
 
