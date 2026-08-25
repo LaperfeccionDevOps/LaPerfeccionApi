@@ -3408,8 +3408,10 @@ def subir_documento_proceso_disciplinario(
     )
 
     # Documento oficial de cierre:
-    # se controla el nombre para que siempre quede como número 04
-    # dentro del expediente y de la Carpeta Digital.
+    # permite varios archivos por expediente y conserva el orden
+    # visible 04, 04.1, 04.2, etc. Cada archivo queda como un
+    # registro independiente tanto en el expediente como en
+    # Carpeta Digital.
     if (
         codigo_tipo_documento
         == "DOCUMENTO_CIERRE_DISCIPLINARIO"
@@ -3420,11 +3422,63 @@ def subir_documento_proceso_disciplinario(
             )
         )
 
-        nombre_archivo = (
+        documentos_cierre_existentes = (
+            db.query(
+                DocumentoProcesoDisciplinario
+            )
+            .filter(
+                DocumentoProcesoDisciplinario
+                .IdProcesoDisciplinario
+                == IdProcesoDisciplinario,
+                DocumentoProcesoDisciplinario
+                .TipoDocumento
+                == "DOCUMENTO_CIERRE_DISCIPLINARIO",
+            )
+            .all()
+        )
+
+        nombres_existentes = {
+            str(
+                documento.NombreArchivo
+                or ""
+            ).strip()
+            for documento
+            in documentos_cierre_existentes
+        }
+
+        nombre_base = (
             "04 - Documento de Cierre - "
             f"{codigo_expediente}"
             f"{extension_archivo}"
         )
+
+        if not documentos_cierre_existentes:
+            nombre_archivo = nombre_base
+        else:
+            consecutivo = 1
+
+            while True:
+                prefijo_candidato = (
+                    f"04.{consecutivo} - "
+                    "Documento de Cierre - "
+                    f"{codigo_expediente}"
+                )
+
+                prefijo_en_uso = any(
+                    nombre.startswith(
+                        prefijo_candidato
+                    )
+                    for nombre in nombres_existentes
+                )
+
+                if not prefijo_en_uso:
+                    nombre_archivo = (
+                        f"{prefijo_candidato}"
+                        f"{extension_archivo}"
+                    )
+                    break
+
+                consecutivo += 1
     else:
         nombre_archivo = (
             nombre_archivo_original
@@ -3463,85 +3517,39 @@ def subir_documento_proceso_disciplinario(
                 contenido_archivo
             )
 
-        # Para el documento oficial de cierre se mantiene un único
-        # registro por expediente. Si Yeny vuelve a adjuntar una
-        # versión corregida, se actualiza el mismo documento.
+        # Cada documento de cierre se registra de forma independiente.
+        # No se reemplaza un cierre anterior cuando RRLL adjunta otro.
         if (
             codigo_tipo_documento
             == "DOCUMENTO_CIERRE_DISCIPLINARIO"
         ):
-            existente_proceso = (
-                db.query(
-                    DocumentoProcesoDisciplinario
-                )
-                .filter(
-                    DocumentoProcesoDisciplinario
-                    .IdProcesoDisciplinario
-                    == IdProcesoDisciplinario,
-                    DocumentoProcesoDisciplinario
-                    .TipoDocumento
-                    == (
+            nuevo = (
+                DocumentoProcesoDisciplinario(
+                    IdProcesoDisciplinario=(
+                        IdProcesoDisciplinario
+                    ),
+                    TipoDocumento=(
                         "DOCUMENTO_CIERRE_DISCIPLINARIO"
                     ),
+                    NombreArchivo=(
+                        nombre_archivo
+                    ),
+                    RutaArchivo=str(
+                        ruta_archivo_relativa
+                    ),
+                    Observacion=(
+                        Observacion
+                    ),
+                    DocumentoCargado=(
+                        contenido_archivo
+                    ),
+                    Formato=(
+                        formato_documento
+                    ),
                 )
-                .order_by(
-                    DocumentoProcesoDisciplinario
-                    .IdDocumentoProcesoDisciplinario
-                    .desc()
-                )
-                .first()
             )
 
-            if existente_proceso:
-                nuevo = existente_proceso
-                nuevo.NombreArchivo = (
-                    nombre_archivo
-                )
-                nuevo.RutaArchivo = str(
-                    ruta_archivo_relativa
-                )
-                nuevo.Observacion = (
-                    Observacion
-                )
-                nuevo.DocumentoCargado = (
-                    contenido_archivo
-                )
-                nuevo.Formato = (
-                    formato_documento
-                )
-                nuevo.FechaActualizacion = (
-                    datetime.now(
-                        timezone.utc
-                    )
-                )
-            else:
-                nuevo = (
-                    DocumentoProcesoDisciplinario(
-                        IdProcesoDisciplinario=(
-                            IdProcesoDisciplinario
-                        ),
-                        TipoDocumento=(
-                            "DOCUMENTO_CIERRE_DISCIPLINARIO"
-                        ),
-                        NombreArchivo=(
-                            nombre_archivo
-                        ),
-                        RutaArchivo=str(
-                            ruta_archivo_relativa
-                        ),
-                        Observacion=(
-                            Observacion
-                        ),
-                        DocumentoCargado=(
-                            contenido_archivo
-                        ),
-                        Formato=(
-                            formato_documento
-                        ),
-                    )
-                )
-
-                db.add(nuevo)
+            db.add(nuevo)
 
         else:
             nuevo = DocumentoProcesoDisciplinario(
@@ -4196,6 +4204,295 @@ def eliminar_evidencia_trabajador_rrll(
                 "IdDocumentoProcesoDisciplinario": id_documento,
             },
         ) from error
+
+
+@router.delete(
+    "/rrll/documento-cierre/{id_documento}",
+)
+def eliminar_documento_cierre_rrll(
+    id_documento: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Elimina un documento de cierre disciplinario antes de finalizar
+    el proceso.
+
+    La eliminación se sincroniza en:
+    - DocumentoProcesoDisciplinario.
+    - Carpeta Digital del trabajador.
+    - Archivo físico del expediente, cuando exista.
+
+    No permite eliminar documentos de un proceso ya cerrado.
+    """
+
+    documento = obtener_documento_o_error(
+        db=db,
+        id_documento=id_documento,
+    )
+
+    tipo_documento = normalizar_tipo_documento(
+        documento.TipoDocumento
+    )
+
+    if (
+        tipo_documento
+        != "DOCUMENTO_CIERRE_DISCIPLINARIO"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "Este endpoint solo permite eliminar "
+                    "documentos de cierre disciplinario."
+                ),
+                "TipoDocumento": documento.TipoDocumento,
+                "IdDocumentoProcesoDisciplinario": (
+                    documento
+                    .IdDocumentoProcesoDisciplinario
+                ),
+            },
+        )
+
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=(
+            documento.IdProcesoDisciplinario
+        ),
+    )
+
+    estado_proceso = str(
+        proceso.EstadoProceso or ""
+    ).strip().upper()
+
+    if estado_proceso == "CERRADO":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso disciplinario ya está cerrado "
+                    "y sus documentos de cierre son únicamente "
+                    "de consulta."
+                ),
+                "IdProcesoDisciplinario": (
+                    proceso.IdProcesoDisciplinario
+                ),
+                "EstadoProceso": proceso.EstadoProceso,
+            },
+        )
+
+    nombre_archivo = str(
+        documento.NombreArchivo or ""
+    ).strip()
+
+    ruta_original = construir_ruta_absoluta_documento(
+        documento
+    )
+
+    ruta_temporal = None
+
+    if ruta_original:
+        marca_tiempo = datetime.now(
+            timezone.utc
+        ).strftime(
+            "%Y%m%d%H%M%S%f"
+        )
+
+        ruta_temporal = ruta_original.with_name(
+            f".eliminando_cierre_"
+            f"{documento.IdDocumentoProcesoDisciplinario}_"
+            f"{marca_tiempo}_"
+            f"{ruta_original.name}"
+        )
+
+        try:
+            ruta_original.rename(
+                ruta_temporal
+            )
+        except OSError as error:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "mensaje": (
+                        "No fue posible preparar el archivo "
+                        "de cierre para su eliminación."
+                    ),
+                    "IdDocumentoProcesoDisciplinario": (
+                        documento
+                        .IdDocumentoProcesoDisciplinario
+                    ),
+                },
+            ) from error
+
+    ids_documentos_carpeta = []
+
+    try:
+        documentos_carpeta = (
+            db.execute(
+                text(
+                    """
+                    SELECT
+                        d."IdDocumento"
+                    FROM public."Documentos" d
+                    INNER JOIN public."RelacionTipoDocumentacion" rtd
+                        ON rtd."IdDocumento" = d."IdDocumento"
+                    WHERE rtd."IdRegistroPersonal" = :id_registro_personal
+                      AND d."IdTipoDocumentacion" = 82
+                      AND d."Nombre" = :nombre_archivo
+                    ORDER BY d."IdDocumento" DESC
+                    """
+                ),
+                {
+                    "id_registro_personal": (
+                        proceso.IdRegistroPersonal
+                    ),
+                    "nombre_archivo": nombre_archivo,
+                },
+            )
+            .mappings()
+            .all()
+        )
+
+        ids_documentos_carpeta = [
+            int(
+                item["IdDocumento"]
+            )
+            for item in documentos_carpeta
+        ]
+
+        for id_documento_carpeta in (
+            ids_documentos_carpeta
+        ):
+            db.execute(
+                text(
+                    """
+                    DELETE FROM public."RelacionTipoDocumentacion"
+                    WHERE "IdRegistroPersonal" = :id_registro_personal
+                      AND "IdDocumento" = :id_documento
+                    """
+                ),
+                {
+                    "id_registro_personal": (
+                        proceso.IdRegistroPersonal
+                    ),
+                    "id_documento": (
+                        id_documento_carpeta
+                    ),
+                },
+            )
+
+            relaciones_restantes = (
+                db.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cantidad
+                        FROM public."RelacionTipoDocumentacion"
+                        WHERE "IdDocumento" = :id_documento
+                        """
+                    ),
+                    {
+                        "id_documento": (
+                            id_documento_carpeta
+                        ),
+                    },
+                )
+                .mappings()
+                .first()
+            )
+
+            if int(
+                relaciones_restantes[
+                    "cantidad"
+                ]
+                or 0
+            ) == 0:
+                db.execute(
+                    text(
+                        """
+                        DELETE FROM public."Documentos"
+                        WHERE "IdDocumento" = :id_documento
+                        """
+                    ),
+                    {
+                        "id_documento": (
+                            id_documento_carpeta
+                        ),
+                    },
+                )
+
+        db.delete(
+            documento
+        )
+        db.commit()
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        if (
+            ruta_temporal
+            and ruta_temporal.exists()
+            and ruta_original
+            and not ruta_original.exists()
+        ):
+            try:
+                ruta_temporal.rename(
+                    ruta_original
+                )
+            except OSError:
+                pass
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No fue posible eliminar el documento "
+                    "de cierre del expediente y la Carpeta Digital."
+                ),
+                "IdDocumentoProcesoDisciplinario": (
+                    id_documento
+                ),
+            },
+        ) from error
+
+    archivo_fisico_eliminado = (
+        ruta_temporal is None
+    )
+
+    advertencia = None
+
+    if ruta_temporal:
+        try:
+            ruta_temporal.unlink(
+                missing_ok=True
+            )
+            archivo_fisico_eliminado = True
+        except OSError:
+            archivo_fisico_eliminado = False
+            advertencia = (
+                "El registro fue eliminado, pero quedó "
+                "un archivo temporal pendiente de limpieza."
+            )
+
+    return {
+        "ok": True,
+        "mensaje": (
+            "Documento de cierre eliminado correctamente "
+            "del expediente y la Carpeta Digital."
+        ),
+        "IdDocumentoProcesoDisciplinario": (
+            id_documento
+        ),
+        "IdProcesoDisciplinario": (
+            proceso.IdProcesoDisciplinario
+        ),
+        "NombreArchivo": nombre_archivo,
+        "DocumentosCarpetaDigitalEliminados": (
+            ids_documentos_carpeta
+        ),
+        "ArchivoFisicoEliminado": (
+            archivo_fisico_eliminado
+        ),
+        "Advertencia": advertencia,
+    }
 
 
 @router.delete(
