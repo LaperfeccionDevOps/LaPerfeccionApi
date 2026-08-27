@@ -154,8 +154,67 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
                 "No se registra historial porque el aspirante ya estaba en estado 25."
             )
 
-        # UPDATE de RegistroPersonal e INSERT del historial quedan
-        # confirmados juntos en la misma transacción.
+        # ------------------------------------------------------------
+        # 3.1. Cerrar el ciclo de REINTEGRO cuando la contratación
+        #      llega al estado CONTRATADO.
+        #
+        #      Este ajuste es intencionalmente limitado:
+        #      - solo aplica al trabajador actual;
+        #      - solo aplica a TipoVinculacion = REINTEGRO;
+        #      - solo aplica a EstadoVinculacion = EN_PROCESO;
+        #      - solo toma el ciclo abierto más reciente;
+        #      - no modifica ciclos históricos;
+        #      - no modifica contrataciones normales;
+        #      - queda dentro de la misma transacción del botón C.
+        # ------------------------------------------------------------
+        reintegro_activado = db.execute(
+            text("""
+                UPDATE public."VinculacionLaboral"
+                SET
+                    "EstadoVinculacion" = 'ACTIVO',
+                    "FechaActualizacion" = NOW(),
+                    "UsuarioActualizacion" = 'contratacion'
+                WHERE "IdVinculacionLaboral" = (
+                    SELECT vl."IdVinculacionLaboral"
+                    FROM public."VinculacionLaboral" vl
+                    WHERE vl."IdRegistroPersonal" = :id_registro
+                      AND vl."TipoVinculacion" = 'REINTEGRO'
+                      AND vl."EstadoVinculacion" = 'EN_PROCESO'
+                    ORDER BY
+                        vl."NumeroCiclo" DESC,
+                        vl."IdVinculacionLaboral" DESC
+                    LIMIT 1
+                )
+                RETURNING
+                    "IdVinculacionLaboral",
+                    "IdRegistroPersonal",
+                    "NumeroCiclo",
+                    "TipoVinculacion",
+                    "EstadoVinculacion",
+                    "FechaIngreso",
+                    "FechaRetiro",
+                    "FechaActualizacion",
+                    "UsuarioActualizacion";
+            """),
+            {
+                "id_registro": payload.IdRegistroPersonal,
+            },
+        ).mappings().first()
+
+        if reintegro_activado:
+            logger.info(
+                "Ciclo de reintegro activado al contratar: "
+                f"{dict(reintegro_activado)}"
+            )
+        else:
+            logger.info(
+                "No existe ciclo REINTEGRO / EN_PROCESO para activar. "
+                "Se conserva el flujo normal de contratación."
+            )
+
+        # UPDATE de RegistroPersonal, INSERT del historial y, cuando aplica,
+        # activación del ciclo de reintegro quedan confirmados juntos
+        # en la misma transacción.
         db.commit()
         logger.info("Commit BD exitoso")
 

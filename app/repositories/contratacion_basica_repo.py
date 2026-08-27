@@ -1,4 +1,4 @@
-# app/repositories/contratacion_basica_repo.py
+
 
 from typing import Any
 
@@ -94,6 +94,56 @@ class ContratacionBasicaRepo:
                 ORDER BY
                     vl."NumeroCiclo" DESC,
                     vl."IdVinculacionLaboral" DESC
+                LIMIT 1
+                """
+            ),
+            {"id_registro_personal": id_registro_personal},
+        ).mappings().first()
+
+        return dict(row) if row else None
+
+    def _get_retiro_cerrado(
+        self,
+        db: Session,
+        id_registro_personal: int,
+    ) -> dict[str, Any] | None:
+        """
+        Obtiene el retiro más reciente que ya cerró/finalizó el ciclo laboral.
+
+        Esta consulta se usa únicamente como protección de integridad:
+        un retiro cerrado no debe ser alterado indirectamente por un guardado
+        posterior de ContratacionBasica.
+
+        Si existe un REINTEGRO EN_PROCESO, la regla de reintegro tiene
+        prioridad y permite registrar la nueva FechaIngreso del nuevo ciclo.
+        """
+        row = db.execute(
+            text(
+                """
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."FechaRetiro",
+                    rl."FechaCierre",
+                    rl."FechaEnvioNomina",
+                    rl."EstadoCasoRRLL",
+                    rl."Activo",
+                    rl."IdMotivoRetiro",
+                    rl."ObservacionRetiro"
+                FROM public."RetiroLaboral" rl
+                WHERE rl."IdRegistroPersonal" = :id_registro_personal
+                  AND (
+                        COALESCE(rl."Activo", TRUE) = FALSE
+                        OR UPPER(
+                            COALESCE(rl."EstadoCasoRRLL", '')
+                        ) = 'CERRADO'
+                        OR rl."FechaEnvioNomina" IS NOT NULL
+                      )
+                ORDER BY
+                    COALESCE(
+                        rl."FechaActualizacion",
+                        rl."FechaCreacion"
+                    ) DESC,
+                    rl."IdRetiroLaboral" DESC
                 LIMIT 1
                 """
             ),
@@ -359,6 +409,28 @@ class ContratacionBasicaRepo:
         id_registro_personal: int,
         data: dict[str, Any],
     ) -> dict[str, Any]:
+        actual = self._get_row_by_registro_personal(
+            db,
+            id_registro_personal,
+        )
+        reintegro = self._get_reintegro_activo(
+            db,
+            id_registro_personal,
+        )
+        retiro_cerrado = self._get_retiro_cerrado(
+            db,
+            id_registro_personal,
+        )
+
+        fecha_ingreso_solicitada = data.get("FechaIngreso")
+
+        # Protección de integridad del retiro:
+        # si el ciclo ya fue cerrado/finalizado y NO existe un reintegro
+        # activo, ContratacionBasica no puede reescribir la FechaIngreso
+        # histórica. Los demás campos sí pueden actualizarse normalmente.
+        if actual and retiro_cerrado and not reintegro:
+            fecha_ingreso_solicitada = actual.get("FechaIngreso")
+
         sql = text(
             f"""
             UPDATE {self.TABLE}
@@ -423,7 +495,7 @@ class ContratacionBasicaRepo:
             "IdRegistroPersonal": id_registro_personal,
             "IdBanco": data.get("IdBanco"),
             "IdTipoContrato": data.get("IdTipoContrato"),
-            "FechaIngreso": data.get("FechaIngreso"),
+            "FechaIngreso": fecha_ingreso_solicitada,
             "RiesgoLaboral": data.get("RiesgoLaboral"),
             "Posicion": data.get("Posicion"),
             "Escalafon": data.get("Escalafon"),
@@ -508,6 +580,22 @@ class ContratacionBasicaRepo:
                 data,
             )
         else:
+            retiro_cerrado = self._get_retiro_cerrado(
+                db,
+                int(id_reg),
+            )
+            reintegro = self._get_reintegro_activo(
+                db,
+                int(id_reg),
+            )
+
+            if retiro_cerrado and not reintegro:
+                raise ValueError(
+                    "No se puede crear ContratacionBasica para un "
+                    "trabajador con retiro cerrado sin un reintegro "
+                    "EN_PROCESO."
+                )
+
             result = self.create(
                 db,
                 data,

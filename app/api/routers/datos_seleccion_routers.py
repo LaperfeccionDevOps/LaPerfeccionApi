@@ -131,29 +131,48 @@ def obtener_dashboard_indicadores_seleccion(
     mes: int | None = None,
 ):
     """
-    Dashboard exclusivo de Selección.
+    Dashboard gerencial exclusivo de Selección.
 
-    Reglas:
-    - Universo: personas creadas en RegistroPersonal desde el 1 de marzo
-      de 2026 mediante el aplicativo.
-    - Los filtros de año y mes se aplican sobre RegistroPersonal.FechaCreacion.
-    - Se excluyen activos migrados y registros identificados como migración.
-    - Estado actual: representa el resultado vigente de Selección. Si una
-      persona ya fue contratada y posteriormente pasó a estados de Retiros,
-      continúa mostrándose como Contratado dentro de este dashboard.
-    - Avanzan a Contratación: personas del universo con evidencia de haber
-      llegado al estado 24 o a una etapa posterior de contratación.
-    - Rechazados en Selección: personas en estado 28 que no presentan
-      evidencia de rechazo originado en Contratación.
-    - Rechazados en Contratación: personas en estado 28 que llegaron al estado
-      24, llegaron al estado 25, tienen información en ContratacionBasica,
-      poseen un movimiento de rechazo del módulo Contratación o conservan el
-      motivo histórico "No asiste a Contratación". Estos casos no alimentan
-      los indicadores ni los motivos de rechazo de Selección.
-    - Motivos de Selección: se toma el cierre más reciente de
-      MotivoCierreProceso únicamente para los rechazos originados en Selección.
+    REGLAS GENERALES
+    ============================================================
+    - Universo:
+      Personas creadas realmente mediante el aplicativo desde
+      el 1 de marzo de 2026.
 
-    Esta función solo consulta información. No modifica la base de datos.
+    - No incluye:
+      * Activos migrados.
+      * Registros identificados como migración.
+      * Ajustes administrativos de migración.
+      * Registros técnicos de prueba conocidos.
+
+    - Fecha base:
+      RegistroPersonal.FechaCreacion.
+
+    - Tarjetas principales:
+      1. Total personal registrado.
+      2. Personal que avanzó a Contratación.
+      3. Personal rechazado en Selección.
+
+    - Porcentajes:
+      * Total registrados = 100 %.
+      * Avanzan a Contratación = avanzan / registrados.
+      * Rechazados Selección = rechazados / registrados.
+      * Estados = cantidad estado / registrados.
+      * Motivos rechazo = cantidad motivo / rechazados Selección.
+
+    - Serie mensual:
+      Agrupa por mes de RegistroPersonal.FechaCreacion y devuelve:
+      registrados, avanzan, rechazados y sus porcentajes.
+
+    - Detalle mensual:
+      Cada mes incluye:
+      tarjetas, estados y motivos de rechazo.
+
+    - Rechazos de Contratación:
+      No alimentan los indicadores ni los motivos de Selección.
+
+    SOLO CONSULTA.
+    No inserta, no actualiza y no elimina información.
     """
 
     if mes is not None and (mes < 1 or mes > 12):
@@ -167,6 +186,19 @@ def obtener_dashboard_indicadores_seleccion(
             status_code=400,
             detail="El año consultado no es válido.",
         )
+
+    # ============================================================
+    # 1. UNIVERSO GENERAL DE SELECCIÓN
+    # ============================================================
+    #
+    # IMPORTANTE:
+    # El filtro de año se aplica aquí para construir la serie
+    # histórica del año consultado.
+    #
+    # El filtro de mes NO se aplica en SQL.
+    # Se aplica después en Python para conservar la serie completa
+    # del año y al mismo tiempo entregar el detalle del mes elegido.
+    # ============================================================
 
     rows = db.execute(
         text("""
@@ -212,7 +244,12 @@ def obtener_dashboard_indicadores_seleccion(
                                 = rp."IdRegistroPersonal"
                             AND hec_rechazo."EstadoNuevo" = 28
                             AND UPPER(
-                                TRIM(COALESCE(hec_rechazo."Modulo", ''))
+                                TRIM(
+                                    COALESCE(
+                                        hec_rechazo."Modulo",
+                                        ''
+                                    )
+                                )
                             ) = 'CONTRATACION'
                     ) AS tiene_rechazo_contratacion_historial
 
@@ -224,14 +261,12 @@ def obtener_dashboard_indicadores_seleccion(
 
                     AND (
                         :anio IS NULL
-                        OR EXTRACT(YEAR FROM rp."FechaCreacion") = :anio
+                        OR EXTRACT(
+                            YEAR FROM rp."FechaCreacion"
+                        ) = :anio
                     )
 
-                    AND (
-                        :mes IS NULL
-                        OR EXTRACT(MONTH FROM rp."FechaCreacion") = :mes
-                    )
-
+                    -- Excluir activos históricos migrados
                     AND NOT EXISTS (
                         SELECT 1
                         FROM public."HistorialLaboral" hl
@@ -239,57 +274,94 @@ def obtener_dashboard_indicadores_seleccion(
                             hl."IdRegistroPersonal"
                                 = rp."IdRegistroPersonal"
                             AND UPPER(
-                                TRIM(COALESCE(hl."TipoVinculacion", ''))
+                                TRIM(
+                                    COALESCE(
+                                        hl."TipoVinculacion",
+                                        ''
+                                    )
+                                )
                             ) = 'ACTIVO MIGRADO'
                     )
 
-                   AND LOWER(
-                    COALESCE(rp."UsuarioActualizacion", '')
-                ) NOT LIKE '%migracion%'
+                    -- Excluir etiquetas de migración
+                    AND LOWER(
+                        COALESCE(
+                            rp."UsuarioActualizacion",
+                            ''
+                        )
+                    ) NOT LIKE '%migracion%'
 
-                AND LOWER(
-                    COALESCE(rp."UsuarioActualizacion", '')
-                ) NOT LIKE '%migrado%'
+                    AND LOWER(
+                        COALESCE(
+                            rp."UsuarioActualizacion",
+                            ''
+                        )
+                    ) NOT LIKE '%migrado%'
 
-                AND COALESCE(rp."UsuarioActualizacion", '')
-                    <> 'ajuste_no_activos_maestro_2026_06_22'
+                    -- Excluir ajuste histórico administrativo
+                    AND COALESCE(
+                        rp."UsuarioActualizacion",
+                        ''
+                    ) <> 'ajuste_no_activos_maestro_2026_06_22'
 
-                AND rp."NumeroIdentificacion"::text NOT IN (
-                    '91011506',
-                    '0987654',
-                    '951357'
-                )
-                )
+                    -- Registros técnicos conocidos de prueba
+                    AND rp."NumeroIdentificacion"::text NOT IN (
+                        '91011506',
+                        '0987654',
+                        '951357'
+                    )
+            )
+
             SELECT
                 us."IdRegistroPersonal",
                 us."IdEstadoProceso",
                 us."FechaCreacion" AS fecha_registro,
+
                 us.tiene_estado_24,
                 us.tiene_estado_25,
                 us.tiene_contratacion_basica,
                 us.tiene_rechazo_contratacion_historial,
 
                 CASE
+                    -- En los indicadores de Selección, una persona que ya
+                    -- avanzó a Contratación conserva ese resultado aunque
+                    -- posteriormente cambie de estado o sea rechazada allá.
+                    WHEN (
+                        us.tiene_estado_24
+                        OR us.tiene_estado_25
+                        OR us.tiene_contratacion_basica
+                        OR us.tiene_rechazo_contratacion_historial
+                        OR UPPER(
+                            TRIM(
+                                COALESCE(
+                                    mcp."MotivoCierre",
+                                    ''
+                                )
+                            )
+                        ) IN (
+                            'NO ASISTE A CONTRATACION',
+                            'NO ASISTE A CONTRATACIÓN'
+                        )
+                        OR us."IdEstadoProceso" IN (
+                            24,
+                            25,
+                            30,
+                            31,
+                            32,
+                            33,
+                            34,
+                            35
+                        )
+                    )
+                    THEN 'AVANZA A CONTRATACIÓN'
+
+                    -- Solo queda como rechazo de Selección cuando nunca
+                    -- existe evidencia de haber avanzado a Contratación.
                     WHEN us."IdEstadoProceso" = 28
                     THEN 'RECHAZADO'
 
                     WHEN us."IdEstadoProceso" = 27
                     THEN 'DESISTE DEL PROCESO'
-
-                    WHEN (
-                        us.tiene_estado_25
-                        OR us.tiene_contratacion_basica
-                        OR us."IdEstadoProceso" IN (
-                            25, 30, 31, 32, 33, 35
-                        )
-                    )
-                    THEN 'CONTRATADO'
-
-                    WHEN us."IdEstadoProceso" = 34
-                    THEN 'PENDIENTE DE CONTRATACIÓN'
-
-                    WHEN us."IdEstadoProceso" = 24
-                    THEN 'AVANZA A CONTRATACIÓN'
 
                     WHEN us."IdEstadoProceso" = 26
                     THEN 'REFERENCIACIÓN'
@@ -311,19 +383,43 @@ def obtener_dashboard_indicadores_seleccion(
 
                     ELSE CONCAT(
                         'ESTADO ',
-                        COALESCE(us."IdEstadoProceso"::text, 'SIN DEFINIR')
+                        COALESCE(
+                            us."IdEstadoProceso"::text,
+                            'SIN DEFINIR'
+                        )
                     )
                 END AS estado_seleccion,
-                    (
-                        us.tiene_estado_24
-                        OR us.tiene_estado_25
-                        OR us.tiene_contratacion_basica
-                        OR us."IdEstadoProceso" IN (
-                            24, 25, 30, 31, 32, 33, 35
+
+                (
+                    us.tiene_estado_24
+                    OR us.tiene_estado_25
+                    OR us.tiene_contratacion_basica
+                    OR us.tiene_rechazo_contratacion_historial
+                    OR UPPER(
+                        TRIM(
+                            COALESCE(
+                                mcp."MotivoCierre",
+                                ''
+                            )
                         )
-                    ) AS avanzo_contratacion,
+                    ) IN (
+                        'NO ASISTE A CONTRATACION',
+                        'NO ASISTE A CONTRATACIÓN'
+                    )
+                    OR us."IdEstadoProceso" IN (
+                        24,
+                        25,
+                        30,
+                        31,
+                        32,
+                        33,
+                        34,
+                        35
+                    )
+                ) AS avanzo_contratacion,
 
                 mcp."MotivoCierre" AS motivo_rechazo,
+
                 COALESCE(
                     mcp."FechaActualizacion",
                     mcp."FechaCreacion"
@@ -332,19 +428,26 @@ def obtener_dashboard_indicadores_seleccion(
                 CASE
                     WHEN us."IdEstadoProceso" <> 28
                     THEN NULL
+
                     WHEN (
                         us.tiene_estado_24
                         OR us.tiene_estado_25
                         OR us.tiene_contratacion_basica
                         OR us.tiene_rechazo_contratacion_historial
                         OR UPPER(
-                            TRIM(COALESCE(mcp."MotivoCierre", ''))
+                            TRIM(
+                                COALESCE(
+                                    mcp."MotivoCierre",
+                                    ''
+                                )
+                            )
                         ) IN (
                             'NO ASISTE A CONTRATACION',
                             'NO ASISTE A CONTRATACIÓN'
                         )
                     )
                     THEN 'CONTRATACION'
+
                     ELSE 'SELECCION'
                 END AS origen_rechazo
 
@@ -355,29 +458,40 @@ def obtener_dashboard_indicadores_seleccion(
                     mcp_detalle."MotivoCierre",
                     mcp_detalle."FechaCreacion",
                     mcp_detalle."FechaActualizacion"
+
                 FROM public."MotivoCierreProceso" mcp_detalle
+
                 WHERE
                     mcp_detalle."IdRegistroPersonal"
                         = us."IdRegistroPersonal"
+
                 ORDER BY
                     COALESCE(
                         mcp_detalle."FechaActualizacion",
                         mcp_detalle."FechaCreacion"
                     ) DESC,
                     mcp_detalle."IdMotivoCierre" DESC
+
                 LIMIT 1
             ) mcp ON TRUE
 
-            ORDER BY us."IdRegistroPersonal";
+            ORDER BY
+                us."FechaCreacion",
+                us."IdRegistroPersonal";
         """),
         {
             "anio": anio,
-            "mes": mes,
         },
     ).mappings().all()
 
-    filas = [dict(row) for row in rows]
-    total = len(filas)
+    filas_universo = [
+        dict(row)
+        for row in rows
+    ]
+
+    # ============================================================
+    # 2. CATÁLOGOS DEL DASHBOARD
+    # ============================================================
 
     estados_base = [
         "NUEVO",
@@ -393,64 +507,48 @@ def obtener_dashboard_indicadores_seleccion(
         "RECHAZADO",
     ]
 
-    conteo_estados = {estado: 0 for estado in estados_base}
-
-    for fila in filas:
-        estado = _normalizar_estado_dashboard(
-            fila.get("estado_seleccion")
-        )
-
-        if estado not in conteo_estados:
-            conteo_estados[estado] = 0
-
-        conteo_estados[estado] += 1
-
-    estados_ordenados = estados_base + [
-        estado
-        for estado in conteo_estados
-        if estado not in estados_base
-    ]
-
-    estados = [
-        {
-            "estado": estado,
-            "cantidad": conteo_estados.get(estado, 0),
-            "porcentaje": (
-                round(
-                    (conteo_estados.get(estado, 0) / total) * 100,
-                    2,
-                )
-                if total
-                else 0
-            ),
-        }
-        for estado in estados_ordenados
-    ]
-
-    total_avanzan_contratacion = sum(
-        1
-        for fila in filas
-        if bool(fila.get("avanzo_contratacion"))
-    )
-
     equivalencias_motivos = {
-        "DESISTE DEL PROCESO": "Desiste del proceso",
-        "NO CUMPLE PERFIL": "No cumple perfil",
+        "DESISTE DEL PROCESO":
+            "Desiste del proceso",
+
+        "NO CUMPLE PERFIL":
+            "No cumple perfil",
+
         "NO ASISTE A EXAMENES MEDICOS":
             "No asiste a exámenes médicos",
+
         "NO ASISTE A EXÁMENES MEDICOS":
             "No asiste a exámenes médicos",
+
         "NO ASISTE A EXÁMENES MÉDICOS":
             "No asiste a exámenes médicos",
-        "EXAMENES NO APTOS": "Exámenes no aptos",
-        "EXÁMENES NO APTOS": "Exámenes no aptos",
-        "DOCUMENTACION INCOMPLETA": "Documentación incompleta",
-        "DOCUMENTACIÓN INCOMPLETA": "Documentación incompleta",
-        "ESTUDIO DE SEGURIDAD": "Estudio de seguridad",
-        "REINTEGRO NO APROBADO": "Reintegro no aprobado",
-        "NO SUPERA PRUEBA FISICA": "No supera prueba física",
-        "NO SUPERA PRUEBA FÍSICA": "No supera prueba física",
-        "OTRO": "Otro",
+
+        "EXAMENES NO APTOS":
+            "Exámenes no aptos",
+
+        "EXÁMENES NO APTOS":
+            "Exámenes no aptos",
+
+        "DOCUMENTACION INCOMPLETA":
+            "Documentación incompleta",
+
+        "DOCUMENTACIÓN INCOMPLETA":
+            "Documentación incompleta",
+
+        "ESTUDIO DE SEGURIDAD":
+            "Estudio de seguridad",
+
+        "REINTEGRO NO APROBADO":
+            "Reintegro no aprobado",
+
+        "NO SUPERA PRUEBA FISICA":
+            "No supera prueba física",
+
+        "NO SUPERA PRUEBA FÍSICA":
+            "No supera prueba física",
+
+        "OTRO":
+            "Otro",
     }
 
     motivos_base = [
@@ -466,150 +564,1363 @@ def obtener_dashboard_indicadores_seleccion(
         "Sin motivo registrado",
     ]
 
-    motivos_rechazo = {motivo: 0 for motivo in motivos_base}
-    total_rechazados_seleccion = 0
-    rechazados_excluidos_contratacion = 0
+    meses_nombre = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
 
-    for fila in filas:
+    # ============================================================
+    # 3. FUNCIONES INTERNAS DE CÁLCULO
+    # ============================================================
+
+    def es_rechazo_seleccion(fila: dict) -> bool:
         estado = _normalizar_estado_dashboard(
             fila.get("estado_seleccion")
         )
 
         if estado != "RECHAZADO":
-            continue
+            return False
 
-        motivo_original = fila.get("motivo_rechazo")
         motivo_normalizado = _normalizar_motivo_dashboard(
-            motivo_original
+            fila.get("motivo_rechazo")
         )
 
         es_rechazo_contratacion = (
             bool(fila.get("tiene_estado_24"))
             or bool(fila.get("tiene_estado_25"))
             or bool(fila.get("tiene_contratacion_basica"))
-            or bool(fila.get("tiene_rechazo_contratacion_historial"))
-            or motivo_normalizado == "NO ASISTE A CONTRATACIÓN"
+            or bool(
+                fila.get(
+                    "tiene_rechazo_contratacion_historial"
+                )
+            )
+            or motivo_normalizado
+                == "NO ASISTE A CONTRATACIÓN"
         )
 
-        if es_rechazo_contratacion:
-            rechazados_excluidos_contratacion += 1
-            continue
+        return not es_rechazo_contratacion
 
-        total_rechazados_seleccion += 1
+    def calcular_estados(
+        filas_periodo: list[dict],
+    ) -> list[dict]:
+        total_periodo = len(filas_periodo)
 
-        if not motivo_normalizado or motivo_normalizado == "SIN_MOTIVO":
-            motivo_final = "Sin motivo registrado"
-        else:
-            motivo_final = equivalencias_motivos.get(
-                motivo_normalizado,
-                str(motivo_original).strip(),
+        conteo = {
+            estado: 0
+            for estado in estados_base
+        }
+
+        for fila in filas_periodo:
+            estado = _normalizar_estado_dashboard(
+                fila.get("estado_seleccion")
             )
 
-        if motivo_final not in motivos_rechazo:
-            motivos_rechazo[motivo_final] = 0
+            if estado not in conteo:
+                conteo[estado] = 0
 
-        motivos_rechazo[motivo_final] += 1
+            conteo[estado] += 1
 
-    motivos_rechazo_generales = [
-        {
-            "motivo": motivo,
-            "cantidad": cantidad,
-            "porcentaje": (
-                round(
-                    (cantidad / total_rechazados_seleccion) * 100,
-                    2,
-                )
-                if total_rechazados_seleccion
-                else 0
-            ),
+        orden = estados_base + [
+            estado
+            for estado in conteo
+            if estado not in estados_base
+        ]
+
+        return [
+            {
+                "estado": estado,
+                "cantidad": conteo.get(
+                    estado,
+                    0,
+                ),
+                "porcentaje": (
+                    round(
+                        (
+                            conteo.get(
+                                estado,
+                                0,
+                            )
+                            / total_periodo
+                        )
+                        * 100,
+                        2,
+                    )
+                    if total_periodo
+                    else 0
+                ),
+            }
+            for estado in orden
+        ]
+
+    def calcular_motivos_rechazo(
+        filas_periodo: list[dict],
+    ) -> tuple[list[dict], int, int]:
+        conteo = {
+            motivo: 0
+            for motivo in motivos_base
         }
-        for motivo, cantidad in motivos_rechazo.items()
-    ]
 
-    meses_nombre = {
-        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
-    }
+        total_rechazados = 0
+        rechazados_excluidos = 0
 
-    registros_por_mes = {}
+        for fila in filas_periodo:
+            estado = _normalizar_estado_dashboard(
+                fila.get("estado_seleccion")
+            )
 
-    for fila in filas:
-        fecha = fila.get("fecha_registro")
+            if estado != "RECHAZADO":
+                continue
 
-        if not isinstance(fecha, datetime):
+            motivo_original = fila.get(
+                "motivo_rechazo"
+            )
+
+            motivo_normalizado = (
+                _normalizar_motivo_dashboard(
+                    motivo_original
+                )
+            )
+
+            if not es_rechazo_seleccion(fila):
+                rechazados_excluidos += 1
+                continue
+
+            total_rechazados += 1
+
+            if (
+                not motivo_normalizado
+                or motivo_normalizado == "SIN_MOTIVO"
+            ):
+                motivo_final = (
+                    "Sin motivo registrado"
+                )
+            else:
+                motivo_final = (
+                    equivalencias_motivos.get(
+                        motivo_normalizado,
+                        str(
+                            motivo_original
+                        ).strip(),
+                    )
+                )
+
+            if motivo_final not in conteo:
+                conteo[motivo_final] = 0
+
+            conteo[motivo_final] += 1
+
+        motivos = [
+            {
+                "motivo": motivo,
+                "cantidad": cantidad,
+                "porcentaje": (
+                    round(
+                        (
+                            cantidad
+                            / total_rechazados
+                        )
+                        * 100,
+                        2,
+                    )
+                    if total_rechazados
+                    else 0
+                ),
+            }
+            for motivo, cantidad in conteo.items()
+        ]
+
+        return (
+            motivos,
+            total_rechazados,
+            rechazados_excluidos,
+        )
+
+    def construir_resumen(
+        filas_periodo: list[dict],
+    ) -> dict:
+        total_periodo = len(
+            filas_periodo
+        )
+
+        total_avanzan = sum(
+            1
+            for fila in filas_periodo
+            if bool(
+                fila.get(
+                    "avanzo_contratacion"
+                )
+            )
+        )
+
+        (
+            motivos,
+            total_rechazados,
+            rechazados_excluidos,
+        ) = calcular_motivos_rechazo(
+            filas_periodo
+        )
+
+        estados = calcular_estados(
+            filas_periodo
+        )
+
+        conteo_estados = {
+            item["estado"]:
+                item["cantidad"]
+            for item in estados
+        }
+
+        contratados = (
+            conteo_estados.get(
+                "CONTRATADO",
+                0,
+            )
+        )
+
+        desistidos = (
+            conteo_estados.get(
+                "DESISTE DEL PROCESO",
+                0,
+            )
+        )
+
+        rechazados_estado_actual = (
+            conteo_estados.get(
+                "RECHAZADO",
+                0,
+            )
+        )
+
+        pendientes_contratacion = (
+            conteo_estados.get(
+                "PENDIENTE DE CONTRATACIÓN",
+                0,
+            )
+        )
+
+        en_proceso = max(
+            total_periodo
+            - contratados
+            - desistidos
+            - rechazados_estado_actual,
+            0,
+        )
+
+        porcentaje_avanzan = (
+            round(
+                (
+                    total_avanzan
+                    / total_periodo
+                )
+                * 100,
+                2,
+            )
+            if total_periodo
+            else 0
+        )
+
+        porcentaje_rechazados = (
+            round(
+                (
+                    total_rechazados
+                    / total_periodo
+                )
+                * 100,
+                2,
+            )
+            if total_periodo
+            else 0
+        )
+
+        return {
+            "tarjetas": {
+                "registrados": {
+                    "cantidad": total_periodo,
+                    "porcentaje": (
+                        100.0
+                        if total_periodo
+                        else 0
+                    ),
+                },
+                "avanzan_contratacion": {
+                    "cantidad":
+                        total_avanzan,
+                    "porcentaje":
+                        porcentaje_avanzan,
+                },
+                "rechazados_seleccion": {
+                    "cantidad":
+                        total_rechazados,
+                    "porcentaje":
+                        porcentaje_rechazados,
+                },
+            },
+
+            "total":
+                total_periodo,
+
+            "registrados_seleccion":
+                total_periodo,
+
+            "avanza_contratacion":
+                total_avanzan,
+
+            "total_personas_avanzadas_contratacion":
+                total_avanzan,
+
+            "porcentaje_avanza_contratacion":
+                porcentaje_avanzan,
+
+            "rechazados_generales":
+                total_rechazados,
+
+            "rechazados_seleccion":
+                total_rechazados,
+
+            "porcentaje_rechazados_seleccion":
+                porcentaje_rechazados,
+
+            "rechazados_estado_actual":
+                rechazados_estado_actual,
+
+            "rechazados_excluidos_contratacion":
+                rechazados_excluidos,
+
+            "desistidos":
+                desistidos,
+
+            "contratados":
+                contratados,
+
+            "pendiente_contratacion":
+                pendientes_contratacion,
+
+            "en_proceso":
+                en_proceso,
+
+            "estados":
+                estados,
+
+            "estados_con_datos": [
+                item
+                for item in estados
+                if item["cantidad"] > 0
+            ],
+
+            "motivos_rechazo_generales":
+                motivos,
+
+            "motivos_rechazo_generales_con_datos": [
+                item
+                for item in motivos
+                if item["cantidad"] > 0
+            ],
+        }
+
+    # ============================================================
+    # 4. SERIE MENSUAL
+    # ============================================================
+
+    filas_por_mes: dict[str, list[dict]] = {}
+
+    for fila in filas_universo:
+        fecha = fila.get(
+            "fecha_registro"
+        )
+
+        if not isinstance(
+            fecha,
+            datetime,
+        ):
             continue
 
-        clave = fecha.strftime("%Y-%m")
-        etiqueta = f"{meses_nombre[fecha.month]}-{str(fecha.year)[-2:]}"
+        clave = fecha.strftime(
+            "%Y-%m"
+        )
 
-        if clave not in registros_por_mes:
-            registros_por_mes[clave] = {
-                "mes": etiqueta,
-                "registros": 0,
+        if clave not in filas_por_mes:
+            filas_por_mes[clave] = []
+
+        filas_por_mes[clave].append(
+            fila
+        )
+
+    serie_mensual = []
+    detalle_mensual = []
+
+    for clave in sorted(
+        filas_por_mes.keys()
+    ):
+        filas_mes = filas_por_mes[
+            clave
+        ]
+
+        fecha_referencia = (
+            filas_mes[0].get(
+                "fecha_registro"
+            )
+        )
+
+        if not isinstance(
+            fecha_referencia,
+            datetime,
+        ):
+            continue
+
+        resumen_mes = construir_resumen(
+            filas_mes
+        )
+
+        tarjetas_mes = resumen_mes[
+            "tarjetas"
+        ]
+
+        item_serie = {
+            "clave": clave,
+            "anio":
+                fecha_referencia.year,
+            "numero_mes":
+                fecha_referencia.month,
+            "mes":
+                meses_nombre[
+                    fecha_referencia.month
+                ],
+            "etiqueta": (
+                f"{meses_nombre[fecha_referencia.month].capitalize()} "
+                f"{fecha_referencia.year}"
+            ),
+
+            "registrados":
+                tarjetas_mes[
+                    "registrados"
+                ]["cantidad"],
+
+            "porcentaje_registrados":
+                tarjetas_mes[
+                    "registrados"
+                ]["porcentaje"],
+
+            "avanzan_contratacion":
+                tarjetas_mes[
+                    "avanzan_contratacion"
+                ]["cantidad"],
+
+            "porcentaje_avanzan_contratacion":
+                tarjetas_mes[
+                    "avanzan_contratacion"
+                ]["porcentaje"],
+
+            "rechazados_seleccion":
+                tarjetas_mes[
+                    "rechazados_seleccion"
+                ]["cantidad"],
+
+            "porcentaje_rechazados_seleccion":
+                tarjetas_mes[
+                    "rechazados_seleccion"
+                ]["porcentaje"],
+        }
+
+        serie_mensual.append(
+            item_serie
+        )
+
+        detalle_mensual.append(
+            {
+                **item_serie,
+                "tarjetas":
+                    resumen_mes[
+                        "tarjetas"
+                    ],
+                "estados":
+                    resumen_mes[
+                        "estados"
+                    ],
+                "estados_con_datos":
+                    resumen_mes[
+                        "estados_con_datos"
+                    ],
+                "motivos_rechazo":
+                    resumen_mes[
+                        "motivos_rechazo_generales"
+                    ],
+                "motivos_rechazo_con_datos":
+                    resumen_mes[
+                        "motivos_rechazo_generales_con_datos"
+                    ],
             }
+        )
 
-        registros_por_mes[clave]["registros"] += 1
+    # ============================================================
+    # 5. PERÍODO ACTUAL SOLICITADO
+    # ============================================================
+    #
+    # Sin mes:
+    #   devuelve el universo completo del año consultado o global.
+    #
+    # Con mes:
+    #   devuelve solamente la cohorte creada en ese mes.
+    #
+    # La gráfica conserva la serie completa del año.
+    # ============================================================
 
-    registros_por_mes = dict(sorted(registros_por_mes.items()))
+    if mes is not None:
+        filas_periodo = [
+            fila
+            for fila in filas_universo
+            if isinstance(
+                fila.get(
+                    "fecha_registro"
+                ),
+                datetime,
+            )
+            and fila[
+                "fecha_registro"
+            ].month == mes
+        ]
+    else:
+        filas_periodo = list(
+            filas_universo
+        )
 
-    contratados = conteo_estados.get("CONTRATADO", 0)
-    desistidos = conteo_estados.get("DESISTE DEL PROCESO", 0)
-    rechazados_estado_actual = conteo_estados.get("RECHAZADO", 0)
-    pendientes_contratacion = conteo_estados.get(
-        "PENDIENTE DE CONTRATACIÓN",
-        0,
+    resumen_periodo = construir_resumen(
+        filas_periodo
     )
 
-    en_proceso = (
-        total
-        - contratados
-        - desistidos
-        - rechazados_estado_actual
-    )
-
-    en_proceso = max(en_proceso, 0)
+    # ============================================================
+    # 6. RESPUESTA FINAL
+    # ============================================================
 
     return {
         "filtros": {
             "anio": anio,
             "mes": mes,
-            "fecha_inicio_aplicativo": "2026-03-01",
+            "fecha_inicio_aplicativo":
+                "2026-03-01",
+            "modo": (
+                "mensual"
+                if mes is not None
+                else (
+                    "anual"
+                    if anio is not None
+                    else "global"
+                )
+            ),
         },
-        "total": total,
-        "registrados_seleccion": total,
-        "avanza_contratacion": total_avanzan_contratacion,
-        "total_personas_avanzadas_contratacion": total_avanzan_contratacion,
-        "rechazados_generales": total_rechazados_seleccion,
-        "rechazados_seleccion": total_rechazados_seleccion,
-        "rechazados_estado_actual": rechazados_estado_actual,
-        "rechazados_excluidos_contratacion": rechazados_excluidos_contratacion,
-        "desistidos": desistidos,
-        "contratados": contratados,
-        "pendiente_contratacion": pendientes_contratacion,
-        "en_proceso": en_proceso,
-        "estados": estados,
-        "estados_con_datos": [item for item in estados if item["cantidad"] > 0],
-        "registros_por_mes": list(registros_por_mes.values()),
-        "motivos_rechazo_generales": motivos_rechazo_generales,
-        "motivos_rechazo_generales_con_datos": [
-            item for item in motivos_rechazo_generales if item["cantidad"] > 0
-        ],
+
+        # --------------------------------------------------------
+        # Compatibilidad con el frontend actual
+        # --------------------------------------------------------
+
+        "total":
+            resumen_periodo[
+                "total"
+            ],
+
+        "registrados_seleccion":
+            resumen_periodo[
+                "registrados_seleccion"
+            ],
+
+        "avanza_contratacion":
+            resumen_periodo[
+                "avanza_contratacion"
+            ],
+
+        "total_personas_avanzadas_contratacion":
+            resumen_periodo[
+                "total_personas_avanzadas_contratacion"
+            ],
+
+        "rechazados_generales":
+            resumen_periodo[
+                "rechazados_generales"
+            ],
+
+        "rechazados_seleccion":
+            resumen_periodo[
+                "rechazados_seleccion"
+            ],
+
+        "rechazados_estado_actual":
+            resumen_periodo[
+                "rechazados_estado_actual"
+            ],
+
+        "rechazados_excluidos_contratacion":
+            resumen_periodo[
+                "rechazados_excluidos_contratacion"
+            ],
+
+        "desistidos":
+            resumen_periodo[
+                "desistidos"
+            ],
+
+        "contratados":
+            resumen_periodo[
+                "contratados"
+            ],
+
+        "pendiente_contratacion":
+            resumen_periodo[
+                "pendiente_contratacion"
+            ],
+
+        "en_proceso":
+            resumen_periodo[
+                "en_proceso"
+            ],
+
+        "estados":
+            resumen_periodo[
+                "estados"
+            ],
+
+        "estados_con_datos":
+            resumen_periodo[
+                "estados_con_datos"
+            ],
+
+        "motivos_rechazo_generales":
+            resumen_periodo[
+                "motivos_rechazo_generales"
+            ],
+
+        "motivos_rechazo_generales_con_datos":
+            resumen_periodo[
+                "motivos_rechazo_generales_con_datos"
+            ],
+
+        # Se conservan para no romper el frontend viejo
         "rechazados": 0,
         "motivos_rechazo": [],
         "motivos_rechazo_con_datos": [],
+
+        # --------------------------------------------------------
+        # Nueva estructura del Panel Gerencial de Selección
+        # --------------------------------------------------------
+
+        "tarjetas":
+            resumen_periodo[
+                "tarjetas"
+            ],
+
+        "porcentajes": {
+            "registrados":
+                (
+                    100.0
+                    if resumen_periodo[
+                        "total"
+                    ]
+                    else 0
+                ),
+
+            "avanzan_contratacion":
+                resumen_periodo[
+                    "porcentaje_avanza_contratacion"
+                ],
+
+            "rechazados_seleccion":
+                resumen_periodo[
+                    "porcentaje_rechazados_seleccion"
+                ],
+        },
+
+        "serie_mensual":
+            serie_mensual,
+
+        # Alias temporal para compatibilidad
+        "registros_por_mes": [
+            {
+                "mes":
+                    item["etiqueta"],
+                "registros":
+                    item["registrados"],
+                "avanzan_contratacion":
+                    item["avanzan_contratacion"],
+                "rechazados_seleccion":
+                    item["rechazados_seleccion"],
+            }
+            for item in serie_mensual
+        ],
+
+        "detalle_mensual":
+            detalle_mensual,
+
+        "periodo_actual":
+            {
+                "anio": anio,
+                "mes": mes,
+                **resumen_periodo,
+            },
+
         "auditoria": {
-            "universo": "RegistroPersonal.FechaCreacion desde 2026-03-01",
-            "filtro_periodo": "RegistroPersonal.FechaCreacion",
-            "estado_actual": "Resultado vigente del proceso de Selección",
-            "avance_contratacion": "Estado 24 o evidencia posterior de contratación",
-            "rechazo_seleccion": (
-                "Estado 28 sin evidencia de rechazo de Contratación"
+            "universo": (
+                "RegistroPersonal.FechaCreacion "
+                "desde 2026-03-01"
             ),
+
+            "filtro_periodo":
+                "RegistroPersonal.FechaCreacion",
+
+            "estado_actual": (
+                "Resultado vigente del proceso "
+                "de Selección"
+            ),
+
+            "avance_contratacion": (
+                "Estado 24 o evidencia posterior "
+                "de contratación"
+            ),
+
+            "rechazo_seleccion": (
+                "Estado 28 sin evidencia de "
+                "rechazo de Contratación"
+            ),
+
             "rechazo_contratacion_excluido": (
-                "Estado 28 con estado 24, estado 25, ContratacionBasica, "
-                "movimiento de rechazo en Contratación o motivo histórico "
+                "Estado 28 con estado 24, "
+                "estado 25, ContratacionBasica, "
+                "movimiento de rechazo en "
+                "Contratación o motivo histórico "
                 "No asiste a Contratación"
+            ),
+
+            "porcentaje_tarjetas": (
+                "Avanzan y rechazados se calculan "
+                "sobre el total registrado del período"
+            ),
+
+            "porcentaje_estados": (
+                "Cada estado se calcula sobre "
+                "el total registrado del período"
+            ),
+
+            "porcentaje_motivos": (
+                "Cada motivo se calcula sobre "
+                "el total de rechazados en Selección "
+                "del período"
+            ),
+
+            "serie_mensual": (
+                "Agrupada por "
+                "RegistroPersonal.FechaCreacion"
+            ),
+
+            "excluye_migrados":
+                True,
+
+            "solo_consulta":
+                True,
+        },
+    }
+
+
+# ============================================================
+# KPI 2 SELECCIÓN - TASA DE ROTACIÓN DEL NUEVO PERSONAL
+# ============================================================
+# Este endpoint es independiente del dashboard principal de Selección.
+#
+# Reglas:
+# - Universo: personal con ContratacionBasica.FechaIngreso desde 2026-03-01.
+# - Excluye personal migrado y registros técnicos conocidos de prueba.
+# - Fecha real de retiro: PazYSalvoOperaciones.FechaUltimoDiaLaborado.
+# - Cuando existe un ciclo laboral ACTIVO o EN_PROCESO, solo se toma un
+#   Paz y Salvo cuya FechaUltimoDiaLaborado pertenezca temporalmente a ese
+#   ciclo. Así un retiro histórico no se cruza con un reintegro vigente.
+# - Cortes acumulados oficiales: 7, 15, 30 y 60 días.
+# - Una persona es evaluable para un corte cuando:
+#     1. ya transcurrió ese número de días desde su FechaIngreso, o
+#     2. ya se retiró dentro de ese corte.
+# - La tasa solo se publica cuando al menos el 80 % de la cohorte válida
+#   ya alcanzó naturalmente el corte.
+# - Los retiros tempranos se contabilizan, pero por sí solos no hacen
+#   madurar el indicador.
+# - Si el corte aún no madura, la tasa se devuelve como None para que
+#   el frontend muestre "Pendiente de maduración".
+# - El mes se interpreta como cohorte de ingreso, no como mes de retiro.
+#
+# SOLO CONSULTA.
+# No inserta, no actualiza y no elimina información.
+# ============================================================
+
+
+@router.get("/dashboard-indicadores-rotacion-nuevo-personal")
+def obtener_dashboard_rotacion_nuevo_personal(
+    db: Annotated[Session, Depends(get_db)],
+    anio: int | None = None,
+    mes: int | None = None,
+):
+    """
+    KPI 2 de Selección: tasa de rotación del nuevo personal.
+
+    La cohorte se define por ContratacionBasica.FechaIngreso.
+
+    El retiro efectivo se toma de
+    PazYSalvoOperaciones.FechaUltimoDiaLaborado.
+
+    Si el trabajador tiene un ciclo laboral ACTIVO o EN_PROCESO,
+    el retiro usado por el KPI debe corresponder temporalmente a ese
+    ciclo. Esto evita cruzar un retiro histórico con el ingreso de un
+    reintegro vigente.
+    """
+
+    if mes is not None and (mes < 1 or mes > 12):
+        raise HTTPException(
+            status_code=400,
+            detail="El mes debe estar entre 1 y 12.",
+        )
+
+    if anio is not None and anio < 2000:
+        raise HTTPException(
+            status_code=400,
+            detail="El año consultado no es válido.",
+        )
+
+    rows = db.execute(
+        text("""
+            SELECT
+                rp."IdRegistroPersonal" AS id_registro_personal,
+                cb."FechaIngreso" AS fecha_ingreso,
+                pso."FechaUltimoDiaLaborado" AS ultimo_dia_laborado,
+
+                CASE
+                    WHEN
+                        pso."FechaUltimoDiaLaborado" IS NOT NULL
+                        AND pso."FechaUltimoDiaLaborado" >= cb."FechaIngreso"
+                    THEN
+                        pso."FechaUltimoDiaLaborado" - cb."FechaIngreso"
+                    ELSE NULL
+                END AS dias_permanencia
+
+            FROM public."RegistroPersonal" rp
+
+            INNER JOIN public."ContratacionBasica" cb
+                ON cb."IdRegistroPersonal" = rp."IdRegistroPersonal"
+
+            -- Ciclo laboral vigente.
+            --
+            -- Se usa únicamente para evitar que un retiro de un ciclo
+            -- histórico se mezcle con la FechaIngreso del reintegro actual.
+            -- No modifica información y no altera trabajadores que todavía
+            -- no tengan ciclos en VinculacionLaboral.
+            LEFT JOIN LATERAL (
+                SELECT
+                    vl."IdVinculacionLaboral",
+                    vl."NumeroCiclo",
+                    vl."TipoVinculacion",
+                    vl."EstadoVinculacion",
+                    vl."FechaIngreso"
+                FROM public."VinculacionLaboral" vl
+                WHERE
+                    vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    AND vl."EstadoVinculacion" IN (
+                        'EN_PROCESO',
+                        'ACTIVO'
+                    )
+                ORDER BY
+                    vl."NumeroCiclo" DESC,
+                    vl."IdVinculacionLaboral" DESC
+                LIMIT 1
+            ) ciclo_vigente ON TRUE
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    p."FechaUltimoDiaLaborado"
+                FROM public."PazYSalvoOperaciones" p
+                WHERE
+                    p."IdRegistroPersonal" = rp."IdRegistroPersonal"
+
+                    -- Si no existe ciclo vigente, se conserva exactamente
+                    -- el comportamiento anterior del KPI y se toma el último
+                    -- Paz y Salvo del trabajador.
+                    --
+                    -- Si sí existe ciclo vigente con FechaIngreso, solo se
+                    -- acepta un retiro del mismo periodo laboral. Un retiro
+                    -- anterior pertenece a un ciclo histórico y no debe
+                    -- marcar el reintegro actual como fecha inconsistente.
+                    AND (
+                        ciclo_vigente."IdVinculacionLaboral" IS NULL
+                        OR ciclo_vigente."FechaIngreso" IS NULL
+                        OR p."FechaUltimoDiaLaborado"
+                            >= ciclo_vigente."FechaIngreso"
+                    )
+
+                ORDER BY
+                    p."FechaCarga" DESC NULLS LAST,
+                    p."IdPazYSalvo" DESC
+                LIMIT 1
+            ) pso ON TRUE
+
+            WHERE
+                cb."FechaIngreso" >= DATE '2026-03-01'
+
+                AND (
+                    :anio IS NULL
+                    OR EXTRACT(YEAR FROM cb."FechaIngreso") = :anio
+                )
+
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM public."HistorialLaboral" hl
+                    WHERE
+                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND UPPER(
+                            TRIM(
+                                COALESCE(
+                                    hl."TipoVinculacion",
+                                    ''
+                                )
+                            )
+                        ) = 'ACTIVO MIGRADO'
+                )
+
+                AND LOWER(
+                    COALESCE(
+                        rp."UsuarioActualizacion",
+                        ''
+                    )
+                ) NOT LIKE '%migracion%'
+
+                AND LOWER(
+                    COALESCE(
+                        rp."UsuarioActualizacion",
+                        ''
+                    )
+                ) NOT LIKE '%migrado%'
+
+                AND COALESCE(
+                    rp."UsuarioActualizacion",
+                    ''
+                ) <> 'ajuste_no_activos_maestro_2026_06_22'
+
+                AND rp."NumeroIdentificacion"::text NOT IN (
+                    '91011506',
+                    '0987654',
+                    '951357'
+                )
+
+            ORDER BY
+                cb."FechaIngreso",
+                rp."IdRegistroPersonal";
+        """),
+        {
+            "anio": anio,
+        },
+    ).mappings().all()
+
+    filas_universo = [
+        dict(row)
+        for row in rows
+    ]
+
+    cortes = (7, 15, 30, 60)
+    umbral_maduracion = 0.80
+
+    # Se consulta una sola vez la fecha actual de la base de datos.
+    # Esto evita ejecutar consultas adicionales por cada trabajador
+    # y mantiene todos los cálculos con la misma fecha de referencia.
+    fecha_actual_bd = db.execute(
+        text("SELECT CURRENT_DATE")
+    ).scalar_one()
+
+    def construir_resumen_rotacion(
+        filas_periodo: list[dict],
+    ) -> dict:
+        total_contratados = len(filas_periodo)
+
+        sin_retiro_registrado = sum(
+            1
+            for fila in filas_periodo
+            if fila.get("ultimo_dia_laborado") is None
+        )
+
+        fechas_inconsistentes = sum(
+            1
+            for fila in filas_periodo
+            if fila.get("ultimo_dia_laborado") is not None
+            and fila.get("fecha_ingreso") is not None
+            and fila.get("ultimo_dia_laborado") < fila.get("fecha_ingreso")
+        )
+
+        retiros_mas_60 = sum(
+            1
+            for fila in filas_periodo
+            if fila.get("dias_permanencia") is not None
+            and fila.get("dias_permanencia") > 60
+        )
+
+        rangos_exclusivos = {
+            "0_7": 0,
+            "8_15": 0,
+            "16_30": 0,
+            "31_60": 0,
+        }
+
+        for fila in filas_periodo:
+            dias = fila.get("dias_permanencia")
+
+            if dias is None:
+                continue
+
+            if 0 <= dias <= 7:
+                rangos_exclusivos["0_7"] += 1
+            elif 8 <= dias <= 15:
+                rangos_exclusivos["8_15"] += 1
+            elif 16 <= dias <= 30:
+                rangos_exclusivos["16_30"] += 1
+            elif 31 <= dias <= 60:
+                rangos_exclusivos["31_60"] += 1
+
+        tarjetas_cortes = {}
+
+        for corte in cortes:
+            evaluables = 0
+            evaluables_naturales = 0
+            retiros = 0
+
+            for fila in filas_periodo:
+                fecha_ingreso = fila.get("fecha_ingreso")
+                dias = fila.get("dias_permanencia")
+                ultimo_dia_laborado = fila.get("ultimo_dia_laborado")
+
+                if fecha_ingreso is None:
+                    continue
+
+                fecha_inconsistente = (
+                    ultimo_dia_laborado is not None
+                    and ultimo_dia_laborado < fecha_ingreso
+                )
+
+                if fecha_inconsistente:
+                    continue
+
+                ya_maduro = (
+                    (fecha_actual_bd - fecha_ingreso).days >= corte
+                )
+
+                retiro_dentro_corte = (
+                    dias is not None
+                    and 0 <= dias <= corte
+                )
+
+                if ya_maduro:
+                    evaluables_naturales += 1
+
+                if ya_maduro or retiro_dentro_corte:
+                    evaluables += 1
+
+                if retiro_dentro_corte:
+                    retiros += 1
+
+            base_maduracion = max(
+                total_contratados - fechas_inconsistentes,
+                0,
+            )
+
+            porcentaje_maduracion = (
+                round(
+                    evaluables_naturales * 100.0 / base_maduracion,
+                    2,
+                )
+                if base_maduracion > 0
+                else 0
+            )
+
+            corte_maduro = (
+                base_maduracion > 0
+                and (
+                    evaluables_naturales / base_maduracion
+                ) >= umbral_maduracion
+            )
+
+            tasa = (
+                round(
+                    retiros * 100.0 / evaluables,
+                    2,
+                )
+                if corte_maduro and evaluables > 0
+                else None
+            )
+
+            tarjetas_cortes[str(corte)] = {
+                "corte_dias": corte,
+                "evaluables": evaluables,
+                "evaluables_naturales": evaluables_naturales,
+                "retiros": retiros,
+                "tasa": tasa,
+                "maduro": corte_maduro,
+                "porcentaje_maduracion": porcentaje_maduracion,
+                "umbral_maduracion": 80.0,
+                "estado": (
+                    "EVALUABLE"
+                    if corte_maduro
+                    else "PENDIENTE_MADURACION"
+                ),
+            }
+
+        return {
+            "total_contratados": total_contratados,
+
+            "tarjetas": {
+                "total_contratados": {
+                    "cantidad": total_contratados,
+                    "porcentaje": 100.0 if total_contratados else 0,
+                },
+                "hasta_7_dias": tarjetas_cortes["7"],
+                "hasta_15_dias": tarjetas_cortes["15"],
+                "hasta_30_dias": tarjetas_cortes["30"],
+                "hasta_60_dias": tarjetas_cortes["60"],
+            },
+
+            "rangos_exclusivos": {
+                "retiro_0_7": rangos_exclusivos["0_7"],
+                "retiro_8_15": rangos_exclusivos["8_15"],
+                "retiro_16_30": rangos_exclusivos["16_30"],
+                "retiro_31_60": rangos_exclusivos["31_60"],
+                "retiro_mas_60": retiros_mas_60,
+                "sin_retiro_registrado": sin_retiro_registrado,
+                "fechas_inconsistentes": fechas_inconsistentes,
+            },
+
+            "cortes": tarjetas_cortes,
+        }
+
+    filas_por_mes: dict[str, list[dict]] = {}
+
+    for fila in filas_universo:
+        fecha_ingreso = fila.get("fecha_ingreso")
+
+        if fecha_ingreso is None:
+            continue
+
+        clave = (
+            f"{fecha_ingreso.year}-"
+            f"{str(fecha_ingreso.month).zfill(2)}"
+        )
+
+        if clave not in filas_por_mes:
+            filas_por_mes[clave] = []
+
+        filas_por_mes[clave].append(fila)
+
+    meses_nombre = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+
+    serie_mensual = []
+    detalle_mensual = []
+
+    for clave in sorted(filas_por_mes.keys()):
+        filas_mes = filas_por_mes[clave]
+
+        fecha_referencia = filas_mes[0].get("fecha_ingreso")
+
+        if fecha_referencia is None:
+            continue
+
+        resumen_mes = construir_resumen_rotacion(
+            filas_mes
+        )
+
+        item_serie = {
+            "clave": clave,
+            "anio": fecha_referencia.year,
+            "numero_mes": fecha_referencia.month,
+            "mes": meses_nombre[
+                fecha_referencia.month
+            ],
+            "etiqueta": (
+                f"{meses_nombre[fecha_referencia.month].capitalize()} "
+                f"{fecha_referencia.year}"
+            ),
+
+            "total_contratados":
+                resumen_mes["total_contratados"],
+
+            "tasa_hasta_7":
+                resumen_mes["cortes"]["7"]["tasa"],
+
+            "tasa_hasta_15":
+                resumen_mes["cortes"]["15"]["tasa"],
+
+            "tasa_hasta_30":
+                resumen_mes["cortes"]["30"]["tasa"],
+
+            "tasa_hasta_60":
+                resumen_mes["cortes"]["60"]["tasa"],
+
+            "evaluables_7":
+                resumen_mes["cortes"]["7"]["evaluables"],
+
+            "evaluables_15":
+                resumen_mes["cortes"]["15"]["evaluables"],
+
+            "evaluables_30":
+                resumen_mes["cortes"]["30"]["evaluables"],
+
+            "evaluables_60":
+                resumen_mes["cortes"]["60"]["evaluables"],
+
+            "retiros_hasta_7":
+                resumen_mes["cortes"]["7"]["retiros"],
+
+            "retiros_hasta_15":
+                resumen_mes["cortes"]["15"]["retiros"],
+
+            "retiros_hasta_30":
+                resumen_mes["cortes"]["30"]["retiros"],
+
+            "retiros_hasta_60":
+                resumen_mes["cortes"]["60"]["retiros"],
+        }
+
+        serie_mensual.append(item_serie)
+
+        detalle_mensual.append(
+            {
+                **item_serie,
+                "tarjetas": resumen_mes["tarjetas"],
+                "rangos_exclusivos":
+                    resumen_mes["rangos_exclusivos"],
+                "cortes":
+                    resumen_mes["cortes"],
+            }
+        )
+
+    if mes is not None:
+        filas_periodo = [
+            fila
+            for fila in filas_universo
+            if fila.get("fecha_ingreso") is not None
+            and fila["fecha_ingreso"].month == mes
+        ]
+    else:
+        filas_periodo = list(filas_universo)
+
+    resumen_periodo = construir_resumen_rotacion(
+        filas_periodo
+    )
+
+    return {
+        "filtros": {
+            "anio": anio,
+            "mes": mes,
+            "fecha_inicio_kpi": "2026-03-01",
+            "fecha_base": "ContratacionBasica.FechaIngreso",
+            "modo": (
+                "mensual"
+                if mes is not None
+                else (
+                    "anual"
+                    if anio is not None
+                    else "global"
+                )
+            ),
+        },
+
+        "kpi": {
+            "codigo": "KPI_2_SELECCION",
+            "nombre":
+                "Tasa de rotación del nuevo personal",
+            "descripcion": (
+                "Mide la permanencia inicial del personal nuevo "
+                "contratado y los retiros ocurridos dentro de los "
+                "primeros 7, 15, 30 y 60 días."
+            ),
+        },
+
+        "total_contratados":
+            resumen_periodo["total_contratados"],
+
+        "tarjetas":
+            resumen_periodo["tarjetas"],
+
+        "rangos_exclusivos":
+            resumen_periodo["rangos_exclusivos"],
+
+        "cortes":
+            resumen_periodo["cortes"],
+
+        "serie_mensual":
+            serie_mensual,
+
+        "detalle_mensual":
+            detalle_mensual,
+
+        "periodo_actual": {
+            "anio": anio,
+            "mes": mes,
+            **resumen_periodo,
+        },
+
+        "auditoria": {
+            "universo": (
+                "ContratacionBasica.FechaIngreso desde 2026-03-01"
+            ),
+            "fecha_ingreso":
+                "ContratacionBasica.FechaIngreso",
+            "fecha_retiro_real":
+                "PazYSalvoOperaciones.FechaUltimoDiaLaborado",
+            "regla_ciclo_laboral": (
+                "Si existe un ciclo ACTIVO o EN_PROCESO, el KPI solo "
+                "considera retiros con FechaUltimoDiaLaborado igual o "
+                "posterior a la FechaIngreso de ese ciclo. Los retiros "
+                "anteriores se consideran históricos y no se cruzan con "
+                "el reintegro vigente."
+            ),
+            "cohorte": (
+                "El mes corresponde al mes de ingreso, "
+                "no al mes de retiro."
+            ),
+            "cortes": [
+                7,
+                15,
+                30,
+                60,
+            ],
+            "regla_evaluable": (
+                "Una persona entra al denominador de un corte "
+                "si ya alcanzó ese número de días desde su ingreso "
+                "o si ya se retiró dentro de ese mismo corte."
+            ),
+            "regla_maduracion": (
+                "La tasa solo se publica cuando al menos el 80 % "
+                "de la cohorte válida ya alcanzó naturalmente el corte. "
+                "Los retiros tempranos se contabilizan, pero por sí solos "
+                "no hacen madurar el indicador."
+            ),
+            "umbral_maduracion_porcentaje": 80.0,
+            "sin_evaluables": (
+                "La tasa se devuelve como null para indicar "
+                "pendiente de maduración."
+            ),
+            "fechas_inconsistentes": (
+                "Cuenta registros con FechaUltimoDiaLaborado anterior "
+                "a ContratacionBasica.FechaIngreso. Estos registros no "
+                "alimentan los rangos de retiro ni las tasas."
             ),
             "excluye_migrados": True,
             "solo_consulta": True,
