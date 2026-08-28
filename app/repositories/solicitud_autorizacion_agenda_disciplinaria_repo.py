@@ -1,11 +1,8 @@
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from domain.models.autorizacion_agenda_disciplinaria import (
-    AutorizacionAgendaDisciplinaria,
-)
 from domain.models.solicitud_autorizacion_agenda_disciplinaria import (
     SolicitudAutorizacionAgendaDisciplinaria,
 )
@@ -308,8 +305,6 @@ def crear_solicitud(
 def aprobar_solicitud(
     db: Session,
     id_solicitud: int,
-    hora_inicio: time,
-    hora_fin: time,
     usuario_resuelve: str,
     observacion_resolucion: str | None = None,
 ) -> SolicitudAutorizacionAgendaDisciplinaria:
@@ -356,100 +351,23 @@ def aprobar_solicitud(
             "El usuario que aprueba es obligatorio."
         )
 
-    if hora_fin <= hora_inicio:
-        raise ValueError(
-            "La hora final debe ser posterior "
-            "a la hora inicial."
-        )
-
-    autorizacion_existente = (
-        db.query(
-            AutorizacionAgendaDisciplinaria
-        )
-        .filter(
-            AutorizacionAgendaDisciplinaria
-            .IdRegistroPersonal
-            == solicitud.IdRegistroPersonal,
-            AutorizacionAgendaDisciplinaria
-            .IdProcesoDisciplinario
-            == solicitud.IdProcesoDisciplinario,
-            AutorizacionAgendaDisciplinaria
-            .FechaAutorizada
-            == solicitud.FechaSolicitada,
-            AutorizacionAgendaDisciplinaria
-            .HoraInicio
-            == hora_inicio,
-            AutorizacionAgendaDisciplinaria
-            .HoraFin
-            == hora_fin,
-            AutorizacionAgendaDisciplinaria
-            .EstadoAutorizacion
-            == "ACTIVA",
-            AutorizacionAgendaDisciplinaria
-            .Activo
-            .is_(True),
-        )
-        .first()
-    )
-
-    if autorizacion_existente:
-        raise ValueError(
-            "Ya existe una autorización activa para "
-            "este expediente, fecha y horario."
-        )
-
     fecha_actual = obtener_ahora_colombia()
-
-    nueva_autorizacion = (
-        AutorizacionAgendaDisciplinaria(
-            IdRegistroPersonal=solicitud.IdRegistroPersonal,
-            IdProcesoDisciplinario=solicitud.IdProcesoDisciplinario,
-            IdAgendaProcesoDisciplinario=None,
-            FechaAutorizada=solicitud.FechaSolicitada,
-            HoraInicio=hora_inicio,
-            HoraFin=hora_fin,
-            TipoAutorizacion="VIERNES",
-            MotivoAutorizacion=solicitud.MotivoSolicitud,
-            UsuarioSolicita=solicitud.UsuarioSolicita,
-            UsuarioAutoriza=usuario,
-            EstadoAutorizacion="ACTIVA",
-            FechaAutorizacion=fecha_actual,
-            FechaUtilizacion=None,
-            Observacion=observacion,
-            Activo=True,
-            FechaCreacion=fecha_actual,
-            FechaActualizacion=fecha_actual,
-        )
-    )
 
     solicitud.EstadoSolicitud = "APROBADA"
     solicitud.UsuarioResuelve = usuario
     solicitud.FechaResolucion = fecha_actual
     solicitud.ObservacionResolucion = observacion
+
+    # La aprobación de RRLL autoriza únicamente el viernes solicitado.
+    # El horario será seleccionado posteriormente por Operaciones.
+    solicitud.IdAutorizacionAgendaDisciplinaria = None
     solicitud.FechaActualizacion = fecha_actual
 
     try:
-        db.add(nueva_autorizacion)
-        db.flush()
-
-        solicitud.IdAutorizacionAgendaDisciplinaria = (
-            nueva_autorizacion
-            .IdAutorizacionAgendaDisciplinaria
-        )
-
         db.commit()
         db.refresh(solicitud)
 
         return solicitud
-
-    except IntegrityError as error:
-        db.rollback()
-
-        raise ValueError(
-            "No fue posible aprobar la solicitud porque "
-            "ya existe una autorización activa con la "
-            "misma fecha y horario."
-        ) from error
 
     except SQLAlchemyError:
         db.rollback()

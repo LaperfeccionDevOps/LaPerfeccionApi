@@ -25,6 +25,9 @@ from domain.models.historial_agenda_proceso_disciplinario import (
 from domain.models.proceso_disciplinario import (
     ProcesoDisciplinario,
 )
+from domain.models.solicitud_autorizacion_agenda_disciplinaria import (
+    SolicitudAutorizacionAgendaDisciplinaria,
+)
 from domain.models.tipo_evento_disciplinario import (
     TipoEventoDisciplinario,
 )
@@ -651,42 +654,31 @@ def validar_dia_habil_agenda(
         )
 
 
-def buscar_autorizacion_viernes_activa(
+def buscar_solicitud_viernes_aprobada(
     db: Session,
     id_registro_personal: int,
     id_proceso_disciplinario: int,
     fecha_evento: date,
-    hora_inicio: time,
-    hora_fin: time,
     bloquear_registro: bool = False,
-) -> AutorizacionAgendaDisciplinaria | None:
+) -> SolicitudAutorizacionAgendaDisciplinaria | None:
     consulta = (
         db.query(
-            AutorizacionAgendaDisciplinaria
+            SolicitudAutorizacionAgendaDisciplinaria
         )
         .filter(
-            AutorizacionAgendaDisciplinaria
+            SolicitudAutorizacionAgendaDisciplinaria
             .IdRegistroPersonal
             == id_registro_personal,
-            AutorizacionAgendaDisciplinaria
+            SolicitudAutorizacionAgendaDisciplinaria
             .IdProcesoDisciplinario
             == id_proceso_disciplinario,
-            AutorizacionAgendaDisciplinaria
-            .FechaAutorizada
+            SolicitudAutorizacionAgendaDisciplinaria
+            .FechaSolicitada
             == fecha_evento,
-            AutorizacionAgendaDisciplinaria
-            .HoraInicio
-            == hora_inicio,
-            AutorizacionAgendaDisciplinaria
-            .HoraFin
-            == hora_fin,
-            AutorizacionAgendaDisciplinaria
-            .TipoAutorizacion
-            == "VIERNES",
-            AutorizacionAgendaDisciplinaria
-            .EstadoAutorizacion
-            == "ACTIVA",
-            AutorizacionAgendaDisciplinaria
+            SolicitudAutorizacionAgendaDisciplinaria
+            .EstadoSolicitud
+            == "APROBADA",
+            SolicitudAutorizacionAgendaDisciplinaria
             .Activo
             .is_(True),
         )
@@ -695,44 +687,43 @@ def buscar_autorizacion_viernes_activa(
     if bloquear_registro:
         consulta = consulta.with_for_update()
 
-    return consulta.first()
+    return consulta.order_by(
+        SolicitudAutorizacionAgendaDisciplinaria
+        .IdSolicitudAutorizacion
+        .desc()
+    ).first()
 
 
-def obtener_autorizacion_viernes_o_error(
+def obtener_solicitud_viernes_aprobada_o_error(
     db: Session,
     id_registro_personal: int,
     id_proceso_disciplinario: int,
     fecha_evento: date,
-    hora_inicio: time,
-    hora_fin: time,
     bloquear_registro: bool = False,
-) -> AutorizacionAgendaDisciplinaria | None:
+) -> SolicitudAutorizacionAgendaDisciplinaria | None:
     if fecha_evento.weekday() != 4:
         return None
 
-    autorizacion = buscar_autorizacion_viernes_activa(
+    solicitud = buscar_solicitud_viernes_aprobada(
         db=db,
         id_registro_personal=id_registro_personal,
         id_proceso_disciplinario=(
             id_proceso_disciplinario
         ),
         fecha_evento=fecha_evento,
-        hora_inicio=hora_inicio,
-        hora_fin=hora_fin,
         bloquear_registro=bloquear_registro,
     )
 
-    if autorizacion:
-        return autorizacion
+    if solicitud:
+        return solicitud
 
     raise HTTPException(
         status_code=409,
         detail={
             "codigo": "VIERNES_REQUIERE_AUTORIZACION",
             "mensaje": (
-                "No existe una autorización activa de "
-                "Relaciones Laborales para este expediente, "
-                "viernes y horario."
+                "Relaciones Laborales no ha aprobado este "
+                "viernes para el expediente indicado."
             ),
             "IdRegistroPersonal": id_registro_personal,
             "IdProcesoDisciplinario": (
@@ -740,12 +731,6 @@ def obtener_autorizacion_viernes_o_error(
             ),
             "fechaIngresada": (
                 fecha_evento.strftime("%d/%m/%Y")
-            ),
-            "horaInicio": (
-                hora_inicio.strftime("%H:%M")
-            ),
-            "horaFin": (
-                hora_fin.strftime("%H:%M")
             ),
             "requiereAutorizacionRRLL": True,
         },
@@ -1014,9 +999,9 @@ def validar_programacion_citacion(
     id_proceso_disciplinario: int,
     id_agenda_excluir: int | None = None,
     bloquear_autorizacion: bool = False,
-) -> AutorizacionAgendaDisciplinaria | None:
-    autorizacion_viernes = (
-        obtener_autorizacion_viernes_o_error(
+) -> SolicitudAutorizacionAgendaDisciplinaria | None:
+    solicitud_viernes = (
+        obtener_solicitud_viernes_aprobada_o_error(
             db=db,
             id_registro_personal=(
                 id_registro_personal
@@ -1025,8 +1010,6 @@ def validar_programacion_citacion(
                 id_proceso_disciplinario
             ),
             fecha_evento=fecha_evento,
-            hora_inicio=hora_inicio,
-            hora_fin=hora_fin,
             bloquear_registro=(
                 bloquear_autorizacion
             ),
@@ -1036,7 +1019,7 @@ def validar_programacion_citacion(
     validar_dia_habil_agenda(
         fecha_evento,
         permitir_viernes=(
-            autorizacion_viernes is not None
+            solicitud_viernes is not None
         ),
     )
 
@@ -1053,7 +1036,7 @@ def validar_programacion_citacion(
         id_agenda_excluir=id_agenda_excluir,
     )
 
-    return autorizacion_viernes
+    return solicitud_viernes
 
 
 def consultar_eventos_enriquecidos(
@@ -1389,6 +1372,22 @@ def obtener_horarios_disponibles(
         permitir_viernes=es_viernes,
     )
 
+    solicitud_viernes_aprobada = None
+
+    if es_viernes:
+        solicitud_viernes_aprobada = (
+            obtener_solicitud_viernes_aprobada_o_error(
+                db=db,
+                id_registro_personal=(
+                    id_registro_personal
+                ),
+                id_proceso_disciplinario=(
+                    id_proceso_disciplinario
+                ),
+                fecha_evento=fecha_evento,
+            )
+        )
+
     horarios_disponibles = []
 
     for hora_inicio, hora_fin in BLOQUES_CITACION:
@@ -1399,31 +1398,7 @@ def obtener_horarios_disponibles(
             hora_fin=hora_fin,
         )
 
-        autorizacion_viernes = None
-
-        if es_viernes:
-            autorizacion_viernes = (
-                buscar_autorizacion_viernes_activa(
-                    db=db,
-                    id_registro_personal=(
-                        id_registro_personal
-                    ),
-                    id_proceso_disciplinario=(
-                        id_proceso_disciplinario
-                    ),
-                    fecha_evento=fecha_evento,
-                    hora_inicio=hora_inicio,
-                    hora_fin=hora_fin,
-                )
-            )
-
-        if (
-            evento_cruzado is None
-            and (
-                not es_viernes
-                or autorizacion_viernes is not None
-            )
-        ):
+        if evento_cruzado is None:
             horarios_disponibles.append(
                 {
                     "HoraInicio": (
@@ -1451,7 +1426,13 @@ def obtener_horarios_disponibles(
             len(horarios_disponibles)
         ),
         "esViernes": es_viernes,
-        "requiereAutorizacionRRLL": es_viernes,
+        "requiereAutorizacionRRLL": (
+            es_viernes
+            and solicitud_viernes_aprobada is None
+        ),
+        "viernesAprobadoRRLL": (
+            solicitud_viernes_aprobada is not None
+        ),
         "horarios": horarios_disponibles,
     }
 
@@ -1491,7 +1472,7 @@ def crear_evento_agenda(
 
     fecha_creacion_evento = obtener_ahora_colombia()
     datos_evento = data.model_dump()
-    autorizacion_viernes = None
+    solicitud_viernes_aprobada = None
 
     if (
         data.IdTipoEventoDisciplinario
@@ -1508,7 +1489,7 @@ def crear_evento_agenda(
             fecha_creacion_evento=fecha_creacion_evento,
         )
 
-        autorizacion_viernes = (
+        solicitud_viernes_aprobada = (
             validar_programacion_citacion(
                 db=db,
                 fecha_evento=data.FechaEvento,
@@ -1567,18 +1548,6 @@ def crear_evento_agenda(
 
         db.add(nuevo_evento)
         db.flush()
-
-        if autorizacion_viernes is not None:
-            marcar_autorizacion_como_utilizada(
-                autorizacion=autorizacion_viernes,
-                id_agenda=(
-                    nuevo_evento
-                    .IdAgendaProcesoDisciplinario
-                ),
-                fecha_utilizacion=(
-                    fecha_creacion_evento
-                ),
-            )
 
         db.commit()
         db.refresh(nuevo_evento)

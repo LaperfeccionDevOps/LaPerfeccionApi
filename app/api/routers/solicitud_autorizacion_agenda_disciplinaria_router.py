@@ -1,6 +1,6 @@
 # ruff: noqa: B008
 
-from datetime import date, time
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
@@ -37,20 +37,6 @@ router = APIRouter(
     tags=["Solicitudes Autorización Agenda Disciplinaria"],
 )
 
-
-HORARIOS_AUTORIZABLES = {
-    time(7, 10): time(7, 50),
-    time(7, 50): time(8, 30),
-    time(8, 30): time(9, 10),
-    time(9, 10): time(9, 50),
-    time(9, 50): time(10, 30),
-    time(10, 30): time(11, 10),
-    time(11, 10): time(11, 50),
-    time(11, 50): time(12, 30),
-    time(14, 0): time(14, 40),
-    time(14, 40): time(15, 20),
-    time(15, 20): time(16, 0),
-}
 
 
 ESTADOS_PERMITIDOS = {
@@ -165,68 +151,16 @@ def validar_fecha_viernes(
         )
 
 
-def validar_bloque_autorizado(
-    hora_inicio: time,
-    hora_fin: time,
-) -> None:
-    hora_fin_esperada = HORARIOS_AUTORIZABLES.get(
-        hora_inicio
-    )
-
-    if (
-        hora_fin_esperada is None
-        or hora_fin != hora_fin_esperada
-    ):
-        horarios = [
-            {
-                "HoraInicio": inicio.strftime("%H:%M"),
-                "HoraFin": fin.strftime("%H:%M"),
-                "Etiqueta": (
-                    f"{inicio.strftime('%H:%M')} "
-                    f"- {fin.strftime('%H:%M')}"
-                ),
-            }
-            for inicio, fin
-            in HORARIOS_AUTORIZABLES.items()
-        ]
-
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "codigo": "HORARIO_NO_PERMITIDO",
-                "mensaje": (
-                    "La aprobación debe utilizar uno de "
-                    "los bloques habilitados de 40 minutos."
-                ),
-                "HorariosPermitidos": horarios,
-            },
-        )
-
-
 @router.get("/configuracion")
 def obtener_configuracion_solicitudes():
     return {
         "estadosPermitidos": sorted(
             ESTADOS_PERMITIDOS
         ),
-        "horariosPermitidos": [
-            {
-                "HoraInicio": inicio.strftime("%H:%M"),
-                "HoraFin": fin.strftime("%H:%M"),
-                "Etiqueta": (
-                    f"{inicio.strftime('%H:%M')} "
-                    f"- {fin.strftime('%H:%M')}"
-                ),
-            }
-            for inicio, fin
-            in HORARIOS_AUTORIZABLES.items()
-        ],
-        "duracionMinutos": 40,
-        "horaAlmuerzo": "13:00 - 14:00",
-        "horaFinJornada": "16:00",
         "flujo": (
-            "Operaciones solicita y Relaciones Laborales "
-            "aprueba o rechaza."
+            "Operaciones solicita un viernes y Relaciones "
+            "Laborales aprueba o rechaza la fecha. "
+            "El horario lo selecciona posteriormente Operaciones."
         ),
     }
 
@@ -633,11 +567,6 @@ def aprobar_solicitud_rrll(
     data: SolicitudAutorizacionAgendaDisciplinariaAprobar,
     db: Session = Depends(get_db),
 ):
-    validar_bloque_autorizado(
-        hora_inicio=data.HoraInicio,
-        hora_fin=data.HoraFin,
-    )
-
     solicitud = obtener_solicitud_por_id(
         db=db,
         id_solicitud=id_solicitud,
@@ -670,8 +599,6 @@ def aprobar_solicitud_rrll(
         return aprobar_solicitud(
             db=db,
             id_solicitud=id_solicitud,
-            hora_inicio=data.HoraInicio,
-            hora_fin=data.HoraFin,
             usuario_resuelve=data.UsuarioResuelve,
             observacion_resolucion=(
                 data.ObservacionResolucion

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,9 +47,7 @@ class SolicitudAutorizacionAgendaDisciplinariaResolver(
 class SolicitudAutorizacionAgendaDisciplinariaAprobar(
     SolicitudAutorizacionAgendaDisciplinariaResolver
 ):
-    HoraInicio: time
-
-    HoraFin: time
+    pass
 
 
 class SolicitudAutorizacionAgendaDisciplinariaRechazar(
