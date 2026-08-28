@@ -541,45 +541,23 @@ def obtener_indicadores_nomina_retiros(db: Session = Depends(get_db)):
             SELECT
                 EXTRACT(YEAR FROM datos.fecha_base)::int AS anio,
                 EXTRACT(MONTH FROM datos.fecha_base)::int AS mes_numero,
-                COUNT(*)::int AS cantidad
+                COUNT(
+                    DISTINCT datos.id_retiro_laboral
+                )::int AS cantidad
 
             FROM (
                 SELECT
-                    rl."IdRetiroLaboral",
-
-                    COALESCE(
-                        rl."FechaRetiro",
-                        pso."FechaCreacion",
-                        rl."FechaCierre",
-                        rl."FechaEnvioNomina",
-                        rl."FechaPagoLiquidacion",
-                        rl."FechaProceso",
-                        rl."FechaCreacion"
-                    ) AS fecha_base
+                    rl."IdRetiroLaboral" AS id_retiro_laboral,
+                    rl."FechaRetiro" AS fecha_base
 
                 FROM public."RetiroLaboral" rl
 
                 INNER JOIN public."RegistroPersonal" rp
                     ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
 
-                -- Se selecciona un único Paz y Salvo por retiro
-                -- para impedir que el gráfico mensual duplique registros.
-                LEFT JOIN LATERAL (
-                    SELECT
-                        pso_ultimo."FechaCreacion"
-                    FROM public."PazYSalvoOperaciones" pso_ultimo
-                    WHERE
-                        pso_ultimo."IdRetiroLaboral" =
-                        rl."IdRetiroLaboral"
-                    ORDER BY
-                        pso_ultimo."FechaCreacion" DESC NULLS LAST
-                    LIMIT 1
-                ) pso ON true
-
                 WHERE {FILTRO_NOMINA_SQL}
+                  AND rl."FechaRetiro" IS NOT NULL
             ) datos
-
-            WHERE datos.fecha_base IS NOT NULL
 
             GROUP BY
                 EXTRACT(YEAR FROM datos.fecha_base),

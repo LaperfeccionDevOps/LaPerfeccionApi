@@ -490,6 +490,92 @@ def obtener_dashboard_indicadores_seleccion(
     ]
 
     # ============================================================
+    # AVANCES REALES A CONTRATACIÓN DESDE SELECCIÓN
+    # ============================================================
+    # Regla oficial del indicador:
+    # una persona cuenta como "Avanza a Contratación" únicamente cuando
+    # existe el movimiento real EstadoNuevo = 24 en el período consultado.
+    #
+    # No se infiere el avance por estado 25, ContratacionBasica, estados
+    # actuales posteriores ni por motivos propios de Contratación.
+    # ============================================================
+
+    movimientos_estado_24 = db.execute(
+        text("""
+            SELECT DISTINCT
+                hec."IdRegistroPersonal",
+                hec."FechaMovimiento" AS fecha_avance
+            FROM public."HistorialEstadoContratacion" hec
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = hec."IdRegistroPersonal"
+            WHERE
+                hec."EstadoNuevo" = 24
+                AND hec."FechaMovimiento"
+                    >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                AND (
+                    :anio IS NULL
+                    OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
+                )
+
+                -- Excluir activos históricos migrados
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM public."HistorialLaboral" hl
+                    WHERE
+                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND UPPER(
+                            TRIM(
+                                COALESCE(
+                                    hl."TipoVinculacion",
+                                    ''
+                                )
+                            )
+                        ) = 'ACTIVO MIGRADO'
+                )
+
+                -- Excluir etiquetas de migración
+                AND LOWER(
+                    COALESCE(
+                        rp."UsuarioActualizacion",
+                        ''
+                    )
+                ) NOT LIKE '%migracion%'
+
+                AND LOWER(
+                    COALESCE(
+                        rp."UsuarioActualizacion",
+                        ''
+                    )
+                ) NOT LIKE '%migrado%'
+
+                -- Excluir ajuste histórico administrativo
+                AND COALESCE(
+                    rp."UsuarioActualizacion",
+                    ''
+                ) <> 'ajuste_no_activos_maestro_2026_06_22'
+
+                -- Registros técnicos conocidos de prueba
+                AND rp."NumeroIdentificacion"::text NOT IN (
+                    '91011506',
+                    '0987654',
+                    '951357'
+                )
+
+            ORDER BY
+                hec."FechaMovimiento",
+                hec."IdRegistroPersonal";
+        """),
+        {
+            "anio": anio,
+        },
+    ).mappings().all()
+
+    filas_avances_estado_24 = [
+        dict(row)
+        for row in movimientos_estado_24
+    ]
+
+    # ============================================================
     # 2. CATÁLOGOS DEL DASHBOARD
     # ============================================================
 
@@ -612,6 +698,7 @@ def obtener_dashboard_indicadores_seleccion(
 
     def calcular_estados(
         filas_periodo: list[dict],
+        total_avanzan_periodo: int | None = None,
     ) -> list[dict]:
         total_periodo = len(filas_periodo)
 
@@ -629,6 +716,17 @@ def obtener_dashboard_indicadores_seleccion(
                 conteo[estado] = 0
 
             conteo[estado] += 1
+
+        # La fila "AVANZA A CONTRATACIÓN" debe usar exactamente la misma
+        # regla oficial que la tarjeta principal y la serie mensual:
+        # movimientos reales EstadoNuevo = 24 ocurridos dentro del período.
+        #
+        # No se infiere este valor por estado actual, estado 25,
+        # ContratacionBasica ni motivos propios de Contratación.
+        if total_avanzan_periodo is not None:
+            conteo["AVANZA A CONTRATACIÓN"] = int(
+                total_avanzan_periodo
+            )
 
         orden = estados_base + [
             estado
@@ -747,19 +845,19 @@ def obtener_dashboard_indicadores_seleccion(
 
     def construir_resumen(
         filas_periodo: list[dict],
+        total_avanzan_periodo: int | None = None,
     ) -> dict:
         total_periodo = len(
             filas_periodo
         )
 
-        total_avanzan = sum(
-            1
-            for fila in filas_periodo
-            if bool(
-                fila.get(
-                    "avanzo_contratacion"
-                )
-            )
+        # La tarjeta de avance NO se deduce del estado actual del trabajador.
+        # Se alimenta exclusivamente con movimientos reales EstadoNuevo = 24
+        # ocurridos dentro del período que se está construyendo.
+        total_avanzan = (
+            int(total_avanzan_periodo)
+            if total_avanzan_periodo is not None
+            else 0
         )
 
         (
@@ -771,7 +869,8 @@ def obtener_dashboard_indicadores_seleccion(
         )
 
         estados = calcular_estados(
-            filas_periodo
+            filas_periodo,
+            total_avanzan_periodo=total_avanzan,
         )
 
         conteo_estados = {
@@ -955,30 +1054,59 @@ def obtener_dashboard_indicadores_seleccion(
             fila
         )
 
-    serie_mensual = []
-    detalle_mensual = []
+    avances_por_mes: dict[str, set[int]] = {}
 
-    for clave in sorted(
-        filas_por_mes.keys()
-    ):
-        filas_mes = filas_por_mes[
-            clave
-        ]
-
-        fecha_referencia = (
-            filas_mes[0].get(
-                "fecha_registro"
-            )
+    for fila in filas_avances_estado_24:
+        fecha_avance = fila.get(
+            "fecha_avance"
         )
 
         if not isinstance(
-            fecha_referencia,
+            fecha_avance,
             datetime,
         ):
             continue
 
+        clave_avance = fecha_avance.strftime(
+            "%Y-%m"
+        )
+
+        if clave_avance not in avances_por_mes:
+            avances_por_mes[clave_avance] = set()
+
+        avances_por_mes[clave_avance].add(
+            int(fila["IdRegistroPersonal"])
+        )
+
+    serie_mensual = []
+    detalle_mensual = []
+
+    claves_serie = sorted(
+        set(filas_por_mes.keys())
+        | set(avances_por_mes.keys())
+    )
+
+    for clave in claves_serie:
+        filas_mes = filas_por_mes.get(
+            clave,
+            [],
+        )
+
+        anio_clave, mes_clave = (
+            int(valor)
+            for valor in clave.split("-")
+        )
+
+        total_avanzan_mes = len(
+            avances_por_mes.get(
+                clave,
+                set(),
+            )
+        )
+
         resumen_mes = construir_resumen(
-            filas_mes
+            filas_mes,
+            total_avanzan_periodo=total_avanzan_mes,
         )
 
         tarjetas_mes = resumen_mes[
@@ -987,17 +1115,14 @@ def obtener_dashboard_indicadores_seleccion(
 
         item_serie = {
             "clave": clave,
-            "anio":
-                fecha_referencia.year,
-            "numero_mes":
-                fecha_referencia.month,
-            "mes":
-                meses_nombre[
-                    fecha_referencia.month
-                ],
+            "anio": anio_clave,
+            "numero_mes": mes_clave,
+            "mes": meses_nombre[
+                mes_clave
+            ],
             "etiqueta": (
-                f"{meses_nombre[fecha_referencia.month].capitalize()} "
-                f"{fecha_referencia.year}"
+                f"{meses_nombre[mes_clave].capitalize()} "
+                f"{anio_clave}"
             ),
 
             "registrados":
@@ -1093,8 +1218,22 @@ def obtener_dashboard_indicadores_seleccion(
             filas_universo
         )
 
+    ids_avanzan_periodo = {
+        int(fila["IdRegistroPersonal"])
+        for fila in filas_avances_estado_24
+        if isinstance(
+            fila.get("fecha_avance"),
+            datetime,
+        )
+        and (
+            mes is None
+            or fila["fecha_avance"].month == mes
+        )
+    }
+
     resumen_periodo = construir_resumen(
-        filas_periodo
+        filas_periodo,
+        total_avanzan_periodo=len(ids_avanzan_periodo),
     )
 
     # ============================================================
@@ -1280,8 +1419,8 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "avance_contratacion": (
-                "Estado 24 o evidencia posterior "
-                "de contratación"
+                "Movimiento real EstadoNuevo = 24 en "
+                "HistorialEstadoContratacion dentro del período"
             ),
 
             "rechazo_seleccion": (
@@ -1298,8 +1437,8 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "porcentaje_tarjetas": (
-                "Avanzan y rechazados se calculan "
-                "sobre el total registrado del período"
+                "Avanzan usa movimientos EstadoNuevo = 24 del período; "
+                "rechazados usa el total registrado del período como base"
             ),
 
             "porcentaje_estados": (
@@ -1314,8 +1453,9 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "serie_mensual": (
-                "Agrupada por "
-                "RegistroPersonal.FechaCreacion"
+                "Registrados y rechazados por RegistroPersonal.FechaCreacion; "
+                "avances por HistorialEstadoContratacion.FechaMovimiento "
+                "con EstadoNuevo = 24"
             ),
 
             "excluye_migrados":
@@ -2647,11 +2787,9 @@ def obtener_dashboard_contratacion(
     Reglas de la consulta general:
     - Registrados por Selección: RegistroPersonal.FechaCreacion.
     - Avanzan a Contratación:
-      1. movimiento real al estado 24;
-      2. rechazo real registrado por Contratación, cuya transición confirma
-         que la persona se encontraba en el estado 24; o
-      3. contratación real confirmada para uno de los seis casos operativos
-         que quedaron sin historial por una falla anterior.
+      únicamente personas con movimiento real al estado 24 dentro del
+      periodo consultado. Los rechazos de Contratación y los casos sin
+      historial no generan un nuevo avance ni cambian el mes del avance.
     - Contratados:
       1. movimiento real al estado 25 mediante BOTON_C; o
       2. uno de los seis casos operativos sin historial, usando
@@ -2955,29 +3093,7 @@ def obtener_dashboard_contratacion(
                     "IdRegistroPersonal",
                     fecha_avance,
                     fuente_avance
-                FROM (
-                    SELECT
-                        "IdRegistroPersonal",
-                        fecha_avance,
-                        fuente_avance
-                    FROM avances_historial_periodo
-
-                    UNION ALL
-
-                    SELECT
-                        "IdRegistroPersonal",
-                        fecha_avance,
-                        fuente_avance
-                    FROM rechazos_contratacion_periodo
-
-                    UNION ALL
-
-                    SELECT
-                        "IdRegistroPersonal",
-                        fecha_avance,
-                        fuente_avance
-                    FROM avances_sin_historial_periodo
-                ) avances_unificados
+                FROM avances_historial_periodo
                 ORDER BY
                     "IdRegistroPersonal",
                     fecha_avance ASC
@@ -3320,13 +3436,7 @@ def obtener_dashboard_contratacion(
                     "IdRegistroPersonal",
                     fecha_avance,
                     fuente_avance
-                FROM (
-                    SELECT * FROM avances_historial_periodo
-                    UNION ALL
-                    SELECT * FROM rechazos_contratacion_periodo
-                    UNION ALL
-                    SELECT * FROM avances_sin_historial_periodo
-                ) avances_unificados
+                FROM avances_historial_periodo
                 ORDER BY
                     "IdRegistroPersonal",
                     fecha_avance ASC
@@ -3484,8 +3594,8 @@ def obtener_dashboard_contratacion(
         "criterio_fecha": {
             "registrados_seleccion": "RegistroPersonal.FechaCreacion",
             "avanzan_contratacion": (
-                "Fecha del estado 24; para los seis contratados reales "
-                "sin historial se usa ContratacionBasica.FechaIngreso"
+                "Fecha real del movimiento EstadoNuevo = 24 en "
+                "HistorialEstadoContratacion"
             ),
             "contratados": (
                 "Personas de la cohorte con evidencia final de contratación "
@@ -3520,8 +3630,8 @@ def obtener_dashboard_contratacion(
             "contratados": contratados_cohorte,
             "porcentaje_contratados": porcentaje_contratados_sobre_avanzan,
             "fuente": (
-                "HistorialEstadoContratacion y ContratacionBasica "
-                "para seis excepciones verificadas"
+                "Avance: HistorialEstadoContratacion EstadoNuevo = 24; "
+                "desenlace: HistorialEstadoContratacion y ContratacionBasica"
             ),
             "nota": (
                 "Este comparativo usa una sola cohorte: personas que "
