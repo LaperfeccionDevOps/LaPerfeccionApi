@@ -49,6 +49,14 @@ class CitacionProcesoDisciplinarioBase(
     UsuarioCreacion: str | None = None
     UsuarioActualizacion: str | None = None
 
+    # =============================================
+    # INFORMACIÓN DE LA CITACIÓN EXTRAORDINARIA
+    # =============================================
+
+    EsExtraordinaria: bool = False
+    MotivoExtraordinario: str | None = None
+    JustificacionExtraordinaria: str | None = None
+
 
 class CitacionProcesoDisciplinarioCreate(
     CitacionProcesoDisciplinarioBase
@@ -94,6 +102,10 @@ class CitacionProcesoDisciplinarioUpdate(
     Sede: str | None = None
 
     UsuarioActualizacion: str | None = None
+
+    EsExtraordinaria: bool | None = None
+    MotivoExtraordinario: str | None = None
+    JustificacionExtraordinaria: str | None = None
 
 
 class CitacionProcesoDisciplinarioResponse(

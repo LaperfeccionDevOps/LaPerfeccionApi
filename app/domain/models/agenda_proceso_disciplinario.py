@@ -147,3 +147,23 @@ class AgendaProcesoDisciplinario(Base):
         Text,
         nullable=True,
     )
+
+    # =========================================================
+    # INFORMACIÓN DE LA CITACIÓN EXTRAORDINARIA
+    # =========================================================
+
+    EsExtraordinaria = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    MotivoExtraordinario = Column(
+        String(200),
+        nullable=True,
+    )
+
+    JustificacionExtraordinaria = Column(
+        Text,
+        nullable=True,
+    )

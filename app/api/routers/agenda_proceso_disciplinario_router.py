@@ -57,6 +57,8 @@ router = APIRouter(
 
 TIPO_EVENTO_CITACION_ID = 1
 DIAS_HABILES_MINIMOS_CITACION = 5
+DIAS_HABILES_VENTANA_EXTRAORDINARIA = 5
+MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA = 6
 
 
 class EnlaceVirtualRRLLRequest(BaseModel):
@@ -70,6 +72,11 @@ HORA_FIN_JORNADA = time(16, 0)
 
 DURACION_CITACION_MINUTOS = 40
 CAPACIDAD_MAXIMA_DIARIA = 11
+
+BLOQUES_EXTRAORDINARIOS_CONTINGENCIA = (
+    (time(12, 30), time(13, 0)),
+    (time(16, 0), time(16, 30)),
+)
 
 
 COLORES_POR_ESTADO = {
@@ -353,6 +360,99 @@ def sumar_dias_habiles(
             dias_sumados += 1
 
     return fecha_resultado
+
+
+def obtener_ventana_extraordinaria(
+    fecha_base: date | None = None,
+) -> list[date]:
+    """Devuelve los próximos cinco días hábiles, sin incluir hoy."""
+    fecha_actual = fecha_base or obtener_fecha_actual_colombia()
+    fechas: list[date] = []
+    fecha_revision = fecha_actual
+
+    while len(fechas) < DIAS_HABILES_VENTANA_EXTRAORDINARIA:
+        fecha_revision += timedelta(days=1)
+        if es_dia_habil_colombia(fecha_revision):
+            fechas.append(fecha_revision)
+
+    return fechas
+
+
+def obtener_limites_semana(fecha_valor: date) -> tuple[date, date]:
+    inicio = fecha_valor - timedelta(days=fecha_valor.weekday())
+    return inicio, inicio + timedelta(days=6)
+
+
+def contar_citaciones_extraordinarias_semana(
+    db: Session,
+    fecha_evento: date,
+    id_proceso_excluir: int | None = None,
+) -> int:
+    inicio_semana, fin_semana = obtener_limites_semana(fecha_evento)
+    consulta = (
+        db.query(CitacionProcesoDisciplinario)
+        .filter(
+            CitacionProcesoDisciplinario.EsExtraordinaria.is_(True),
+            CitacionProcesoDisciplinario.FechaCitacion >= inicio_semana,
+            CitacionProcesoDisciplinario.FechaCitacion <= fin_semana,
+        )
+    )
+
+    if id_proceso_excluir is not None:
+        consulta = consulta.filter(
+            CitacionProcesoDisciplinario.IdProcesoDisciplinario
+            != id_proceso_excluir
+        )
+
+    return consulta.count()
+
+
+def bloquear_cupo_extraordinario_semana(
+    db: Session,
+    fecha_evento: date,
+) -> None:
+    """Serializa reservas de la misma semana dentro de la transacción."""
+    inicio_semana, _ = obtener_limites_semana(fecha_evento)
+    clave = int(inicio_semana.strftime("%Y%m%d"))
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:clave)"),
+        {"clave": clave},
+    )
+
+
+def validar_cupo_extraordinario_semana(
+    db: Session,
+    fecha_evento: date,
+    id_proceso_excluir: int | None = None,
+    bloquear: bool = False,
+) -> int:
+    if bloquear:
+        bloquear_cupo_extraordinario_semana(db, fecha_evento)
+
+    usados = contar_citaciones_extraordinarias_semana(
+        db=db,
+        fecha_evento=fecha_evento,
+        id_proceso_excluir=id_proceso_excluir,
+    )
+
+    if usados >= MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA:
+        inicio_semana, fin_semana = obtener_limites_semana(fecha_evento)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "CUPO_EXTRAORDINARIO_SEMANAL_AGOTADO",
+                "mensaje": (
+                    "La semana seleccionada ya alcanzó el máximo de "
+                    f"{MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA} citas extraordinarias."
+                ),
+                "cupoMaximo": MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA,
+                "cuposUsados": usados,
+                "inicioSemana": inicio_semana,
+                "finSemana": fin_semana,
+            },
+        )
+
+    return usados
 
 
 def validar_fecha_minima_citacion(
@@ -797,6 +897,114 @@ def validar_cruce_horario(
         )
 
 
+def obtener_bloques_ordinarios_disponibles(
+    db: Session,
+    fecha_evento: date,
+) -> list[tuple[time, time]]:
+    return [
+        (hora_inicio, hora_fin)
+        for hora_inicio, hora_fin in BLOQUES_CITACION
+        if buscar_cruce_horario(
+            db=db,
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        ) is None
+    ]
+
+
+def obtener_bloques_extraordinarios_disponibles(
+    db: Session,
+    fecha_evento: date,
+) -> tuple[list[tuple[time, time]], bool]:
+    bloques_ordinarios = obtener_bloques_ordinarios_disponibles(
+        db=db,
+        fecha_evento=fecha_evento,
+    )
+
+    if bloques_ordinarios:
+        return bloques_ordinarios, False
+
+    bloques_contingencia = [
+        (hora_inicio, hora_fin)
+        for hora_inicio, hora_fin in BLOQUES_EXTRAORDINARIOS_CONTINGENCIA
+        if buscar_cruce_horario(
+            db=db,
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        ) is None
+    ]
+    return bloques_contingencia, True
+
+
+def validar_programacion_extraordinaria_citacion(
+    db: Session,
+    fecha_evento: date,
+    hora_inicio: time,
+    id_proceso_disciplinario: int | None = None,
+    bloquear_cupo: bool = False,
+) -> time:
+    fechas_permitidas = obtener_ventana_extraordinaria()
+
+    if fecha_evento not in fechas_permitidas:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "FECHA_EXTRAORDINARIA_NO_PERMITIDA",
+                "mensaje": (
+                    "La cita extraordinaria solo puede programarse dentro "
+                    "de los próximos cinco días hábiles."
+                ),
+                "fechasPermitidas": fechas_permitidas,
+            },
+        )
+
+    # En extraordinarias el viernes es un día hábil permitido y no requiere RRLL.
+    validar_dia_habil_agenda(fecha_evento, permitir_viernes=True)
+    validar_cupo_extraordinario_semana(
+        db=db,
+        fecha_evento=fecha_evento,
+        id_proceso_excluir=id_proceso_disciplinario,
+        bloquear=bloquear_cupo,
+    )
+
+    bloques_disponibles, usa_contingencia = (
+        obtener_bloques_extraordinarios_disponibles(
+            db=db,
+            fecha_evento=fecha_evento,
+        )
+    )
+    bloque = next(
+        (
+            (inicio, fin)
+            for inicio, fin in bloques_disponibles
+            if inicio == hora_inicio
+        ),
+        None,
+    )
+
+    if bloque is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "HORARIO_EXTRAORDINARIO_NO_DISPONIBLE",
+                "mensaje": (
+                    "El horario extraordinario seleccionado ya no está disponible."
+                ),
+                "usaHorariosContingencia": usa_contingencia,
+            },
+        )
+
+    validar_cruce_horario(
+        db=db,
+        fecha_evento=fecha_evento,
+        hora_inicio=bloque[0],
+        hora_fin=bloque[1],
+    )
+    return bloque[1]
+
+
 def validar_programacion_citacion(
     db: Session,
     fecha_evento: date,
@@ -1013,6 +1221,102 @@ def listar_festivos_colombia(
         "anio": anio,
         "total": len(festivos),
         "festivos": festivos,
+    }
+
+
+@router.get("/configuracion-citacion-extraordinaria")
+def obtener_configuracion_citacion_extraordinaria(
+    db: Session = Depends(get_db),
+):
+    fechas = obtener_ventana_extraordinaria()
+    semanas: dict[str, dict] = {}
+
+    for fecha_valor in fechas:
+        inicio, fin = obtener_limites_semana(fecha_valor)
+        clave = inicio.isoformat()
+        if clave not in semanas:
+            usados = contar_citaciones_extraordinarias_semana(
+                db=db,
+                fecha_evento=fecha_valor,
+            )
+            semanas[clave] = {
+                "inicioSemana": inicio,
+                "finSemana": fin,
+                "cuposUsados": usados,
+                "cuposDisponibles": max(
+                    0,
+                    MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA - usados,
+                ),
+            }
+
+    return {
+        "fechaServidor": obtener_fecha_actual_colombia(),
+        "cantidadDiasHabiles": DIAS_HABILES_VENTANA_EXTRAORDINARIA,
+        "fechasPermitidas": fechas,
+        "fechaMinimaPermitida": fechas[0],
+        "fechaMaximaPermitida": fechas[-1],
+        "maximoSemanal": MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA,
+        "semanas": list(semanas.values()),
+        "horariosContingencia": [
+            {
+                "HoraInicio": inicio.strftime("%H:%M"),
+                "HoraFin": fin.strftime("%H:%M"),
+                "Etiqueta": f"{inicio.strftime('%H:%M')} - {fin.strftime('%H:%M')}",
+            }
+            for inicio, fin in BLOQUES_EXTRAORDINARIOS_CONTINGENCIA
+        ],
+    }
+
+
+@router.get("/horarios-extraordinarios/{fecha_evento}")
+def obtener_horarios_extraordinarios(
+    fecha_evento: date,
+    id_proceso_disciplinario: int | None = None,
+    db: Session = Depends(get_db),
+):
+    fechas_permitidas = obtener_ventana_extraordinaria()
+    if fecha_evento not in fechas_permitidas:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "FECHA_EXTRAORDINARIA_NO_PERMITIDA",
+                "mensaje": (
+                    "Seleccione uno de los próximos cinco días hábiles "
+                    "habilitados para citas extraordinarias."
+                ),
+                "fechasPermitidas": fechas_permitidas,
+            },
+        )
+
+    validar_dia_habil_agenda(fecha_evento, permitir_viernes=True)
+    usados = validar_cupo_extraordinario_semana(
+        db=db,
+        fecha_evento=fecha_evento,
+        id_proceso_excluir=id_proceso_disciplinario,
+    )
+    bloques, usa_contingencia = obtener_bloques_extraordinarios_disponibles(
+        db=db,
+        fecha_evento=fecha_evento,
+    )
+
+    return {
+        "fecha": fecha_evento,
+        "esExtraordinaria": True,
+        "maximoSemanal": MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA,
+        "cuposUsadosSemana": usados,
+        "cuposDisponiblesSemana": (
+            MAXIMO_CITAS_EXTRAORDINARIAS_SEMANA - usados
+        ),
+        "usaHorariosContingencia": usa_contingencia,
+        "horarios": [
+            {
+                "HoraInicio": inicio.strftime("%H:%M"),
+                "HoraFin": fin.strftime("%H:%M"),
+                "Etiqueta": f"{inicio.strftime('%H:%M')} - {fin.strftime('%H:%M')}",
+                "EsContingencia": usa_contingencia,
+            }
+            for inicio, fin in bloques
+        ],
     }
 
 

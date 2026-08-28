@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     ForeignKey,
@@ -151,5 +152,25 @@ class CitacionProcesoDisciplinario(Base):
 
     UsuarioActualizacion = Column(
         String(100),
+        nullable=True,
+    )
+
+    # =========================================================
+    # INFORMACIÓN DE LA CITACIÓN EXTRAORDINARIA
+    # =========================================================
+
+    EsExtraordinaria = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    MotivoExtraordinario = Column(
+        String(200),
+        nullable=True,
+    )
+
+    JustificacionExtraordinaria = Column(
+        Text,
         nullable=True,
     )

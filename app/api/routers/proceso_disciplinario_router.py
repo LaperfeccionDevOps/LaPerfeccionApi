@@ -14,6 +14,7 @@ from api.routers.agenda_proceso_disciplinario_router import (
     calcular_hora_fin_citacion,
     validar_fecha_minima_citacion,
     validar_programacion_citacion,
+    validar_programacion_extraordinaria_citacion,
 )
 from domain.models.agenda_proceso_disciplinario import (
     AgendaProcesoDisciplinario,
@@ -1411,16 +1412,26 @@ def enviar_proceso_a_rrll(
         citacion
     )
 
-    validar_fecha_minima_citacion(
-        fecha_evento=citacion.FechaCitacion,
-        fecha_creacion_evento=proceso.FechaCreacion,
-    )
-
-    hora_fin = calcular_hora_fin_citacion(
-        citacion.HoraCitacion
-    )
-
-    validar_programacion_citacion(
+    if citacion.EsExtraordinaria:
+        if not str(citacion.JustificacionExtraordinaria or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail="La citación extraordinaria no tiene justificación registrada.",
+            )
+        hora_fin = validar_programacion_extraordinaria_citacion(
+            db=db,
+            fecha_evento=citacion.FechaCitacion,
+            hora_inicio=citacion.HoraCitacion,
+            id_proceso_disciplinario=id_proceso,
+            bloquear_cupo=True,
+        )
+    else:
+        validar_fecha_minima_citacion(
+            fecha_evento=citacion.FechaCitacion,
+            fecha_creacion_evento=proceso.FechaCreacion,
+        )
+        hora_fin = calcular_hora_fin_citacion(citacion.HoraCitacion)
+        validar_programacion_citacion(
             db=db,
             fecha_evento=citacion.FechaCitacion,
             hora_inicio=citacion.HoraCitacion,
@@ -1543,6 +1554,11 @@ def enviar_proceso_a_rrll(
         ),
         ManifestacionSupervisor=(
             citacion.ManifestacionSupervisor
+        ),
+        EsExtraordinaria=bool(citacion.EsExtraordinaria),
+        MotivoExtraordinario=citacion.MotivoExtraordinario,
+        JustificacionExtraordinaria=(
+            citacion.JustificacionExtraordinaria
         ),
     )
 

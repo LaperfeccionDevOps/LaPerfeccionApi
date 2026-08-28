@@ -49,6 +49,16 @@ class AgendaProcesoDisciplinarioBase(
         str
     ] = None
 
+    # =============================================
+    # INFORMACIÓN DE LA CITACIÓN EXTRAORDINARIA
+    # =============================================
+
+    EsExtraordinaria: bool = False
+    MotivoExtraordinario: Optional[str] = None
+    JustificacionExtraordinaria: Optional[
+        str
+    ] = None
+
 
 class AgendaProcesoDisciplinarioCreate(
     AgendaProcesoDisciplinarioBase
@@ -96,6 +106,12 @@ class AgendaProcesoDisciplinarioUpdate(
     ] = None
 
     ManifestacionSupervisor: Optional[
+        str
+    ] = None
+
+    EsExtraordinaria: Optional[bool] = None
+    MotivoExtraordinario: Optional[str] = None
+    JustificacionExtraordinaria: Optional[
         str
     ] = None
 
