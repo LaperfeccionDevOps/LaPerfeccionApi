@@ -12,6 +12,7 @@ from utilidades.reporte_synergy_excel import (
     normalizar_filas_reporte,
     generar_excel_reporte,
     enriquecer_filas_para_sheet_con_cargo,
+    preparar_filas_maestro_dotacion,
 )
 
 from utilidades.drive_service import (
@@ -248,14 +249,33 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         filas_excel = filas if filas else [{"sin_datos": "No hay registros"}]
         logger.info(f"Filas para excel: {len(filas_excel) if filas_excel else 0}")
 
-        filas_sheet = enriquecer_filas_para_sheet_con_cargo(db, filas_excel)
-        logger.info(f"Filas para sheet: {len(filas_sheet) if filas_sheet else 0}")
+        # ------------------------------------------------------------
+        # 4.1. Preparar una sola vez el maestro nuevo de Dotación.
+        #
+        #      Esta misma estructura se usa tanto para el Excel como
+        #      para Google Sheet, evitando que cada salida maneje un
+        #      formato diferente. Incluye activos y retiros finalizados.
+        # ------------------------------------------------------------
+        filas_maestro = preparar_filas_maestro_dotacion(
+            filas_excel,
+            db,
+        )
+        logger.info(
+            f"Filas maestro Dotación: "
+            f"{len(filas_maestro) if filas_maestro else 0}"
+        )
 
-        for fila in filas_sheet or []:
+        for fila in filas_maestro or []:
             if "1014178009" in str(fila):
-                logger.info(f"ANDREA EN FILAS SHEET: {fila}")
+                logger.info(f"ANDREA EN FILAS MAESTRO: {fila}")
 
-        ruta_archivo = generar_excel_reporte(filas_excel)
+        # El generador detecta que estas filas ya vienen en formato
+        # maestro y conserva exactamente la misma estructura de 121
+        # columnas utilizada por Google Sheet.
+        ruta_archivo = generar_excel_reporte(
+            filas_maestro,
+            db=None,
+        )
         logger.info(f"Ruta archivo: {ruta_archivo}")
 
         archivo_drive = None
@@ -272,7 +292,9 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             archivo_drive = None
 
         logger.info("Sincronizando Google Sheet")
-        archivo_sheet = sincronizar_registro_contratacion_dotacion(filas_sheet)
+        archivo_sheet = sincronizar_registro_contratacion_dotacion(
+            filas_maestro
+        )
         logger.info(f"Respuesta Sheet: {archivo_sheet}")
 
         logger.info("=== FIN /api/contratado OK ===")

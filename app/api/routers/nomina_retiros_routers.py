@@ -15,6 +15,13 @@ from openpyxl.utils import get_column_letter
 
 from infrastructure.db.deps import get_db
 
+from utilidades.reporte_synergy_excel import (
+    consultar_datos_reporte_synergy,
+    normalizar_filas_reporte,
+    preparar_filas_maestro_dotacion,
+)
+from utilidades.drive_service import sincronizar_registro_contratacion_dotacion
+
 router = APIRouter(prefix="/api/nomina-retiros", tags=["Nómina Retiros"])
 
 COLOMBIA_TZ = timezone(timedelta(hours=-5))
@@ -964,6 +971,48 @@ def finalizar_retiro_nomina(
         )
 
         db.commit()
+
+        # ------------------------------------------------------------
+        # Sincronizar Dotación después de confirmar el retiro en BD.
+        #
+        # La actualización del trabajador a RETIRADO ya quedó confirmada
+        # antes de intentar Google Sheet. Si la sincronización externa
+        # falla, el retiro NO se revierte y este endpoint conserva su
+        # respuesta exitosa para no inducir a repetir la finalización.
+        # ------------------------------------------------------------
+        try:
+            hoy = datetime.now(COLOMBIA_TZ).date()
+            hace_800_dias = hoy - timedelta(days=800)
+            fecha_fin_reporte = hoy + timedelta(days=90)
+
+            rows_dotacion = consultar_datos_reporte_synergy(
+                db,
+                hace_800_dias.strftime("%Y-%m-%d"),
+                fecha_fin_reporte.strftime("%Y-%m-%d"),
+            )
+
+            filas_dotacion = normalizar_filas_reporte(rows_dotacion)
+            filas_base_dotacion = (
+                filas_dotacion
+                if filas_dotacion
+                else [{"sin_datos": "No hay registros"}]
+            )
+
+            filas_maestro_dotacion = preparar_filas_maestro_dotacion(
+                filas_base_dotacion,
+                db,
+            )
+
+            sincronizar_registro_contratacion_dotacion(
+                filas_maestro_dotacion
+            )
+
+        except Exception as error_sincronizacion_dotacion:
+            print(
+                "ADVERTENCIA DOTACION - El retiro quedó confirmado en BD, "
+                "pero no fue posible sincronizar Google Sheet: "
+                f"{error_sincronizacion_dotacion}"
+            )
 
         return {
             "success": True,
