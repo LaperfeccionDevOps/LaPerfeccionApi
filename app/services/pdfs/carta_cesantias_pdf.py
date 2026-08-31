@@ -14,9 +14,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
 LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA.jpeg"
-LOGO_CERTIFICACIONES = ASSETS / "LOGO_CERTIFICACIONES.jpeg"
-LOGO_ISSA = ASSETS / "LOGO_ISSA.jpeg.png"
-LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
@@ -253,39 +250,6 @@ class CartaCesantiasPDF:
                 self.height - 75,
                 width=155,
                 height=55,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_CERTIFICACIONES.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_CERTIFICACIONES)),
-                190,
-                self.height - 73,
-                width=85,
-                height=45,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_ISSA.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_ISSA)),
-                275,
-                self.height - 70,
-                width=65,
-                height=35,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_MANTENER.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_MANTENER)),
-                self.width - 175,
-                self.height - 72,
-                width=125,
-                height=45,
                 preserveAspectRatio=True,
                 mask="auto",
             )

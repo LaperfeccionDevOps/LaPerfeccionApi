@@ -14,9 +14,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
 LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA.jpeg"
-LOGO_CERTIFICACIONES = ASSETS / "LOGO_CERTIFICACIONES.jpeg"
-LOGO_ISSA = ASSETS / "LOGO_ISSA.jpeg.png"
-LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
@@ -256,39 +253,6 @@ class CertificadoLaboralPDF:
                 self.height - 95,
                 width=160,
                 height=60,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_CERTIFICACIONES.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_CERTIFICACIONES)),
-                215,
-                self.height - 96,
-                width=95,
-                height=55,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_ISSA.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_ISSA)),
-                315,
-                self.height - 90,
-                width=75,
-                height=40,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-
-        if LOGO_MANTENER.exists():
-            self.pdf.drawImage(
-                ImageReader(str(LOGO_MANTENER)),
-                self.width - 180,
-                self.height - 92,
-                width=130,
-                height=48,
                 preserveAspectRatio=True,
                 mask="auto",
             )
