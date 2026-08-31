@@ -27,28 +27,15 @@
             margin-bottom: 22px;
         }
 
-        .header-left,
-        .header-right {
-            display: table-cell;
-            width: 50%;
-            vertical-align: top;
-        }
-
         .header-left {
+            display: table-cell;
+            width: 100%;
+            vertical-align: top;
             text-align: left;
-        }
-
-        .header-right {
-            text-align: right;
         }
 
         .img-logo-left {
             width: 155px;
-            height: auto;
-        }
-
-        .img-logo-right {
-            width: 180px;
             height: auto;
         }
 
@@ -126,10 +113,7 @@
 <body>
     <div class="header">
         <div class="header-left">
-            <img class="img-logo-left" src="@LOGO" alt="Logo izquierdo">
-        </div>
-        <div class="header-right">
-            <img class="img-logo-right" src="@LOGO2" alt="Logo derecho">
+            <img class="img-logo-left" src="@LOGO" alt="Logo Aseos La Perfección">
         </div>
     </div>
 
