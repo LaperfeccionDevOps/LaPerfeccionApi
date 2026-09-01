@@ -76,6 +76,17 @@ HORA_FIN_JORNADA = time(16, 0)
 DURACION_CITACION_MINUTOS = 40
 CAPACIDAD_MAXIMA_DIARIA = 11
 
+BLOQUEOS_TEMPORALES_AGENDA = {
+    date(2026, 9, 8): {
+        (time(9, 10), time(9, 50)),
+        (time(9, 50), time(10, 30)),
+        (time(11, 10), time(11, 50)),
+    },
+    date(2026, 9, 9): {
+        (time(9, 50), time(10, 30)),
+    },
+}
+
 BLOQUES_EXTRAORDINARIOS_CONTINGENCIA = (
     (time(12, 30), time(13, 0)),
     (time(16, 0), time(16, 30)),
@@ -597,6 +608,21 @@ def generar_bloques_citacion() -> list[tuple[time, time]]:
 
 BLOQUES_CITACION = generar_bloques_citacion()
 
+def es_bloque_temporalmente_bloqueado(
+    fecha_evento: date,
+    hora_inicio: time,
+    hora_fin: time,
+) -> bool:
+    bloques_fecha = BLOQUEOS_TEMPORALES_AGENDA.get(
+        fecha_evento,
+        set(),
+    )
+
+    return (
+        hora_inicio,
+        hora_fin,
+    ) in bloques_fecha
+
 
 def validar_dia_habil_agenda(
     fecha_evento: date,
@@ -889,7 +915,12 @@ def obtener_bloques_ordinarios_disponibles(
     return [
         (hora_inicio, hora_fin)
         for hora_inicio, hora_fin in BLOQUES_CITACION
-        if buscar_cruce_horario(
+        if not es_bloque_temporalmente_bloqueado(
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        )
+        and buscar_cruce_horario(
             db=db,
             fecha_evento=fecha_evento,
             hora_inicio=hora_inicio,
@@ -1027,6 +1058,25 @@ def validar_programacion_citacion(
         hora_inicio=hora_inicio,
         hora_fin=hora_fin,
     )
+
+    if es_bloque_temporalmente_bloqueado(
+        fecha_evento=fecha_evento,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "HORARIO_BLOQUEADO_TEMPORALMENTE",
+                "mensaje": (
+                    "El horario seleccionado no se encuentra "
+                    "disponible para esta fecha."
+                ),
+                "fecha": fecha_evento.strftime("%d/%m/%Y"),
+                "horaInicio": hora_inicio.strftime("%H:%M"),
+                "horaFin": hora_fin.strftime("%H:%M"),
+            },
+        )
 
     validar_cruce_horario(
         db=db,
@@ -1391,6 +1441,13 @@ def obtener_horarios_disponibles(
     horarios_disponibles = []
 
     for hora_inicio, hora_fin in BLOQUES_CITACION:
+        if es_bloque_temporalmente_bloqueado(
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        ):
+            continue
+
         evento_cruzado = buscar_cruce_horario(
             db=db,
             fecha_evento=fecha_evento,
