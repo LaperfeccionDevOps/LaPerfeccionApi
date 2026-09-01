@@ -1,8 +1,9 @@
-# app/domain/models/usuario.py
 from datetime import datetime
 from typing import Optional
+import uuid
 
-from sqlalchemy import Integer, String, DateTime
+from sqlalchemy import String, DateTime
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -10,39 +11,75 @@ from infrastructure.db.base import Base
 
 
 class Usuario(Base):
-    __tablename__ = "Usuario"  # 👈 nombre de la tabla en la BD
+    __tablename__ = "Usuario"
 
     # PK
-    IdUsuario: Mapped[int] = mapped_column(
-        "IdUsuario", Integer, primary_key=True, autoincrement=True
+    # PostgreSQL genera automáticamente el UUID mediante uuid_generate_v4().
+    IdUsuario: Mapped[uuid.UUID] = mapped_column(
+        "IdUsuario",
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.uuid_generate_v4(),
     )
 
-    # Nombre de usuario (login)
+    # Nombre completo de la persona.
+    # Se mantiene el nombre de columna existente para compatibilidad.
     NombreUsuario: Mapped[str] = mapped_column(
-        "NombreUsuario", String(100), nullable=False, unique=True
+        "NombreUsuario",
+        String(100),
+        nullable=False,
+        unique=True,
     )
 
-    # Aquí vamos a guardar el HASH de la contraseña (no la contraseña en texto)
+    # Login individual utilizado para ingresar al sistema.
+    # Es nullable para mantener compatibilidad con usuarios históricos.
+    Usuario: Mapped[Optional[str]] = mapped_column(
+        "Usuario",
+        String(120),
+        nullable=True,
+    )
+
+    # La contraseña almacenada en esta columna siempre debe ser un hash.
     Contrasena: Mapped[str] = mapped_column(
-        "Contraseña", String(250), nullable=False
+        "Contraseña",
+        String(250),
+        nullable=False,
     )
 
     HashEstado: Mapped[str] = mapped_column(
-        "HashEstado", String(20), nullable=False, default="ACTIVO"
+        "HashEstado",
+        String(20),
+        nullable=False,
+        default="ACTIVO",
     )
 
-    FechaCreacion: Mapped[datetime] = mapped_column(
-        "FechaCreacion", DateTime, server_default=func.now()
+    FechaCreacion: Mapped[Optional[datetime]] = mapped_column(
+        "FechaCreacion",
+        DateTime(timezone=True),
+        nullable=True,
+        server_default=func.now(),
     )
 
     FechaActualizacion: Mapped[Optional[datetime]] = mapped_column(
-        "FechaActualizacion", DateTime, nullable=True
+        "FechaActualizacion",
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     UsuarioCreador: Mapped[str] = mapped_column(
-        "UsuarioCreador", String(60), nullable=False
+        "UsuarioCreador",
+        String(60),
+        nullable=False,
     )
 
     UsuarioActualizacion: Mapped[Optional[str]] = mapped_column(
-        "UsuarioActualizacion", String(60), nullable=True
+        "UsuarioActualizacion",
+        String(60),
+        nullable=True,
+    )
+
+    CorreoCorporativo: Mapped[Optional[str]] = mapped_column(
+        "CorreoCorporativo",
+        String(120),
+        nullable=True,
     )
