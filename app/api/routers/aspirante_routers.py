@@ -276,15 +276,39 @@ def listar_aspirantes(
 
         if search:
             s = search.strip()
-            sql += """
-                AND (
-                    upper(rp."Nombres") LIKE :pattern
-                    OR upper(rp."Apellidos") LIKE :pattern
-                    OR rp."NumeroIdentificacion" ILIKE :docpattern
+
+            terminos = [
+                termino
+                for termino in s.split()
+                if termino.strip()
+            ]
+
+            for indice, termino in enumerate(terminos):
+                parametro_nombre = f"search_nombre_{indice}"
+                parametro_documento = f"search_documento_{indice}"
+
+                sql += f"""
+                    AND (
+                        upper(
+                            concat_ws(
+                                ' ',
+                                COALESCE(rp."Nombres", ''),
+                                COALESCE(rp."Apellidos", '')
+                            )
+                        ) LIKE :{parametro_nombre}
+                        OR COALESCE(
+                            rp."NumeroIdentificacion",
+                            ''
+                        ) ILIKE :{parametro_documento}
+                    )
+                """
+
+                params[parametro_nombre] = (
+                    f"%{termino.upper()}%"
                 )
-            """
-            params["pattern"] = f"%{s.upper()}%"
-            params["docpattern"] = f"%{s}%"
+                params[parametro_documento] = (
+                    f"%{termino}%"
+                )
 
         sql += """
             GROUP BY

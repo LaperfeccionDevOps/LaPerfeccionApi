@@ -39,6 +39,12 @@ class CitacionProcesoDisciplinarioBase(
 
     CorreoSupervisorReporta: str | None = None
 
+    CargoSupervisorReporta: str | None = None
+
+    SedeSupervisorReporta: str | None = None
+
+    EnunciacionPruebas: str | None = None
+
     TelefonoTrabajador: str | None = None
 
     ManifestacionSupervisor: str | None = None
@@ -93,6 +99,12 @@ class CitacionProcesoDisciplinarioUpdate(
     SupervisorReporta: str | None = None
 
     CorreoSupervisorReporta: str | None = None
+
+    CargoSupervisorReporta: str | None = None
+
+    SedeSupervisorReporta: str | None = None
+
+    EnunciacionPruebas: str | None = None
 
     TelefonoTrabajador: str | None = None
 

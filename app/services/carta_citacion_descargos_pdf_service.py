@@ -7,7 +7,7 @@ from xml.sax.saxutils import escape
 
 from PIL import Image as PILImage
 from fastapi import HTTPException
-from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
@@ -15,9 +15,12 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     Image,
+    PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
+    Table,
+    TableStyle,
 )
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -48,21 +51,7 @@ RUTA_LOGO_EMPRESA = (
     BASE_DIR
     / "assets"
     / "comunicaciones"
-    / "LOGO_EMPRESA.jpeg"
-)
-
-RUTA_LOGO_ISSA = (
-    BASE_DIR
-    / "assets"
-    / "comunicaciones"
-    / "LOGO_ISSA.jpeg.png"
-)
-
-RUTA_LOGO_CERTIFICACIONES = (
-    BASE_DIR
-    / "assets"
-    / "comunicaciones"
-    / "LOGO_CERTIFICACIONES.jpeg"
+    / "LOGO_EMPRESA_NIT.png"
 )
 
 RUTA_FIRMA_YENY = (
@@ -136,6 +125,40 @@ def _fecha(
     return str(valor).strip()
 
 
+def _fecha_larga(
+    valor: date | datetime | None,
+) -> str:
+    if not valor:
+        return ""
+
+    if isinstance(valor, datetime):
+        valor = valor.date()
+
+    if not isinstance(valor, date):
+        return _texto(valor)
+
+    meses = (
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    )
+
+    return (
+        f"{valor.day:02d} de "
+        f"{meses[valor.month - 1]} de "
+        f"{valor.year}"
+    )
+
+
 def _hora(
     valor: Any,
 ) -> str:
@@ -206,13 +229,13 @@ def _hora(
     return texto
 
 
-def _obtener_cargo_trabajador(
+def _obtener_datos_laborales_trabajador(
     db: Session,
     id_registro_personal: int,
-) -> str:
+) -> tuple[str, str]:
     """
-    Obtiene el cargo más reciente del trabajador desde
-    AsignacionCargoCliente y Cargo.
+    Obtiene el cargo y la sede/cliente más recientes del trabajador
+    desde la misma asignación registrada en AsignacionCargoCliente.
     """
 
     fila = (
@@ -220,12 +243,14 @@ def _obtener_cargo_trabajador(
             text(
                 """
                 SELECT
-                    cg."NombreCargo" AS "Cargo"
+                    cg."NombreCargo" AS "Cargo",
+                    cl."Nombre" AS "Sede"
                 FROM public."RegistroPersonal" rp
 
                 LEFT JOIN LATERAL (
                     SELECT
-                        acc."IdCargo"
+                        acc."IdCargo",
+                        acc."IdCliente"
                     FROM public."AsignacionCargoCliente" acc
                     WHERE
                         acc."IdRegistroPersonal"
@@ -242,6 +267,10 @@ def _obtener_cargo_trabajador(
                 LEFT JOIN public."Cargo" cg
                     ON cg."IdCargo"
                     = asignacion."IdCargo"
+
+                LEFT JOIN public."Cliente" cl
+                    ON cl."IdCliente"
+                    = asignacion."IdCliente"
 
                 WHERE
                     rp."IdRegistroPersonal"
@@ -260,11 +289,17 @@ def _obtener_cargo_trabajador(
     )
 
     if not fila:
-        return ""
+        return "", ""
 
-    return str(
+    cargo = str(
         fila.get("Cargo") or ""
     ).strip()
+
+    sede = str(
+        fila.get("Sede") or ""
+    ).strip()
+
+    return cargo, sede
 
 
 def _formatear_motivo(
@@ -454,39 +489,29 @@ def _dibujar_encabezado(
     documento: SimpleDocTemplate,
 ) -> None:
     """
-    Dibuja el encabezado oficial de la carta con:
-    - logo de Aseos La Perfección sin fondo visible,
-    - logo ISSA,
-    - certificaciones ICONTEC / IQNET.
+    Encabezado y pie del nuevo formato oficial de apertura
+    de procedimiento disciplinario.
 
-    No se incluye Mantener Ingeniería.
+    Solo utiliza el logo de Aseos La Perfección con NIT.
     """
 
     canvas.saveState()
 
-    _, alto_pagina = letter
+    ancho_pagina, alto_pagina = letter
     margen_izquierdo = documento.leftMargin
 
-    y_base = alto_pagina - 2.75 * cm
-
-    # ========================================================
-    # LOGO ASEOS LA PERFECCIÓN
-    # ========================================================
-
-    logo_empresa_memoria = (
-        _logo_empresa_sin_fondo()
-    )
-
-    if logo_empresa_memoria is not None:
+    if _imagen_disponible(
+        RUTA_LOGO_EMPRESA
+    ):
         try:
             canvas.drawImage(
                 ImageReader(
-                    logo_empresa_memoria
+                    str(RUTA_LOGO_EMPRESA)
                 ),
                 margen_izquierdo,
-                y_base,
-                width=5.45 * cm,
-                height=1.95 * cm,
+                alto_pagina - 2.65 * cm,
+                width=4.65 * cm,
+                height=1.75 * cm,
                 preserveAspectRatio=True,
                 mask="auto",
                 anchor="sw",
@@ -497,80 +522,84 @@ def _dibujar_encabezado(
             ValueError,
         ) as error:
             logger.warning(
-                "No se pudo cargar el logo de Aseos La Perfección: %s",
+                "No se pudo cargar el logo de "
+                "Aseos La Perfección con NIT: %s",
                 error,
             )
     else:
         logger.warning(
-            "No se encontró o no se pudo preparar "
-            "LOGO_EMPRESA.jpeg."
+            "No se encontró LOGO_EMPRESA_NIT.png."
         )
 
-    # ========================================================
-    # LOGO ISSA
-    # ========================================================
+    centro_x = ancho_pagina / 2
 
-    if _imagen_disponible(
-        RUTA_LOGO_ISSA
-    ):
-        try:
-            canvas.drawImage(
-                ImageReader(
-                    str(RUTA_LOGO_ISSA)
-                ),
-                margen_izquierdo + 6.00 * cm,
-                y_base + 0.12 * cm,
-                width=1.85 * cm,
-                height=1.55 * cm,
-                preserveAspectRatio=True,
-                mask="auto",
-                anchor="sw",
-            )
-        except (
-            OSError,
-            TypeError,
-            ValueError,
-        ) as error:
-            logger.warning(
-                "No se pudo cargar el logo ISSA: %s",
-                error,
-            )
+    canvas.setFillColor("#111111")
+    canvas.setFont(
+        "Helvetica",
+        4.4,
+    )
 
-    # ========================================================
-    # LOGOS ICONTEC / IQNET
-    # ========================================================
+    canvas.drawCentredString(
+        centro_x,
+        1.43 * cm,
+        (
+            "TECNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, "
+            "UNIVERSIDADES, CENTROS COMERCIALES, CENTRO DE RECREACION,"
+        ),
+    )
 
-    if _imagen_disponible(
-        RUTA_LOGO_CERTIFICACIONES
-    ):
-        try:
-            canvas.drawImage(
-                ImageReader(
-                    str(
-                        RUTA_LOGO_CERTIFICACIONES
-                    )
-                ),
-                margen_izquierdo + 8.10 * cm,
-                y_base - 0.02 * cm,
-                width=3.25 * cm,
-                height=1.95 * cm,
-                preserveAspectRatio=True,
-                mask="auto",
-                anchor="sw",
-            )
-        except (
-            OSError,
-            TypeError,
-            ValueError,
-        ) as error:
-            logger.warning(
-                "No se pudieron cargar los logos de certificaciones: %s",
-                error,
-            )
+    canvas.drawCentredString(
+        centro_x,
+        1.27 * cm,
+        (
+            "EDIFICIOS (OFICINAS Y VIVIENDA), HOSPITALES, SUPERMERCADOS, "
+            "LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS."
+        ),
+    )
+
+    canvas.setStrokeColor("#111111")
+    canvas.setLineWidth(0.35)
+    canvas.line(
+        margen_izquierdo,
+        1.14 * cm,
+        ancho_pagina - documento.rightMargin,
+        1.14 * cm,
+    )
+
+    canvas.setFillColor("#4B5563")
+    canvas.setFont(
+        "Helvetica",
+        6.1,
+    )
+    canvas.drawCentredString(
+        centro_x,
+        0.88 * cm,
+        (
+            "Calle 4 Bis No. 53C-50 Bogotá, D.C. - Colombia "
+            "- PBX: 4204893"
+        ),
+    )
+
+    canvas.setFillColor("#2A6EBB")
+    canvas.setFont(
+        "Helvetica",
+        5.7,
+    )
+    canvas.drawCentredString(
+        centro_x,
+        0.62 * cm,
+        (
+            "dcomercial@aseoslaperfeccion.com - "
+            "comercial2@aseoslaperfeccion.com"
+        ),
+    )
+    canvas.drawCentredString(
+        centro_x,
+        0.39 * cm,
+        "www.aseoslaperfeccion.com",
+    )
 
     canvas.restoreState()
-
-
 
 def _crear_bloque_firma(
     estilos,
@@ -636,14 +665,27 @@ def _crear_estilos():
 
     estilos.add(
         ParagraphStyle(
+            name="CartaTitulo",
+            parent=estilos["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=10.5,
+            leading=12.5,
+            alignment=TA_CENTER,
+            textColor="#111111",
+            spaceAfter=4,
+        )
+    )
+
+    estilos.add(
+        ParagraphStyle(
             name="CartaTexto",
             parent=estilos["Normal"],
             fontName="Helvetica",
-            fontSize=9.5,
-            leading=13,
+            fontSize=9.2,
+            leading=12,
             alignment=TA_JUSTIFY,
             textColor="#111111",
-            spaceAfter=10,
+            spaceAfter=8,
         )
     )
 
@@ -652,8 +694,8 @@ def _crear_estilos():
             name="CartaTextoIzquierda",
             parent=estilos["Normal"],
             fontName="Helvetica",
-            fontSize=9.5,
-            leading=12,
+            fontSize=9.2,
+            leading=11.2,
             alignment=TA_LEFT,
             textColor="#111111",
         )
@@ -664,8 +706,8 @@ def _crear_estilos():
             name="CartaDatosTrabajador",
             parent=estilos["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=9.5,
-            leading=11,
+            fontSize=9.2,
+            leading=11.2,
             alignment=TA_LEFT,
             textColor="#111111",
         )
@@ -673,25 +715,61 @@ def _crear_estilos():
 
     estilos.add(
         ParagraphStyle(
-            name="CartaReferencia",
+            name="CartaSeccion",
             parent=estilos["Normal"],
-            fontName="Helvetica-BoldOblique",
+            fontName="Helvetica-Bold",
             fontSize=9.5,
             leading=12,
             alignment=TA_LEFT,
             textColor="#111111",
-            leftIndent=4.2 * cm,
-            spaceAfter=12,
+            leftIndent=0.35 * cm,
+            spaceAfter=8,
         )
     )
 
     estilos.add(
         ParagraphStyle(
-            name="CartaFirma",
+            name="CartaSupervisor",
             parent=estilos["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=9,
+            fontSize=9.2,
             leading=11,
+            alignment=TA_LEFT,
+            textColor="#111111",
+        )
+    )
+
+    estilos.add(
+        ParagraphStyle(
+            name="CartaNotificacionElectronica",
+            parent=estilos["Normal"],
+            fontName="Helvetica",
+            fontSize=8.2,
+            leading=10,
+            alignment=TA_RIGHT,
+            textColor="#444444",
+        )
+    )
+
+    estilos.add(
+        ParagraphStyle(
+            name="CartaAsuntoEtiqueta",
+            parent=estilos["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=9.2,
+            leading=11.2,
+            alignment=TA_LEFT,
+            textColor="#111111",
+        )
+    )
+
+    estilos.add(
+        ParagraphStyle(
+            name="CartaAsuntoTexto",
+            parent=estilos["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=9.2,
+            leading=11.6,
             alignment=TA_LEFT,
             textColor="#111111",
         )
@@ -708,18 +786,10 @@ def generar_carta_citacion_descargos_pdf(
     db: Session,
     id_proceso: int,
 ) -> BytesIO:
-    """
-    Genera la carta oficial de citación a diligencia
-    de descargos para citaciones presenciales o virtuales.
-    """
-
     proceso = (
-        db.query(
-            ProcesoDisciplinario
-        )
+        db.query(ProcesoDisciplinario)
         .filter(
-            ProcesoDisciplinario
-            .IdProcesoDisciplinario
+            ProcesoDisciplinario.IdProcesoDisciplinario
             == id_proceso
         )
         .first()
@@ -729,22 +799,15 @@ def generar_carta_citacion_descargos_pdf(
         raise HTTPException(
             status_code=404,
             detail={
-                "mensaje": (
-                    "Proceso disciplinario "
-                    "no encontrado."
-                ),
-                "IdProcesoDisciplinario":
-                    id_proceso,
+                "mensaje": "Proceso disciplinario no encontrado.",
+                "IdProcesoDisciplinario": id_proceso,
             },
         )
 
     trabajador = (
-        db.query(
-            RegistroPersonal
-        )
+        db.query(RegistroPersonal)
         .filter(
-            RegistroPersonal
-            .IdRegistroPersonal
+            RegistroPersonal.IdRegistroPersonal
             == proceso.IdRegistroPersonal
         )
         .first()
@@ -764,18 +827,14 @@ def generar_carta_citacion_descargos_pdf(
         )
 
     citacion = (
-        db.query(
-            CitacionProcesoDisciplinario
-        )
+        db.query(CitacionProcesoDisciplinario)
         .filter(
-            CitacionProcesoDisciplinario
-            .IdProcesoDisciplinario
+            CitacionProcesoDisciplinario.IdProcesoDisciplinario
             == id_proceso
         )
         .order_by(
             CitacionProcesoDisciplinario
-            .IdCitacionProcesoDisciplinario
-            .desc()
+            .IdCitacionProcesoDisciplinario.desc()
         )
         .first()
     )
@@ -788,21 +847,22 @@ def generar_carta_citacion_descargos_pdf(
                     "El proceso disciplinario "
                     "no tiene una citación registrada."
                 ),
-                "IdProcesoDisciplinario":
-                    id_proceso,
+                "IdProcesoDisciplinario": id_proceso,
             },
         )
 
-    modalidad = str(
-        citacion.Modalidad or ""
-    ).strip().upper()
+    modalidad = _texto(
+        getattr(
+            citacion,
+            "Modalidad",
+            None,
+        )
+    ).upper()
 
-    modalidades_permitidas = {
+    if modalidad not in {
         "PRESENCIAL",
         "VIRTUAL",
-    }
-
-    if modalidad not in modalidades_permitidas:
+    }:
         raise HTTPException(
             status_code=409,
             detail={
@@ -811,7 +871,7 @@ def generar_carta_citacion_descargos_pdf(
                     "citaciones presenciales o virtuales."
                 ),
                 "Modalidad":
-                    citacion.Modalidad,
+                    getattr(citacion, "Modalidad", None),
             },
         )
 
@@ -844,69 +904,116 @@ def generar_carta_citacion_descargos_pdf(
         )
     )
 
-    cargo = _obtener_cargo_trabajador(
-        db=db,
-        id_registro_personal=(
-            trabajador.IdRegistroPersonal
-        ),
+    correo_trabajador = _texto(
+        getattr(
+            trabajador,
+            "Email",
+            None,
+        )
     )
 
-    cliente = _texto(
-        citacion.Cliente
+    cargo, sede_asignacion = (
+        _obtener_datos_laborales_trabajador(
+            db=db,
+            id_registro_personal=(
+                trabajador.IdRegistroPersonal
+            ),
+        )
     )
 
-    sede = _texto(
-        citacion.Sede
+    sede_citacion = _texto(
+        getattr(
+            citacion,
+            "Sede",
+            None,
+        )
+    )
+
+    sede = (
+        sede_asignacion
+        or sede_citacion
+    )
+
+    lugar = _texto(
+        getattr(
+            citacion,
+            "LugarCitacion",
+            None,
+        )
     )
 
     supervisor = _texto(
-        citacion.SupervisorReporta
+        getattr(
+            citacion,
+            "SupervisorReporta",
+            None,
+        )
     )
 
-    motivo = _formatear_motivo(
-        citacion.MotivoCitacion
+    cargo_supervisor = _texto(
+        getattr(
+            citacion,
+            "CargoSupervisorReporta",
+            None,
+        )
     )
 
     relato = _obtener_relato_valido(
         citacion=citacion,
     )
 
-    lugar = _texto(
-        citacion.LugarCitacion
+    enunciacion_pruebas = _texto(
+        getattr(
+            citacion,
+            "EnunciacionPruebas",
+            None,
+        )
     )
 
     fecha_citacion = _fecha(
-        citacion.FechaCitacion
+        getattr(
+            citacion,
+            "FechaCitacion",
+            None,
+        )
     )
 
     hora_citacion = _hora(
-        citacion.HoraCitacion
+        getattr(
+            citacion,
+            "HoraCitacion",
+            None,
+        )
+    )
+
+    fecha_hora_generacion = datetime.now(
+        ZONA_HORARIA_COLOMBIA
     )
 
     fecha_generacion = (
-        datetime.now(
-            ZONA_HORARIA_COLOMBIA
-        )
-        .strftime(
+        fecha_hora_generacion.strftime(
             "%d/%m/%Y"
         )
     )
 
-    if modalidad == "PRESENCIAL" and not lugar:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "mensaje": (
-                    "La citación presencial no tiene "
-                    "lugar definido."
-                ),
-                "campo": "LugarCitacion",
-                "Modalidad": modalidad,
-            },
+    fecha_generacion_larga = _fecha_larga(
+        fecha_hora_generacion
+    )
+
+    hora_generacion = _hora(
+        fecha_hora_generacion
+    )
+
+    if modalidad == "PRESENCIAL":
+        lugar_medio = (
+            lugar
+            or sede
+            or "Presencial"
         )
+    else:
+        lugar_medio = "Virtual"
 
     estilos = _crear_estilos()
-
     buffer = BytesIO()
 
     documento_pdf = SimpleDocTemplate(
@@ -914,336 +1021,412 @@ def generar_carta_citacion_descargos_pdf(
         pagesize=letter,
         leftMargin=2.05 * cm,
         rightMargin=2.05 * cm,
-        topMargin=3.85 * cm,
-        bottomMargin=1.5 * cm,
+        topMargin=3.35 * cm,
+        bottomMargin=1.75 * cm,
         title=(
-            "Citación a diligencia "
-            "de descargos"
+            "Comunicación formal de apertura de "
+            "procedimiento disciplinario laboral y "
+            "citación a diligencia de descargos"
         ),
         author=NOMBRE_EMPRESA,
         subject=(
-            "Citación a diligencia "
-            "de descargos"
+            "Apertura de procedimiento disciplinario "
+            "y citación a diligencia de descargos"
         ),
     )
 
     contenido = []
 
-    # ========================================================
-    # FECHA
-    # ========================================================
+    contenido.append(
+        Paragraph(
+            (
+                "COMUNICACIÓN FORMAL DE APERTURA DE "
+                "PROCEDIMIENTO DISCIPLINARIO<br/>"
+                "LABORAL Y CITACIÓN A DILIGENCIA DE DESCARGOS"
+            ),
+            estilos["CartaTitulo"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.68 * cm))
 
     contenido.append(
         Paragraph(
             (
-                f"{escape(CIUDAD_CARTA)}, "
-                f"<b>{fecha_generacion}</b>"
+                "Bogotá, "
+                f"{escape(fecha_generacion_larga)}."
             ),
-            estilos[
-                "CartaTextoIzquierda"
-            ],
+            estilos["CartaTextoIzquierda"],
         )
     )
 
-    contenido.append(
-        Spacer(
-            1,
-            0.55 * cm,
-        )
-    )
-
-    # ========================================================
-    # DATOS DEL TRABAJADOR
-    # ========================================================
+    contenido.append(Spacer(1, 0.42 * cm))
 
     contenido.append(
         Paragraph(
             "Señor(a)",
-            estilos[
-                "CartaTextoIzquierda"
-            ],
+            estilos["CartaDatosTrabajador"],
         )
     )
 
     contenido.append(
         Paragraph(
-            escape(
-                nombre_completo.upper()
-            ),
-            estilos[
-                "CartaDatosTrabajador"
-            ],
+            escape(nombre_completo.upper()),
+            estilos["CartaDatosTrabajador"],
         )
     )
 
     contenido.append(
         Paragraph(
             (
-                "CC "
+                "<b>DOC. DE ID Nº:</b> "
                 f"{escape(numero_identificacion)}"
             ),
-            estilos[
-                "CartaDatosTrabajador"
-            ],
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "<b>Cargo:</b> "
+                f"{escape(cargo)}"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "<b>Sede o lugar de trabajo:</b> "
+                f"{escape(sede or lugar)}"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "<b>Email:</b> "
+                f"{escape(correo_trabajador or 'No registrado')}"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.78 * cm))
+
+    tabla_asunto = Table(
+        [
+            [
+                Paragraph(
+                    "Asunto:",
+                    estilos["CartaAsuntoEtiqueta"],
+                ),
+                Paragraph(
+                    (
+                        "COMUNICACIÓN FORMAL DE APERTURA DE PROCESO "
+                        "DISCIPLINARIO<br/>"
+                        "Y CITACIÓN A DILIGENCIA DE DESCARGOS "
+                        "(LEY 2466 DE 2025)."
+                    ),
+                    estilos["CartaAsuntoTexto"],
+                ),
+            ]
+        ],
+        colWidths=[1.85 * cm, 13.15 * cm],
+        hAlign="LEFT",
+    )
+
+    tabla_asunto.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+
+    contenido.append(tabla_asunto)
+
+    contenido.append(Spacer(1, 0.58 * cm))
+
+    contenido.append(
+        Paragraph(
+            "Estimado(a) colaborador(a),",
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.22 * cm))
+
+    contenido.append(
+        Paragraph(
+            (
+                "En nombre de <b>ASEOS LA PERFECCIÓN S.A.S.</b>, "
+                "le comunicamos formalmente la apertura de un "
+                "procedimiento disciplinario laboral, con fundamento "
+                "en los hechos, conductas u omisiones que se describen "
+                "en la presente comunicación."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "La apertura de este procedimiento no implica que se "
+                "haya establecido previamente su responsabilidad ni "
+                "constituye una sanción anticipada. Su finalidad es "
+                "esclarecer los hechos y garantizarle la oportunidad "
+                "de ejercer plenamente sus derechos de defensa y "
+                "contradicción."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Esta actuación se adelantará con observancia de los "
+                "principios de dignidad, presunción de inocencia, "
+                "debido proceso, proporcionalidad, derecho de defensa, "
+                "contradicción y controversia de las pruebas, "
+                "intimidad, lealtad y buena fe, imparcialidad, respeto "
+                "al buen nombre y a la honra, de conformidad con el "
+                "artículo 115 del Código Sustantivo del Trabajo, "
+                "modificado por el artículo 7 de la Ley 2466 de 2025."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "1.&nbsp;&nbsp;&nbsp;HECHOS, CONDUCTAS U OMISIONES "
+                "OBJETO DE INVESTIGACIÓN"
+            ),
+            estilos["CartaSeccion"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Dando cumplimiento al numeral 2º de la citada ley, "
+                "se le comunica por escrito que los hechos que motivan "
+                "la apertura del presente procedimiento disciplinario "
+                "son los siguientes:"
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            f"<b>{_texto_html(relato)}</b>",
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.28 * cm))
+
+    contenido.append(
+        Paragraph(
+            (
+                "Los hechos anteriormente descritos tienen carácter "
+                "presunto y serán objeto de verificación y valoración "
+                "dentro del procedimiento disciplinario."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(PageBreak())
+
+    contenido.append(
+        Paragraph(
+            "2.&nbsp;&nbsp;&nbsp;TRASLADO DE PRUEBAS",
+            estilos["CartaSeccion"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "En cumplimiento del numeral 3º del artículo 115 del "
+                "C.S.T., se le hace entrega formal y traslado de todas "
+                "y cada una de las pruebas que fundamentan los hechos "
+                "descritos:"
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                f"<b>{_texto_html(enunciacion_pruebas or 'Sin enunciación de pruebas registrada.')}</b>"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.45 * cm))
+
+    contenido.append(
+        Paragraph(
+            (
+                "3.&nbsp;&nbsp;&nbsp;TÉRMINO PARA LA DEFENSA Y "
+                "CITACIÓN A DILIGENCIA"
+            ),
+            estilos["CartaSeccion"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Según el numeral 4º de la norma vigente, usted cuenta "
+                "con un término de cinco (5) días hábiles contados a "
+                "partir del recibo de esta citación para que pueda "
+                "manifestarse frente a los motivos del proceso, "
+                "controvertir las pruebas, allegar las que considere "
+                "necesarias para su defensa que tiendan a justificar, "
+                "atenuar, o demostrar su no participación en los hechos, "
+                "y solicitar, de manera concreta y justificada, la "
+                "práctica de pruebas relacionadas con los hechos "
+                "investigados."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Sin perjuicio del término anteriormente indicado, se "
+                "le cita a diligencia de descargos con el fin de que "
+                "pueda rendir verbalmente su versión sobre los hechos "
+                "objeto de investigación, presentar las explicaciones "
+                "que considere pertinentes, controvertir las pruebas "
+                "trasladadas y aportar o solicitar aquellas que estime "
+                "necesarias para el ejercicio de su derecho de defensa."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "La diligencia de descargos de forma verbal se llevará "
+                "a cabo:"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.15 * cm))
+
+    contenido.append(
+        Paragraph(
+            (
+                "•&nbsp;&nbsp;<b>Fecha:</b> "
+                f"{escape(fecha_citacion)}<br/>"
+                "•&nbsp;&nbsp;<b>Hora:</b> "
+                f"{escape(hora_citacion)}<br/>"
+                "•&nbsp;&nbsp;<b>Lugar / Medio:</b> "
+                f"{escape(lugar_medio)}"
+            ),
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.28 * cm))
+
+    contenido.append(
+        Paragraph(
+            (
+                "En la referida diligencia podrá aportar las pruebas "
+                "con las que ya cuente o si aún le quedan días de los "
+                "5 que la ley le concede podrá manifestar su intención "
+                "de que utilizará el tiempo restante para aportar más "
+                "pruebas que permita exonerarla de responsabilidad."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Si lo desea, podrá asistir a la diligencia en compañía "
+                "de uno (1) o dos (2) compañeros de trabajo."
+            ),
+            estilos["CartaTexto"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.25 * cm))
+
+    contenido.append(
+        Paragraph(
+            "Atentamente,",
+            estilos["CartaTextoIzquierda"],
+        )
+    )
+
+    contenido.append(Spacer(1, 0.50 * cm))
+
+    contenido.append(
+        Paragraph(
+            escape(
+                supervisor.upper()
+                if supervisor
+                else "SUPERVISOR(A) NO REGISTRADO(A)"
+            ),
+            estilos["CartaSupervisor"],
         )
     )
 
     contenido.append(
         Paragraph(
             escape(
-                cargo.lower()
-                if cargo
-                else ""
+                cargo_supervisor
+                if cargo_supervisor
+                else "Cargo no registrado"
             ),
-            estilos[
-                "CartaDatosTrabajador"
-            ],
+            estilos["CartaSupervisor"],
         )
     )
 
-    cliente_encabezado = (
-        cliente
-        if cliente
-        else sede
-    )
-
-    contenido.append(
-        Paragraph(
-            escape(
-                cliente_encabezado.lower()
-            ),
-            estilos[
-                "CartaDatosTrabajador"
-            ],
-        )
-    )
-
-    contenido.append(
-        Paragraph(
-            "Bogotá",
-            estilos[
-                "CartaTextoIzquierda"
-            ],
-        )
-    )
-
-    contenido.append(
-        Spacer(
-            1,
-            0.35 * cm,
-        )
-    )
-
-    # ========================================================
-    # REFERENCIA
-    # ========================================================
+    contenido.append(Spacer(1, 0.55 * cm))
 
     contenido.append(
         Paragraph(
             (
-                "Ref.: Citación a Diligencia "
-                "de descargos por presunto "
-                "incumplimiento."
+                "<b>Notificación electrónica</b><br/>"
+                f"{escape(correo_trabajador or 'Correo no registrado')}<br/>"
+                f"{escape(fecha_generacion)} - "
+                f"{escape(hora_generacion)}"
             ),
-            estilos[
-                "CartaReferencia"
-            ],
-        )
-    )
-
-    contenido.append(
-        Paragraph(
-            "Respetado(a) Señor(a)",
-            estilos[
-                "CartaTextoIzquierda"
-            ],
-        )
-    )
-
-    contenido.append(
-        Spacer(
-            1,
-            0.2 * cm,
-        )
-    )
-
-    # ========================================================
-    # PÁRRAFO 1
-    # ========================================================
-
-    parrafo_apertura = (
-        "Mediante el presente documento, "
-        "nos permitimos informarle que la compañía "
-        "ha hecho apertura formal de proceso "
-        "disciplinario fundamentado en el conocimiento "
-        "sobre el presunto incumplimiento de sus "
-        "obligaciones laborales, "
-        f"<b>{escape(motivo)}</b>, "
-        "perteneciente al cliente "
-        f"<b>{escape(cliente)}</b>."
-    )
-
-    contenido.append(
-        Paragraph(
-            parrafo_apertura,
-            estilos[
-                "CartaTexto"
-            ],
-        )
-    )
-
-    # ========================================================
-    # PÁRRAFO 2 - HECHOS
-    # ========================================================
-
-    parrafo_hechos = (
-        f"<b>{_texto_html(relato)}</b>"
-    )
-
-    if supervisor:
-        parrafo_hechos += (
-            ", situación reportada por el supervisor "
-            "que informa el caso, "
-            f"<b>{escape(supervisor)}</b>, "
-            "para la correspondiente gestión disciplinaria."
-        )
-
-    contenido.append(
-        Paragraph(
-            parrafo_hechos,
-            estilos[
-                "CartaTexto"
-            ],
-        )
-    )
-
-    # ========================================================
-    # PÁRRAFO 3 - PROGRAMACIÓN DE LA CITACIÓN
-    # ========================================================
-
-    if modalidad == "VIRTUAL":
-        parrafo_programacion = (
-            "Por lo anterior, le solicitamos conectarse "
-            "a la diligencia de descargos de manera "
-            "<b>virtual</b>, "
-            f"el día <b>{escape(fecha_citacion)}</b> "
-            f"a las <b>{escape(hora_citacion)}</b>. "
-            "El enlace de conexión será suministrado por "
-            "Relaciones Laborales a través de WhatsApp interno "
-            "antes de la diligencia. "
-            "La conexión deberá realizarse de manera puntual "
-            "con el fin de rendir diligencia de descargos "
-            "por los hechos descritos anteriormente; "
-            "de conformidad con el Código Sustantivo "
-            "del Trabajo y el Reglamento Interno "
-            "de la Compañía."
-        )
-    else:
-        parrafo_programacion = (
-            "Por lo anterior, le solicitamos presentarse "
-            "en "
-            f"<b>{escape(lugar)}</b>, "
-            f"el día <b>{escape(fecha_citacion)}</b> "
-            f"a las <b>{escape(hora_citacion)}</b>, "
-            "con el fin de rendir diligencia de descargos "
-            "por los hechos descritos anteriormente; "
-            "de conformidad con el Código Sustantivo "
-            "del Trabajo y el Reglamento Interno "
-            "de la Compañía."
-        )
-
-    contenido.append(
-        Paragraph(
-            parrafo_programacion,
-            estilos[
-                "CartaTexto"
-            ],
-        )
-    )
-
-    # ========================================================
-    # TEXTO LEGAL
-    # ========================================================
-
-    contenido.append(
-        Paragraph(
-            (
-                "De esta forma, se da apertura formal "
-                "a la investigación disciplinaria, "
-                "garantizando su derecho a la defensa "
-                "y al debido proceso. En esta diligencia "
-                "Usted podrá controvertir las pruebas "
-                "que se tienen y podrá aportar las que "
-                "considere necesarias, y podrá estar "
-                "acompañado(a) de uno o dos compañeros "
-                "de trabajo que serán testigos del "
-                "proceso disciplinario."
-            ),
-            estilos[
-                "CartaTexto"
-            ],
-        )
-    )
-
-    contenido.append(
-        Paragraph(
-            (
-                "En caso de no asistir a la diligencia "
-                "programada deberá aportar inmediatamente "
-                "la correspondiente justificación y en "
-                "caso de no presentarse ni allegar "
-                "justificación dentro de los tres (3) "
-                "días a la fecha de la diligencia, "
-                "entenderemos que es su decisión no "
-                "ejercer su derecho de defensa dentro "
-                "de esta diligencia y daremos por cierto "
-                "la conducta."
-            ),
-            estilos[
-                "CartaTexto"
-            ],
-        )
-    )
-
-    contenido.append(
-        Spacer(
-            1,
-            0.1 * cm,
-        )
-    )
-
-    contenido.append(
-        Paragraph(
-            "Sin otro particular,",
-            estilos[
-                "CartaTextoIzquierda"
-            ],
-        )
-    )
-
-    contenido.append(
-        Spacer(
-            1,
-            0.65 * cm,
-        )
-    )
-
-    # ========================================================
-    # FIRMA
-    # ========================================================
-
-    contenido.extend(
-        _crear_bloque_firma(
-            estilos
+            estilos["CartaNotificacionElectronica"],
         )
     )
 
     documento_pdf.build(
         contenido,
-        onFirstPage=
-            _dibujar_encabezado,
-        onLaterPages=
-            _dibujar_encabezado,
+        onFirstPage=_dibujar_encabezado,
+        onLaterPages=_dibujar_encabezado,
     )
 
     buffer.seek(0)
