@@ -7,7 +7,7 @@ from xml.sax.saxutils import escape
 
 from PIL import Image as PILImage
 from fastapi import HTTPException
-from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
+from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
@@ -697,6 +697,18 @@ def _crear_estilos():
         )
     )
 
+    estilos.add(
+        ParagraphStyle(
+            name="CartaNotificacionElectronica",
+            parent=estilos["Normal"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            leading=10.5,
+            alignment=TA_RIGHT,
+            textColor="#444444",
+        )
+    )
+
     return estilos
 
 
@@ -844,6 +856,14 @@ def generar_carta_citacion_descargos_pdf(
         )
     )
 
+    correo_trabajador = _texto(
+        getattr(
+            trabajador,
+            "Email",
+            None,
+        )
+    )
+
     cargo = _obtener_cargo_trabajador(
         db=db,
         id_registro_personal=(
@@ -883,13 +903,18 @@ def generar_carta_citacion_descargos_pdf(
         citacion.HoraCitacion
     )
 
+    fecha_hora_generacion = datetime.now(
+        ZONA_HORARIA_COLOMBIA
+    )
+
     fecha_generacion = (
-        datetime.now(
-            ZONA_HORARIA_COLOMBIA
-        )
-        .strftime(
+        fecha_hora_generacion.strftime(
             "%d/%m/%Y"
         )
+    )
+
+    hora_generacion = _hora(
+        fecha_hora_generacion
     )
 
     if modalidad == "PRESENCIAL" and not lugar:
@@ -1235,6 +1260,37 @@ def generar_carta_citacion_descargos_pdf(
     contenido.extend(
         _crear_bloque_firma(
             estilos
+        )
+    )
+
+    # ========================================================
+    # NOTIFICACIÓN ELECTRÓNICA
+    # ========================================================
+
+    contenido.append(
+        Spacer(
+            1,
+            0.35 * cm,
+        )
+    )
+
+    correo_notificacion = (
+        correo_trabajador
+        if correo_trabajador
+        else "Correo no registrado"
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "<b>Notificación electrónica</b><br/>"
+                f"{escape(correo_notificacion)}<br/>"
+                f"{escape(fecha_generacion)} - "
+                f"{escape(hora_generacion)}"
+            ),
+            estilos[
+                "CartaNotificacionElectronica"
+            ],
         )
     )
 
