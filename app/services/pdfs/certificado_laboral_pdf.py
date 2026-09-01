@@ -13,7 +13,7 @@ from reportlab.lib.enums import TA_JUSTIFY
 BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
-LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA.jpeg"
+LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA_NIT.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
