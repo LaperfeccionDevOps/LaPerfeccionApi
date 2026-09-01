@@ -67,7 +67,7 @@ RUTA_LOGO_EMPRESA = (
     APP_DIR
     / "assets"
     / "comunicaciones"
-    / "LOGO_EMPRESA.jpeg"
+    / "LOGO_EMPRESA_NIT.png"
 )
 
 RUTA_LOGO_ISSA = (
@@ -1750,6 +1750,117 @@ def _fecha_espanol(valor) -> str:
     return _texto_seguro(valor)
 
 
+def _numero_dia_en_letras(numero: int) -> str:
+    dias = {
+        1: "uno",
+        2: "dos",
+        3: "tres",
+        4: "cuatro",
+        5: "cinco",
+        6: "seis",
+        7: "siete",
+        8: "ocho",
+        9: "nueve",
+        10: "diez",
+        11: "once",
+        12: "doce",
+        13: "trece",
+        14: "catorce",
+        15: "quince",
+        16: "dieciséis",
+        17: "diecisiete",
+        18: "dieciocho",
+        19: "diecinueve",
+        20: "veinte",
+        21: "veintiuno",
+        22: "veintidós",
+        23: "veintitrés",
+        24: "veinticuatro",
+        25: "veinticinco",
+        26: "veintiséis",
+        27: "veintisiete",
+        28: "veintiocho",
+        29: "veintinueve",
+        30: "treinta",
+        31: "treinta y uno",
+    }
+
+    return dias.get(
+        int(numero),
+        str(numero),
+    )
+
+
+def _fecha_formal_acta_descargos(valor) -> str:
+    if not valor:
+        return ""
+
+    if isinstance(valor, datetime):
+        valor = valor.date()
+
+    if not isinstance(valor, date):
+        return _texto_seguro(valor)
+
+    meses = (
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    )
+
+    dia_letras = _numero_dia_en_letras(
+        valor.day
+    )
+
+    return (
+        f"{dia_letras} ({valor.day}) días del mes de "
+        f"{meses[valor.month - 1]} de {valor.year}"
+    )
+
+
+def _formatear_identificacion_acta(valor) -> str:
+    texto_identificacion = _texto_seguro(
+        valor
+    )
+
+    if not texto_identificacion:
+        return ""
+
+    solo_digitos = "".join(
+        caracter
+        for caracter in texto_identificacion
+        if caracter.isdigit()
+    )
+
+    if not solo_digitos:
+        return texto_identificacion
+
+    try:
+        return f"{int(solo_digitos):,}".replace(
+            ",",
+            ".",
+        )
+    except ValueError:
+        return texto_identificacion
+
+
+def _texto_pdf_seguro(valor) -> str:
+    return (
+        _texto_seguro(valor)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def _obtener_valor_modelo(objeto, *nombres):
     for nombre in nombres:
         valor = getattr(objeto, nombre, None)
@@ -2009,56 +2120,108 @@ def _dibujar_encabezado_carta_descargos(
     documento,
 ):
     """
-    Encabezado corporativo del Acta de Descargos.
+    Encabezado y pie institucional del Acta de Descargos.
 
-    Usa exactamente los recursos gráficos aprobados para el
-    PDF de Paz y Salvo:
-    - Aseos La Perfección.
-    - ICONTEC / IQNET.
-    - ISSA.
-
-    Se ejecuta tanto en la primera página como en todas las
-    páginas posteriores, incluidas las evidencias.
+    Reglas del formato vigente:
+    - Solo se muestra el logo de Aseos La Perfección con NIT.
+    - No se muestran logos de ISSA, ICONTEC ni IQNET.
+    - El pie de página conserva la información institucional del
+      formato suministrado por Relaciones Laborales.
     """
 
     canvas.saveState()
 
-    # Área superior disponible del documento.
+    # ========================================================
+    # ENCABEZADO - SOLO ASEOS LA PERFECCIÓN CON NIT
+    # ========================================================
+
     y_base = LETTER[1] - 2.55 * cm
 
-    # 1. Aseos La Perfección.
     _dibujar_logo_canvas(
         canvas=canvas,
         ruta=RUTA_LOGO_EMPRESA,
         x=1.85 * cm,
         y=y_base,
-        ancho_maximo=6.25 * cm,
+        ancho_maximo=5.75 * cm,
         alto_maximo=1.90 * cm,
-        limpiar_fondo=True,
+        limpiar_fondo=False,
     )
 
-    # 2. Recurso combinado ICONTEC / IQNET.
-    _dibujar_logo_canvas(
-        canvas=canvas,
-        ruta=RUTA_LOGO_CERTIFICACIONES,
-        x=8.20 * cm,
-        y=y_base + 0.10 * cm,
-        ancho_maximo=3.00 * cm,
-        alto_maximo=1.60 * cm,
+    # ========================================================
+    # PIE DE PÁGINA
+    # ========================================================
+
+    ancho_pagina = LETTER[0]
+    centro_x = ancho_pagina / 2
+
+    canvas.setFillColor(colors.black)
+
+    # Texto de servicios, separado en dos líneas para evitar que quede
+    # comprimido o ilegible como en la versión anterior.
+    canvas.setFont(
+        "Helvetica",
+        4.6,
     )
 
-    # 3. ISSA inmediatamente después de las certificaciones.
-    _dibujar_logo_canvas(
-        canvas=canvas,
-        ruta=RUTA_LOGO_ISSA,
-        x=11.25 * cm,
-        y=y_base + 0.18 * cm,
-        ancho_maximo=1.75 * cm,
-        alto_maximo=1.38 * cm,
+    canvas.drawCentredString(
+        centro_x,
+        1.50 * cm,
+        (
+            "TECNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, "
+            "UNIVERSIDADES, CENTROS COMERCIALES, CENTRO DE RECREACION,"
+        ),
+    )
+
+    canvas.drawCentredString(
+        centro_x,
+        1.34 * cm,
+        (
+            "EDIFICIOS (OFICINAS Y VIVIENDA), HOSPITALES, SUPERMERCADOS, "
+            "LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS."
+        ),
+    )
+
+    canvas.setStrokeColor(colors.black)
+    canvas.setLineWidth(0.35)
+
+    canvas.line(
+        1.85 * cm,
+        1.20 * cm,
+        ancho_pagina - 1.85 * cm,
+        1.20 * cm,
+    )
+
+    canvas.setFillColor(colors.HexColor("#4B5563"))
+    canvas.setFont(
+        "Helvetica",
+        6.2,
+    )
+
+    canvas.drawCentredString(
+        centro_x,
+        0.92 * cm,
+        "Calle 4 Bis No. 53C-50 Bogotá, D.C. - Colombia - PBX: 4204893",
+    )
+
+    canvas.setFillColor(colors.HexColor("#2A6EBB"))
+    canvas.setFont(
+        "Helvetica",
+        5.8,
+    )
+
+    canvas.drawCentredString(
+        centro_x,
+        0.66 * cm,
+        "dcomercial@aseoslaperfeccion.com - comercial2@aseoslaperfeccion.com",
+    )
+
+    canvas.drawCentredString(
+        centro_x,
+        0.43 * cm,
+        "www.aseoslaperfeccion.com",
     )
 
     canvas.restoreState()
-
 
 def _crear_firma_yeny_pdf():
     """
@@ -2614,10 +2777,15 @@ def _generar_pdf_carta_descargos(
     evidencias: list[DocumentoProcesoDisciplinario],
 ) -> bytes:
     """
-    Genera el Acta de Descargos y trata las evidencias aportadas por
-    el trabajador de acuerdo con su formato.
+    Genera el Acta de Descargos con el formato institucional vigente y
+    conserva el tratamiento actual de las evidencias aportadas por el
+    trabajador.
 
     Reglas:
+    - El encabezado, los párrafos legales, la modalidad y el cierre se
+      generan automáticamente.
+    - La manifestación registrada por RRLL se inserta entre la apertura
+      formal de la diligencia y el cierre.
     - Imágenes: se muestran visualmente dentro del Acta.
     - PDF: se incorporan completas al final del Acta.
     - DOCX: se intenta recuperar el texto y mostrarlo en el Acta.
@@ -2634,7 +2802,7 @@ def _generar_pdf_carta_descargos(
         rightMargin=2.0 * cm,
         leftMargin=2.0 * cm,
         topMargin=3.55 * cm,
-        bottomMargin=1.8 * cm,
+        bottomMargin=1.45 * cm,
         title="Acta de Descargos",
         author="Aseos La Perfección",
     )
@@ -2647,47 +2815,6 @@ def _generar_pdf_carta_descargos(
     pdfs_evidencias = []
 
     fecha_generacion = _fecha_generacion_colombia()
-    fecha_descargo = descargo.get("FechaDescargo") or fecha_generacion
-
-    nombre_trabajador = _texto_seguro(
-        trabajador.get("NombreCompleto")
-    )
-    apellidos_trabajador = _texto_seguro(
-        trabajador.get("Apellidos")
-    )
-    documento_trabajador = _texto_seguro(
-        trabajador.get("NumeroIdentificacion")
-    )
-    cargo_trabajador = _texto_seguro(
-        trabajador.get("Cargo")
-    )
-    responsable = _texto_seguro(
-        descargo.get("ResponsableDescargo")
-    )
-
-    expediente = _texto_seguro(
-        _obtener_valor_modelo(
-            proceso,
-            "NumeroExpediente",
-            "ExpedienteDisciplinario",
-            "CodigoProceso",
-            "NumeroProceso",
-        )
-    )
-
-    if not expediente:
-        expediente = (
-            f"PD-{fecha_descargo.year}-"
-            f"{int(proceso.IdProcesoDisciplinario):06d}"
-        )
-
-    saludo = (
-        apellidos_trabajador.upper()
-        if apellidos_trabajador
-        else nombre_trabajador.upper()
-        if nombre_trabajador
-        else "TRABAJADOR"
-    )
 
     horario_agenda = _obtener_horario_agenda_descargos(
         db=db,
@@ -2696,158 +2823,334 @@ def _generar_pdf_carta_descargos(
         hora_descargo=descargo.get("HoraDescargo"),
     )
 
+    fecha_descargo = (
+        horario_agenda.get("FechaEvento")
+        or descargo.get("FechaDescargo")
+        or fecha_generacion
+    )
+
     hora_inicio = _formatear_hora_colombia(
         horario_agenda.get("HoraInicio")
+        or descargo.get("HoraDescargo")
     )
+
     hora_fin = _formatear_hora_colombia(
         horario_agenda.get("HoraFin")
     )
 
-    contenido.extend(
-        [
-            Paragraph(
-                (
-                    "Bogotá D.C., "
-                    f"{_fecha_espanol(fecha_generacion)}."
-                ),
-                estilos["izquierda"],
-            ),
-            Spacer(1, 0.55 * cm),
-            Paragraph("Señor(a):", estilos["izquierda"]),
-            Paragraph(
-                nombre_trabajador.upper(),
-                estilos["negrilla"],
-            ),
-            Paragraph(
-                f"C.C. No. {documento_trabajador}",
-                estilos["izquierda"],
-            ),
-            Paragraph(
-                f"Cargo: {cargo_trabajador}",
-                estilos["izquierda"],
-            ),
-            Spacer(1, 0.55 * cm),
-            Table(
-                [[
-                    Paragraph(
-                        "Asunto:",
-                        estilos["asunto"],
-                    ),
-                    Paragraph(
-                        (
-                            "Notificación de sanción disciplinaria "
-                            "– Suspensión disciplinaria"
-                        ),
-                        estilos["asunto"],
-                    ),
-                ]],
-                colWidths=[3.0 * cm, 12.6 * cm],
-                style=TableStyle([
-                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 2),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ]),
-            ),
-            Spacer(1, 0.55 * cm),
-            Paragraph(
-                f"Respetado(a) señor(a) {saludo}:",
-                estilos["izquierda"],
-            ),
-            Spacer(1, 0.35 * cm),
-            Paragraph(
-                (
-                    "En la fecha señalada se realiza la diligencia de "
-                    "descargos dentro del proceso disciplinario indicado. "
-                    "A continuación se deja constancia de las preguntas "
-                    "realizadas y de las respuestas manifestadas por el "
-                    "trabajador."
-                ),
-                estilos["normal"],
-            ),
-            Spacer(1, 0.45 * cm),
-            Paragraph(
-                "MANIFESTACIÓN DEL TRABAJADOR",
-                estilos["titulo"],
-            ),
-            Spacer(1, 0.30 * cm),
-        ]
+    modalidad = _texto_seguro(
+        horario_agenda.get("Modalidad")
+    ).strip().upper()
+
+    if modalidad not in {
+        "VIRTUAL",
+        "PRESENCIAL",
+    }:
+        modalidad = "PRESENCIAL"
+
+    modalidad_texto = modalidad.lower()
+
+    nombre_trabajador = _texto_seguro(
+        trabajador.get("NombreCompleto")
     )
+
+    documento_trabajador = (
+        _formatear_identificacion_acta(
+            trabajador.get(
+                "NumeroIdentificacion"
+            )
+        )
+    )
+
+    cargo_trabajador = _texto_seguro(
+        trabajador.get("Cargo")
+    )
+
+    responsable = _texto_seguro(
+        descargo.get("ResponsableDescargo")
+    )
+
+    if not responsable:
+        responsable = "Yeny Cuesto"
+
+    fecha_formal = _fecha_formal_acta_descargos(
+        fecha_descargo
+    )
+
+    nombre_trabajador_pdf = _texto_pdf_seguro(
+        nombre_trabajador.upper()
+    )
+
+    documento_trabajador_pdf = _texto_pdf_seguro(
+        documento_trabajador
+    )
+
+    cargo_trabajador_pdf = _texto_pdf_seguro(
+        cargo_trabajador.upper()
+    )
+
+    responsable_pdf = _texto_pdf_seguro(
+        responsable
+    )
+
+    responsable_mayuscula_pdf = _texto_pdf_seguro(
+        responsable.upper()
+    )
+
+    modalidad_pdf = _texto_pdf_seguro(
+        modalidad_texto
+    )
+
+    hora_inicio_pdf = _texto_pdf_seguro(
+        hora_inicio
+        or _formatear_hora_colombia(
+            descargo.get("HoraDescargo")
+        )
+        or "hora registrada en la diligencia"
+    )
+
+    # ========================================================
+    # TÍTULO
+    # ========================================================
+
+    contenido.append(
+        Paragraph(
+            (
+                "ACTA DE DESCARGOS RENDIDA POR "
+                f"{nombre_trabajador_pdf}"
+            ),
+            estilos["titulo"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.70 * cm,
+        )
+    )
+
+    # ========================================================
+    # APERTURA FORMAL
+    # ========================================================
+
+    contenido.append(
+        Paragraph(
+            (
+                "En Bogotá D. C., a los "
+                f"{_texto_pdf_seguro(fecha_formal)}, "
+                f"siendo las {hora_inicio_pdf}, comparece de manera "
+                f"{modalidad_pdf} la persona trabajadora "
+                f"<b>{nombre_trabajador_pdf}</b>, identificada con "
+                "cédula de ciudadanía número "
+                f"<b>{documento_trabajador_pdf}</b>, quien actualmente "
+                "desempeña el cargo de "
+                f"<b>{cargo_trabajador_pdf}</b>, con el propósito de "
+                "ejercer su derecho de defensa y rendir descargos respecto "
+                "de los hechos objeto de la investigación disciplinaria y "
+                "de las presuntas conductas que podrían constituir "
+                "incumplimientos de sus deberes, obligaciones o "
+                "prohibiciones laborales, de conformidad con la "
+                "comunicación de apertura del procedimiento disciplinario "
+                "que le fue notificada previamente."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.22 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "En la presente diligencia participa "
+                f"<b>{responsable_pdf}</b>, quien actúa en representación "
+                "de <b>LA EMPRESA</b>."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.22 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Se deja constancia de que la persona trabajadora fue "
+                "informada de su derecho a comparecer acompañada por hasta "
+                "dos (2) compañeros de trabajo. No obstante, manifiesta de "
+                "manera libre, expresa y voluntaria que no hará uso de esta "
+                "posibilidad y que desea continuar con la diligencia sin "
+                "acompañamiento."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.22 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "En garantía del debido proceso y de los derechos de "
+                "defensa, contradicción y presunción de inocencia, se deja "
+                "constancia de que la persona trabajadora fue informada "
+                "previamente sobre los hechos objeto de investigación, los "
+                "cargos formulados y las pruebas que sustentan el "
+                "procedimiento disciplinario. Asimismo, dichas pruebas "
+                "estuvieron a su disposición para su conocimiento y "
+                "contradicción."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.22 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Igualmente, se informa a la persona trabajadora que "
+                "durante la presente diligencia podrá exponer libremente "
+                "su versión de los hechos, formular las aclaraciones que "
+                "considere necesarias, aportar pruebas, solicitar la "
+                "práctica de aquellas que estime pertinentes, controvertir "
+                "las allegadas por <b>LA EMPRESA</b> y efectuar las "
+                "manifestaciones que considere necesarias para el ejercicio "
+                "pleno de su derecho de defensa."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.22 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Se deja constancia de que las respuestas y manifestaciones "
+                "suministradas durante la presente diligencia serán "
+                "valoradas conjuntamente con las demás pruebas legalmente "
+                "recaudadas dentro del procedimiento disciplinario. La "
+                "apertura de la investigación no implica prejuzgamiento ni "
+                "atribución anticipada de responsabilidad a la persona "
+                "trabajadora."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.28 * cm,
+        )
+    )
+
+    contenido.append(
+        Paragraph(
+            (
+                "Acto seguido, se da inicio a la diligencia "
+                f"<b>{modalidad_pdf}</b> de descargos."
+            ),
+            estilos["normal"],
+        )
+    )
+
+    contenido.append(
+        Spacer(
+            1,
+            0.32 * cm,
+        )
+    )
+
+    # ========================================================
+    # PREGUNTAS Y RESPUESTAS REGISTRADAS POR RRLL
+    # ========================================================
 
     contenido.extend(
         _parrafos_preservando_saltos(
-            descargo.get("DescargoTrabajador") or "",
+            descargo.get(
+                "DescargoTrabajador"
+            )
+            or "",
             estilos["izquierda"],
         )
     )
 
-    if hora_inicio and hora_fin:
-        texto_cierre = (
-            "No siendo otro el motivo de la presente diligencia "
-            f"que inició a las {hora_inicio} se da por finalizada "
-            f"siendo las {hora_fin}, procediendo a ser leída el acta "
-            "por el trabajador y firmada por las partes que en ella "
-            "intervinieron, haciendo entrega de un ejemplar de la "
-            "misma al trabajador."
-        )
-    else:
+    # ========================================================
+    # CIERRE FORMAL
+    # ========================================================
+
+    if hora_fin:
         texto_cierre = (
             "No siendo otro el motivo de la presente diligencia, "
-            "se da por finalizada una vez leída la presente acta por "
-            "el trabajador y firmada por las partes que en ella "
-            "intervinieron, haciendo entrega de un ejemplar de la "
-            "misma al trabajador."
-        )
-
-    contenido.extend([
-        Spacer(1, 0.55 * cm),
-        Paragraph(
-            texto_cierre,
-            estilos["normal"],
-        ),
-        Spacer(1, 1.1 * cm),
-    ])
-
-    firma_yeny = _crear_firma_yeny_pdf()
-
-    if firma_yeny is not None:
-        contenido_firma_empresa = firma_yeny
-        linea_empresa = Spacer(
-            1,
-            0.05 * cm,
-        )
-        nombre_empresa = Spacer(
-            1,
-            0.05 * cm,
-        )
-        cargo_empresa = Spacer(
-            1,
-            0.05 * cm,
+            f"se da por finalizada a las {_texto_pdf_seguro(hora_fin)}. "
+            "Acto seguido, el acta es leída por la persona trabajadora y "
+            "firmada por las partes que intervinieron en la diligencia, "
+            "dejando constancia de que se entrega una copia de esta a la "
+            "persona trabajadora."
         )
     else:
-        contenido_firma_empresa = Spacer(
-            1,
-            1.30 * cm,
+        texto_cierre = (
+            "No siendo otro el motivo de la presente diligencia, se da "
+            "por finalizada. Acto seguido, el acta es leída por la persona "
+            "trabajadora y firmada por las partes que intervinieron en la "
+            "diligencia, dejando constancia de que se entrega una copia de "
+            "esta a la persona trabajadora."
         )
-        linea_empresa = Paragraph(
-            "______________________________",
-            estilos["izquierda"],
-        )
-        nombre_empresa = Paragraph(
-            responsable.upper(),
-            estilos["negrilla"],
-        )
-        cargo_empresa = Paragraph(
-            "Relaciones Laborales",
-            estilos["negrilla"],
-        )
+
+    contenido.extend(
+        [
+            Spacer(
+                1,
+                0.55 * cm,
+            ),
+            Paragraph(
+                texto_cierre,
+                estilos["normal"],
+            ),
+            Spacer(
+                1,
+                0.45 * cm,
+            ),
+        ]
+    )
+
+    # ========================================================
+    # BLOQUE FINAL DE LAS PARTES
+    # ========================================================
 
     tabla_firmas = Table(
         [
             [
                 Paragraph(
-                    "El trabajador.",
+                    "La persona trabajadora",
                     estilos["izquierda"],
                 ),
                 Paragraph(
@@ -2858,30 +3161,34 @@ def _generar_pdf_carta_descargos(
             [
                 Spacer(
                     1,
-                    1.30 * cm,
+                    1.15 * cm,
                 ),
-                contenido_firma_empresa,
+                Spacer(
+                    1,
+                    1.15 * cm,
+                ),
             ],
             [
                 Paragraph(
-                    "______________________________",
-                    estilos["izquierda"],
-                ),
-                linea_empresa,
-            ],
-            [
-                Paragraph(
-                    nombre_trabajador.upper(),
+                    nombre_trabajador_pdf,
                     estilos["negrilla"],
                 ),
-                nombre_empresa,
+                Paragraph(
+                    responsable_mayuscula_pdf,
+                    estilos["negrilla"],
+                ),
             ],
             [
                 Paragraph(
-                    cargo_trabajador,
+                    _texto_pdf_seguro(
+                        cargo_trabajador
+                    ),
                     estilos["negrilla"],
                 ),
-                cargo_empresa,
+                Paragraph(
+                    "Analista de Talento Humano.",
+                    estilos["negrilla"],
+                ),
             ],
         ],
         colWidths=[
@@ -2923,7 +3230,9 @@ def _generar_pdf_carta_descargos(
     )
 
     contenido.append(
-        KeepTogether(tabla_firmas)
+        KeepTogether(
+            tabla_firmas
+        )
     )
 
     if evidencias:

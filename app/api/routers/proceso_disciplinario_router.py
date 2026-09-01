@@ -330,6 +330,9 @@ def validar_citacion_completa_para_envio(
         "RelatoHechos": citacion.RelatoHechos,
         "SupervisorReporta": citacion.SupervisorReporta,
         "CorreoSupervisorReporta": citacion.CorreoSupervisorReporta,
+        "CargoSupervisorReporta": citacion.CargoSupervisorReporta,
+        "SedeSupervisorReporta": citacion.SedeSupervisorReporta,
+        "EnunciacionPruebas": citacion.EnunciacionPruebas,
         "Cliente": citacion.Cliente,
     }
 
@@ -726,6 +729,202 @@ def serializar_documento_expediente(
         "FechaCreacion": documento.FechaCreacion,
         "FechaActualizacion": documento.FechaActualizacion,
     }
+
+
+def construir_filtro_busqueda_flexible(
+    search: str | None,
+    expresion_sql: str,
+) -> tuple[str, dict]:
+    criterio = str(search or "").strip()
+
+    if not criterio:
+        return "", {}
+
+    terminos = [
+        termino
+        for termino in criterio.split()
+        if termino.strip()
+    ]
+
+    condiciones = []
+    parametros = {}
+
+    for indice, termino in enumerate(terminos):
+        parametro = f"termino_{indice}"
+        condiciones.append(
+            f"{expresion_sql} LIKE :{parametro}"
+        )
+        parametros[parametro] = f"%{termino.lower()}%"
+
+    if not condiciones:
+        return "", {}
+
+    return (
+        " AND " + " AND ".join(condiciones),
+        parametros,
+    )
+
+
+@router.get(
+    "/supervisores-lideres"
+)
+def listar_supervisores_lideres(
+    search: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    limite = max(1, min(int(limit or 50), 100))
+
+    expresion_busqueda = """
+        LOWER(
+            TRANSLATE(
+                COALESCE(slo."NombreCompleto", '') || ' ' ||
+                COALESCE(slo."Correo", '') || ' ' ||
+                COALESCE(slo."Cargo", '') || ' ' ||
+                COALESCE(slo."Sede", ''),
+                'ÁÉÍÓÚÜÑáéíóúüñ',
+                'AEIOUUNaeiouun'
+            )
+        )
+    """
+
+    filtro_busqueda, parametros = construir_filtro_busqueda_flexible(
+        search=search,
+        expresion_sql=expresion_busqueda,
+    )
+
+    parametros["limite"] = limite
+
+    registros = (
+        db.execute(
+            text(
+                f"""
+                SELECT
+                    slo."IdSupervisorLider",
+                    slo."IdRegistroPersonal",
+                    slo."NombreCompleto",
+                    slo."Correo",
+                    slo."Cargo",
+                    slo."Sede",
+                    slo."Activo"
+                FROM public."SupervisorLiderOperaciones" slo
+                WHERE slo."Activo" = TRUE
+                {filtro_busqueda}
+                ORDER BY
+                    LOWER(slo."NombreCompleto") ASC,
+                    slo."IdSupervisorLider" ASC
+                LIMIT :limite
+                """
+            ),
+            parametros,
+        )
+        .mappings()
+        .all()
+    )
+
+    return [
+        {
+            **dict(registro),
+            "Origen": "CATALOGO",
+        }
+        for registro in registros
+    ]
+
+
+@router.get(
+    "/personas-reportantes"
+)
+def buscar_personas_reportantes(
+    search: str,
+    limit: int = 30,
+    db: Session = Depends(get_db),
+):
+    criterio = str(search or "").strip()
+
+    if len(criterio) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "Debe ingresar al menos 2 caracteres para buscar "
+                    "una persona reportante."
+                )
+            },
+        )
+
+    limite = max(1, min(int(limit or 30), 100))
+
+    expresion_busqueda = """
+        LOWER(
+            TRANSLATE(
+                COALESCE(rp."Nombres", '') || ' ' ||
+                COALESCE(rp."Apellidos", '') || ' ' ||
+                COALESCE(rp."NumeroIdentificacion", ''),
+                'ÁÉÍÓÚÜÑáéíóúüñ',
+                'AEIOUUNaeiouun'
+            )
+        )
+    """
+
+    filtro_busqueda, parametros = construir_filtro_busqueda_flexible(
+        search=criterio,
+        expresion_sql=expresion_busqueda,
+    )
+
+    parametros["limite"] = limite
+
+    registros = (
+        db.execute(
+            text(
+                f"""
+                SELECT
+                    rp."IdRegistroPersonal",
+                    rp."NumeroIdentificacion",
+                    TRIM(
+                        COALESCE(rp."Nombres", '') || ' ' ||
+                        COALESCE(rp."Apellidos", '')
+                    ) AS "NombreCompleto",
+                    asignacion."Cargo",
+                    asignacion."Sede"
+                FROM public."RegistroPersonal" rp
+                LEFT JOIN LATERAL (
+                    SELECT
+                        c."NombreCargo" AS "Cargo",
+                        cli."Nombre" AS "Sede"
+                    FROM public."AsignacionCargoCliente" acc
+                    LEFT JOIN public."Cargo" c
+                        ON c."IdCargo" = acc."IdCargo"
+                    LEFT JOIN public."Cliente" cli
+                        ON cli."IdCliente" = acc."IdCliente"
+                    WHERE acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    ORDER BY acc."IdAsignacionCargoCliente" DESC
+                    LIMIT 1
+                ) asignacion ON TRUE
+                WHERE rp."IdEstadoProceso" = 25
+                {filtro_busqueda}
+                ORDER BY
+                    LOWER(
+                        COALESCE(rp."Nombres", '') || ' ' ||
+                        COALESCE(rp."Apellidos", '')
+                    ) ASC,
+                    rp."IdRegistroPersonal" ASC
+                LIMIT :limite
+                """
+            ),
+            parametros,
+        )
+        .mappings()
+        .all()
+    )
+
+    return [
+        {
+            **dict(registro),
+            "Origen": "REGISTRO_PERSONAL",
+        }
+        for registro in registros
+    ]
+
 
 
 @router.post(
