@@ -78,6 +78,8 @@ CAPACIDAD_MAXIMA_DIARIA = 11
 
 BLOQUEOS_TEMPORALES_AGENDA = {
     date(2026, 9, 8): {
+        (time(7, 10), time(7, 50)),
+        (time(7, 50), time(8, 30)),
         (time(9, 10), time(9, 50)),
         (time(9, 50), time(10, 30)),
         (time(11, 10), time(11, 50)),
