@@ -117,6 +117,15 @@ class CambiarPasswordRequest(BaseModel):
     nueva_contrasena: str
 
 
+class ActualizarUsuarioRequest(BaseModel):
+    nombre_completo: str
+    usuario: str
+    correo_corporativo: Optional[str] = None
+    estado: str
+    id_rol: int
+    permisos: list[str] = []
+
+
 # ------------------ Helpers ------------------
 
 def hash_password(password: str) -> str:
@@ -247,11 +256,74 @@ def _get_roles(
     return roles_ids, roles
 
 
+def _get_permisos(
+    db: Session,
+    id_usuario,
+) -> list[str]:
+    """
+    Obtiene los permisos adicionales activos asignados al usuario.
+    Los roles continúan manejándose de forma independiente.
+    """
+
+    filas = db.execute(
+        text(
+            """
+            SELECT
+                p."Codigo"
+            FROM "UsuarioPermiso" up
+            INNER JOIN "Permiso" p
+                ON p."IdPermiso" = up."IdPermiso"
+            WHERE up."IdUsuario" = :id_usuario
+              AND up."Activo" = TRUE
+              AND p."Activo" = TRUE
+            ORDER BY p."Codigo";
+            """
+        ),
+        {
+            "id_usuario": id_usuario,
+        },
+    ).all()
+
+    return [
+        fila[0]
+        for fila in filas
+        if fila[0]
+    ]
+
+
+def _get_catalogo_permisos(db: Session) -> list[dict]:
+    filas = db.execute(
+        text(
+            """
+            SELECT "IdPermiso", "Codigo", "Nombre", "Descripcion"
+            FROM "Permiso"
+            WHERE "Activo" = TRUE
+            ORDER BY "Nombre", "Codigo";
+            """
+        )
+    ).mappings().all()
+
+    return [
+        {
+            "id_permiso": int(f["IdPermiso"]),
+            "codigo": f["Codigo"],
+            "nombre": f["Nombre"],
+            "descripcion": f["Descripcion"],
+        }
+        for f in filas
+    ]
+
+
 def _build_roles_and_token(
     usuario: Usuario,
     db: Session,
 ) -> dict:
     roles_ids, roles = _get_roles(
+        db,
+        usuario.IdUsuario,
+    )
+
+    permisos = _get_permisos(
         db,
         usuario.IdUsuario,
     )
@@ -262,6 +334,7 @@ def _build_roles_and_token(
             "uid": str(usuario.IdUsuario),
             "roles": roles,
             "roles_ids": roles_ids,
+            "permisos": permisos,
         },
         expires_delta=timedelta(
             minutes=ACCESS_TOKEN_EXPIRE_MINUTES
@@ -275,6 +348,7 @@ def _build_roles_and_token(
         "id_usuario": str(usuario.IdUsuario),
         "roles": roles,
         "roles_ids": roles_ids,
+        "permisos": permisos,
     }
 
 
@@ -329,6 +403,7 @@ def me(
         "id_usuario": str(u.IdUsuario),
         "roles": current["roles"],
         "roles_ids": current["roles_ids"],
+        "permisos": current.get("permisos") or [],
     }
 
 
@@ -348,6 +423,7 @@ def me_restringido(
         "id_usuario": str(u.IdUsuario),
         "roles": current["roles"],
         "roles_ids": current["roles_ids"],
+        "permisos": current.get("permisos") or [],
     }
 
 
@@ -462,6 +538,227 @@ def registrar_usuario(
     }
 
 
+@router.get(
+    "/auth/permisos",
+    status_code=status.HTTP_200_OK,
+)
+def listar_permisos(
+    db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
+):
+    return _get_catalogo_permisos(db)
+
+
+@router.get(
+    "/auth/usuarios",
+    status_code=status.HTTP_200_OK,
+)
+def listar_usuarios(
+    db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
+):
+    filas = (
+        db.query(
+            Usuario.IdUsuario,
+            Usuario.NombreUsuario,
+            Usuario.Usuario,
+            Usuario.CorreoCorporativo,
+            Usuario.HashEstado,
+            Rol.IdRol,
+            Rol.NombreRol,
+        )
+        .outerjoin(UsuarioRol, UsuarioRol.IdUsuario == Usuario.IdUsuario)
+        .outerjoin(Rol, Rol.IdRol == UsuarioRol.IdRol)
+        .order_by(Usuario.NombreUsuario.asc(), Usuario.Usuario.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id_usuario": str(fila.IdUsuario),
+            "nombre_completo": fila.NombreUsuario,
+            "usuario": fila.Usuario or fila.NombreUsuario,
+            "correo_corporativo": fila.CorreoCorporativo,
+            "estado": (fila.HashEstado or "").strip().upper(),
+            "id_rol": fila.IdRol,
+            "nombre_rol": fila.NombreRol,
+            "permisos": _get_permisos(db, fila.IdUsuario),
+        }
+        for fila in filas
+    ]
+
+
+@router.put(
+    "/auth/usuario/{id_usuario}",
+    status_code=status.HTTP_200_OK,
+)
+def actualizar_usuario(
+    id_usuario: str,
+    payload: ActualizarUsuarioRequest,
+    db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
+):
+    try:
+        id_usuario_uuid = uuid.UUID(id_usuario)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="id_usuario no es un UUID válido",
+        )
+
+    usuario = db.query(Usuario).filter(Usuario.IdUsuario == id_usuario_uuid).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="El usuario no existe")
+
+    nombre_completo = (payload.nombre_completo or "").strip()
+    login_usuario = (payload.usuario or "").strip()
+    correo_corporativo = ((payload.correo_corporativo or "").strip().lower() or None)
+    estado_usuario = (payload.estado or "").strip().upper()
+
+    if not nombre_completo:
+        raise HTTPException(status_code=400, detail="El nombre completo es obligatorio")
+    if not login_usuario:
+        raise HTTPException(status_code=400, detail="El nombre de usuario es obligatorio")
+    if estado_usuario not in {"ACTIVO", "INACTIVO"}:
+        raise HTTPException(status_code=400, detail="El estado debe ser ACTIVO o INACTIVO")
+
+    rol = db.query(Rol).filter(Rol.IdRol == payload.id_rol).first()
+    if not rol:
+        raise HTTPException(status_code=400, detail="El rol especificado no existe")
+
+    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.Usuario == login_usuario).first():
+        raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
+    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.NombreUsuario == login_usuario).first():
+        raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
+    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.NombreUsuario == nombre_completo).first():
+        raise HTTPException(status_code=400, detail="Ya existe un usuario registrado con ese nombre completo")
+    if correo_corporativo and db.query(Usuario).filter(
+        Usuario.IdUsuario != usuario.IdUsuario,
+        Usuario.CorreoCorporativo == correo_corporativo,
+    ).first():
+        raise HTTPException(status_code=400, detail="El correo corporativo ya se encuentra registrado")
+
+    usuario_actual = current["usuario"]
+    usuario_actualizacion = (
+        usuario_actual.Usuario or usuario_actual.NombreUsuario or "SISTEMA"
+    ).strip()[:60]
+
+    usuario.NombreUsuario = nombre_completo
+    usuario.Usuario = login_usuario
+    usuario.CorreoCorporativo = correo_corporativo
+    usuario.HashEstado = estado_usuario
+    usuario.UsuarioActualizacion = usuario_actualizacion
+
+    usuario_roles = db.query(UsuarioRol).filter(
+        UsuarioRol.IdUsuario == usuario.IdUsuario
+    ).all()
+
+    if usuario_roles:
+        usuario_roles[0].IdRol = rol.IdRol
+        for rol_extra in usuario_roles[1:]:
+            db.delete(rol_extra)
+    else:
+        db.add(UsuarioRol(IdUsuario=usuario.IdUsuario, IdRol=rol.IdRol))
+
+    permisos_solicitados = {
+        (codigo or "").strip()
+        for codigo in (payload.permisos or [])
+        if (codigo or "").strip()
+    }
+
+    catalogo_permisos = _get_catalogo_permisos(db)
+    permisos_por_codigo = {
+        permiso["codigo"]: permiso
+        for permiso in catalogo_permisos
+    }
+
+    permisos_invalidos = sorted(
+        permisos_solicitados - set(permisos_por_codigo.keys())
+    )
+
+    if permisos_invalidos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Los siguientes permisos no existen o están inactivos: "
+                + ", ".join(permisos_invalidos)
+            ),
+        )
+
+    asignaciones_actuales = db.execute(
+        text(
+            """
+            SELECT up."IdUsuarioPermiso", p."Codigo"
+            FROM "UsuarioPermiso" up
+            INNER JOIN "Permiso" p
+                ON p."IdPermiso" = up."IdPermiso"
+            WHERE up."IdUsuario" = :id_usuario;
+            """
+        ),
+        {"id_usuario": usuario.IdUsuario},
+    ).mappings().all()
+
+    asignaciones_por_codigo = {
+        fila["Codigo"]: fila
+        for fila in asignaciones_actuales
+    }
+
+    for codigo, permiso in permisos_por_codigo.items():
+        asignacion = asignaciones_por_codigo.get(codigo)
+        debe_estar_activo = codigo in permisos_solicitados
+
+        if asignacion is not None:
+            db.execute(
+                text(
+                    """
+                    UPDATE "UsuarioPermiso"
+                    SET "Activo" = :activo
+                    WHERE "IdUsuarioPermiso" = :id_usuario_permiso;
+                    """
+                ),
+                {
+                    "activo": debe_estar_activo,
+                    "id_usuario_permiso": asignacion["IdUsuarioPermiso"],
+                },
+            )
+        elif debe_estar_activo:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO "UsuarioPermiso" (
+                        "IdUsuario",
+                        "IdPermiso",
+                        "Activo"
+                    )
+                    VALUES (:id_usuario, :id_permiso, TRUE);
+                    """
+                ),
+                {
+                    "id_usuario": usuario.IdUsuario,
+                    "id_permiso": permiso["id_permiso"],
+                },
+            )
+
+    try:
+        db.commit()
+        db.refresh(usuario)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error actualizando usuario/rol: {str(e)}")
+
+    return {
+        "message": "Usuario actualizado correctamente",
+        "id_usuario": str(usuario.IdUsuario),
+        "nombre_completo": usuario.NombreUsuario,
+        "usuario": usuario.Usuario,
+        "correo_corporativo": usuario.CorreoCorporativo,
+        "estado": usuario.HashEstado,
+        "id_rol": rol.IdRol,
+        "nombre_rol": rol.NombreRol,
+        "permisos": _get_permisos(db, usuario.IdUsuario),
+    }
+
+
 @router.put(
     "/auth/usuario/{id_usuario}/rol",
     status_code=status.HTTP_200_OK,
@@ -470,6 +767,7 @@ def actualizar_rol_usuario(
     id_usuario: str,
     payload: AsignarRolRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
 ):
     try:
         id_usuario_uuid = uuid.UUID(
@@ -529,6 +827,13 @@ def actualizar_rol_usuario(
             )
         )
 
+    usuario_actual = current["usuario"]
+    usuario.UsuarioActualizacion = (
+        usuario_actual.Usuario
+        or usuario_actual.NombreUsuario
+        or "SISTEMA"
+    ).strip()[:60]
+
     db.commit()
 
     return {
@@ -548,6 +853,7 @@ def cambiar_password_usuario(
     id_usuario: str,
     payload: CambiarPasswordRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
 ):
     try:
         id_usuario_uuid = uuid.UUID(
@@ -574,11 +880,28 @@ def cambiar_password_usuario(
             detail="El usuario no existe",
         )
 
+    if not payload.nueva_contrasena:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La nueva contraseña es obligatoria",
+        )
+
+    if len(payload.nueva_contrasena) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La contraseña debe tener mínimo 8 caracteres",
+        )
+
     usuario.Contrasena = hash_password(
         payload.nueva_contrasena
     )
 
-    usuario.UsuarioActualizacion = "juan diaz"
+    usuario_actual = current["usuario"]
+    usuario.UsuarioActualizacion = (
+        usuario_actual.Usuario
+        or usuario_actual.NombreUsuario
+        or "SISTEMA"
+    ).strip()[:60]
 
     db.commit()
 
