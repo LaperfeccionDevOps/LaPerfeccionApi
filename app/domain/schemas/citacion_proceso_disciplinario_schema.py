@@ -47,6 +47,8 @@ class CitacionProcesoDisciplinarioBase(
 
     TelefonoTrabajador: str | None = None
 
+    CorreoTrabajador: str | None = None
+
     ManifestacionSupervisor: str | None = None
 
     Cliente: str | None = None
@@ -107,6 +109,8 @@ class CitacionProcesoDisciplinarioUpdate(
     EnunciacionPruebas: str | None = None
 
     TelefonoTrabajador: str | None = None
+
+    CorreoTrabajador: str | None = None
 
     ManifestacionSupervisor: str | None = None
 
