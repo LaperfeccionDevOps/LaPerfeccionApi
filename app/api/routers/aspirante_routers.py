@@ -23,6 +23,7 @@ from domain.schemas.aspirante import (
     RegistroPersonalOut,
 )
 from infrastructure.db.deps import get_db
+from infrastructure.security.auth_dependencies import get_current_user
 from infrastructure.security.role_guard import require_roles_ids
 
 router = APIRouter()
@@ -39,6 +40,52 @@ ROL_BIENESTAR = 16
 ROL_TALENTO_HUMANO = 13
 ROL_DESARROLLADOR = 15
 ROL_NOMINA = 17
+
+PERMISO_OPERACIONES_PROCESOS_DISCIPLINARIOS = "OPERACIONES_PROCESOS_DISCIPLINARIOS"
+PERMISO_OPERACIONES_RETIROS = "OPERACIONES_RETIROS"
+
+ROLES_CONSULTA_ASPIRANTES = {
+    ROL_SUPER_ADMIN,
+    ROL_SELECCION,
+    ROL_TALENTO_HUMANO,
+    ROL_CONTRATACION,
+    ROL_OPERACIONES,
+    ROL_HSE,
+    ROL_BIENESTAR,
+    ROL_NOMINA,
+}
+
+
+def require_consulta_aspirantes_operaciones(
+    current=Depends(get_current_user),
+):
+    roles_ids = {
+        int(rol_id)
+        for rol_id in (current.get("roles_ids") or [])
+        if str(rol_id).isdigit()
+    }
+    permisos = {
+        str(permiso).strip().upper()
+        for permiso in (current.get("permisos") or [])
+        if permiso
+    }
+
+    tiene_rol = bool(roles_ids & ROLES_CONSULTA_ASPIRANTES)
+    tiene_permiso_operaciones = bool(
+        permisos
+        & {
+            PERMISO_OPERACIONES_PROCESOS_DISCIPLINARIOS,
+            PERMISO_OPERACIONES_RETIROS,
+        }
+    )
+
+    if not tiene_rol and not tiene_permiso_operaciones:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para este recurso",
+        )
+
+    return current
 
 
 def _exists_registro_personal(db: Session, id_registro: int) -> bool:
@@ -168,18 +215,7 @@ def listar_aspirantes(
     fecha_hasta: date | None = Query(None),
     id_estado: int | None = Query(None),
     search: str | None = Query(None),
-    current=Depends(
-       require_roles_ids(
-           ROL_SUPER_ADMIN,
-        ROL_SELECCION,
-        ROL_TALENTO_HUMANO,
-        ROL_CONTRATACION,
-        ROL_OPERACIONES,
-        ROL_HSE,
-        ROL_BIENESTAR,
-        ROL_NOMINA,
-    )
-    ),
+    current=Depends(require_consulta_aspirantes_operaciones),
 ):
     try:
         sql = """
@@ -425,18 +461,7 @@ def obtener_registro_personal(
 def obtener_aspirante(
     id_registro: int,
     db: Session = Depends(get_db),
-    current=Depends(
-      require_roles_ids(
-          ROL_SUPER_ADMIN,
-        ROL_SELECCION,
-        ROL_TALENTO_HUMANO,
-        ROL_CONTRATACION,
-        ROL_OPERACIONES,
-        ROL_HSE,
-        ROL_BIENESTAR,
-        ROL_NOMINA,
-    )
-    ),
+    current=Depends(require_consulta_aspirantes_operaciones),
 ):
     aspirante = _get_registro_personal_by_id(db, id_registro)
 
