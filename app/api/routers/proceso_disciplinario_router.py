@@ -44,6 +44,7 @@ from domain.schemas.proceso_disciplinario_schema import (
     ProcesoDisciplinarioUpdate,
 )
 from infrastructure.db.deps import get_db
+from infrastructure.security.auth_dependencies import get_current_user
 from services.correo_proceso_disciplinario_service import (
     TIPO_CITACION_INICIAL,
     enviar_notificacion_agenda_disciplinaria,
@@ -96,6 +97,132 @@ ESTADOS_VISIBLES_RRLL_OPERACIONES = {
     "EN_CURSO",
     "CERRADO",
 }
+
+
+ROL_ADMIN = 1
+ROL_SUPER_ADMIN = 5
+ROL_OPERACIONES = 6
+ROL_RELACIONES_LABORALES = 12
+ROL_TALENTO_HUMANO = 13
+ROL_DESARROLLADOR = 15
+
+ROLES_GLOBALES = {
+    ROL_ADMIN,
+    ROL_SUPER_ADMIN,
+    ROL_DESARROLLADOR,
+}
+
+ROLES_RRLL = {
+    ROL_RELACIONES_LABORALES,
+    ROL_TALENTO_HUMANO,
+}
+
+PERMISO_OPERACIONES_PROCESOS_DISCIPLINARIOS = (
+    "OPERACIONES_PROCESOS_DISCIPLINARIOS"
+)
+
+
+def _roles_ids_actuales(current) -> set[int]:
+    roles_ids = current.get("roles_ids") or []
+
+    return {
+        int(id_rol)
+        for id_rol in roles_ids
+        if str(id_rol).strip()
+    }
+
+
+def _permisos_actuales(current) -> set[str]:
+    permisos = current.get("permisos") or []
+
+    return {
+        str(permiso).strip()
+        for permiso in permisos
+        if str(permiso).strip()
+    }
+
+
+def tiene_acceso_operaciones_disciplinarios(
+    current,
+) -> bool:
+    roles_ids = _roles_ids_actuales(current)
+    permisos = _permisos_actuales(current)
+
+    return bool(
+        roles_ids & ROLES_GLOBALES
+        or ROL_OPERACIONES in roles_ids
+        or (
+            PERMISO_OPERACIONES_PROCESOS_DISCIPLINARIOS
+            in permisos
+        )
+    )
+
+
+def tiene_acceso_rrll(
+    current,
+) -> bool:
+    roles_ids = _roles_ids_actuales(current)
+
+    return bool(
+        roles_ids & ROLES_GLOBALES
+        or roles_ids & ROLES_RRLL
+    )
+
+
+def validar_acceso_operaciones_disciplinarios(
+    current,
+) -> None:
+    if tiene_acceso_operaciones_disciplinarios(current):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "mensaje": (
+                "No tienes permiso para gestionar "
+                "Procesos Disciplinarios de Operaciones."
+            ),
+            "permisoRequerido": (
+                PERMISO_OPERACIONES_PROCESOS_DISCIPLINARIOS
+            ),
+        },
+    )
+
+
+def validar_acceso_rrll_o_operaciones(
+    current,
+) -> None:
+    if (
+        tiene_acceso_rrll(current)
+        or tiene_acceso_operaciones_disciplinarios(current)
+    ):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "mensaje": (
+                "No tienes permisos para consultar "
+                "procesos disciplinarios."
+            ),
+        },
+    )
+
+
+def require_operaciones_disciplinarios(
+    current=Depends(get_current_user),
+):
+    validar_acceso_operaciones_disciplinarios(current)
+
+    return current
+
+
+def require_rrll_o_operaciones(
+    current=Depends(get_current_user),
+):
+    validar_acceso_rrll_o_operaciones(current)
+
+    return current
 
 
 class EnviarProcesoRRLLRequest(BaseModel):
@@ -772,6 +899,7 @@ def listar_supervisores_lideres(
     search: str | None = None,
     limit: int = 50,
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_disciplinarios),
 ):
     limite = max(1, min(int(limit or 50), 100))
 
@@ -838,6 +966,7 @@ def buscar_personas_reportantes(
     search: str,
     limit: int = 30,
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_disciplinarios),
 ):
     criterio = str(search or "").strip()
 
@@ -936,6 +1065,7 @@ def buscar_personas_reportantes(
 def crear_proceso_disciplinario(
     data: ProcesoDisciplinarioCreate,
     db: Session = Depends(get_db),
+    current=Depends(get_current_user),
 ):
     trabajador = obtener_trabajador_o_error(
         db=db,
@@ -957,6 +1087,21 @@ def crear_proceso_disciplinario(
 
     if not origen_solicitado:
         origen_solicitado = "RRLL"
+
+    if origen_solicitado == "OPERACIONES":
+        validar_acceso_operaciones_disciplinarios(
+            current
+        )
+    elif not tiene_acceso_rrll(current):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "mensaje": (
+                    "No tienes permiso para crear "
+                    "procesos disciplinarios de RRLL."
+                ),
+            },
+        )
 
     estado_solicitado = normalizar_texto(
         data.EstadoProceso
@@ -1090,6 +1235,7 @@ def crear_proceso_disciplinario(
 def obtener_borrador_operaciones_trabajador(
     id_registro_personal: int,
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_disciplinarios),
 ):
     obtener_trabajador_o_error(
         db=db,
@@ -1112,6 +1258,7 @@ def obtener_borrador_operaciones_trabajador(
 def listar_procesos_por_trabajador(
     id_registro_personal: int,
     db: Session = Depends(get_db),
+    current=Depends(require_rrll_o_operaciones),
 ):
     obtener_trabajador_o_error(
         db=db,
@@ -1154,6 +1301,7 @@ def listar_procesos_por_trabajador(
 def obtener_historial_disciplinario_trabajador(
     id_registro_personal: int,
     db: Session = Depends(get_db),
+    current=Depends(require_rrll_o_operaciones),
 ):
     obtener_trabajador_o_error(
         db=db,
@@ -1496,6 +1644,7 @@ def enviar_proceso_a_rrll(
     id_proceso: int,
     data: EnviarProcesoRRLLRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_disciplinarios),
 ):
     proceso = obtener_proceso_o_error(
         db=db,
@@ -1911,6 +2060,7 @@ def enviar_proceso_a_rrll(
 def obtener_respuesta_rrll_para_operaciones(
     id_proceso: int,
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_disciplinarios),
 ):
     """
     Devuelve únicamente la información de cierre que Operaciones
@@ -2051,7 +2201,19 @@ def obtener_respuesta_rrll_para_operaciones(
 def obtener_expediente_disciplinario(
     id_proceso: int,
     db: Session = Depends(get_db),
+    current=Depends(get_current_user),
 ):
+    if not tiene_acceso_rrll(current):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "mensaje": (
+                    "Este recurso del expediente disciplinario "
+                    "está reservado para RRLL."
+                ),
+            },
+        )
+
     proceso = obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
@@ -2131,7 +2293,19 @@ def generar_pdf_expediente_disciplinario(
     id_proceso: int,
     request: Request,
     db: Session = Depends(get_db),
+    current=Depends(get_current_user),
 ):
+    if not tiene_acceso_rrll(current):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "mensaje": (
+                    "Este recurso del expediente disciplinario "
+                    "está reservado para RRLL."
+                ),
+            },
+        )
+
     proceso = obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
@@ -2171,6 +2345,7 @@ def generar_pdf_expediente_disciplinario(
 def generar_carta_citacion_descargos(
     id_proceso: int,
     db: Session = Depends(get_db),
+    current=Depends(require_rrll_o_operaciones),
 ):
     proceso = obtener_proceso_o_error(
         db=db,
@@ -2237,6 +2412,7 @@ def generar_carta_citacion_descargos(
 def obtener_proceso_disciplinario(
     id_proceso: int,
     db: Session = Depends(get_db),
+    current=Depends(require_rrll_o_operaciones),
 ):
     return obtener_proceso_o_error(
         db=db,
@@ -2254,11 +2430,34 @@ def actualizar_proceso_disciplinario(
     id_proceso: int,
     data: ProcesoDisciplinarioUpdate,
     db: Session = Depends(get_db),
+    current=Depends(get_current_user),
 ):
     proceso = obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
     )
+
+    origen_actual = normalizar_texto(
+        proceso.OrigenProceso
+    )
+
+    if tiene_acceso_rrll(current):
+        pass
+    elif (
+        origen_actual == "OPERACIONES"
+        and tiene_acceso_operaciones_disciplinarios(current)
+    ):
+        pass
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "mensaje": (
+                    "No tienes permiso para actualizar "
+                    "este proceso disciplinario."
+                ),
+            },
+        )
 
     validar_proceso_modificable(
         proceso

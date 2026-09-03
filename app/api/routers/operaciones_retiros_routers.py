@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
+from infrastructure.security.auth_dependencies import get_current_user
 from services.paz_salvo_operaciones_pdf_service import (
     generar_paz_salvo_operaciones_pdf,
 )
@@ -39,6 +40,73 @@ OPCIONES_ENTREGA_GENERAL = {"NO APLICA", "ACEPTADO", "RECHAZADO"}
 OPCIONES_CUMPLIMIENTO = {"NO APLICA", "CUMPLE", "NO CUMPLE"}
 OPCIONES_SI_NO = {"SI", "NO"}
 OPCIONES_ESTADO_PAZ_SALVO = {"ABIERTO", "CERRADO"}
+
+
+ROL_ADMIN = 1
+ROL_SUPER_ADMIN = 5
+ROL_OPERACIONES = 6
+ROL_DESARROLLADOR = 15
+
+ROLES_GLOBALES = {
+    ROL_ADMIN,
+    ROL_SUPER_ADMIN,
+    ROL_DESARROLLADOR,
+}
+
+PERMISO_OPERACIONES_RETIROS = "OPERACIONES_RETIROS"
+
+
+def _roles_ids_actuales(current) -> set[int]:
+    roles_ids = current.get("roles_ids") or []
+
+    return {
+        int(id_rol)
+        for id_rol in roles_ids
+        if str(id_rol).strip()
+    }
+
+
+def _permisos_actuales(current) -> set[str]:
+    permisos = current.get("permisos") or []
+
+    return {
+        str(permiso).strip()
+        for permiso in permisos
+        if str(permiso).strip()
+    }
+
+
+def validar_acceso_operaciones_retiros(current) -> None:
+    roles_ids = _roles_ids_actuales(current)
+    permisos = _permisos_actuales(current)
+
+    tiene_acceso = bool(
+        roles_ids & ROLES_GLOBALES
+        or ROL_OPERACIONES in roles_ids
+        or PERMISO_OPERACIONES_RETIROS in permisos
+    )
+
+    if tiene_acceso:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "mensaje": (
+                "No tienes permiso para gestionar "
+                "Retiros de Operaciones."
+            ),
+            "permisoRequerido": PERMISO_OPERACIONES_RETIROS,
+        },
+    )
+
+
+def require_operaciones_retiros(
+    current=Depends(get_current_user),
+):
+    validar_acceso_operaciones_retiros(current)
+
+    return current
 
 
 def _normalizar_usuario(usuario: str | None) -> str:
@@ -338,6 +406,7 @@ async def enviar_retiro_a_relaciones_laborales(
     archivo: UploadFile | None = File(None),
 
     db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
 ):
     """
     Envía a RRLL el retiro iniciado por Operaciones.
