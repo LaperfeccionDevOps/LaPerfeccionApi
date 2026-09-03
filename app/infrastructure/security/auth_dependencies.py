@@ -15,8 +15,9 @@ from domain.models.usuario_roles import UsuarioRol
 # (tu FRONT puede seguir usando /api/auth/login con JSON)
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl="/api/auth/token",
-    auto_error=False,  # 👈 CAMBIO: para que podamos dar un error más claro si falta el token
+    auto_error=False,
 )
+
 
 def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
@@ -24,18 +25,27 @@ def get_current_user(
 ) -> Dict[str, Any]:
     """
     Lee el Bearer token, valida JWT y devuelve:
-    { usuario: <Usuario>, roles: [str], roles_ids: [int], payload: {...} }
+    {
+        usuario: <Usuario>,
+        roles: [str],
+        roles_ids: [int],
+        permisos: [str],
+        payload: {...}
+    }
     """
 
-    # ✅ 1) Si NO llegó el header Authorization
+    # 1) Si NO llegó el header Authorization
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No autenticado. Falta el header: Authorization: Bearer <token>",
+            detail=(
+                "No autenticado. Falta el header: "
+                "Authorization: Bearer <token>"
+            ),
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # ✅ 2) Si llegó pero es inválido/expiró
+    # 2) Si llegó pero es inválido/expiró
     try:
         payload = decode_access_token(token)
     except Exception:
@@ -46,6 +56,7 @@ def get_current_user(
         )
 
     username = payload.get("sub")
+
     if not username:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -53,7 +64,12 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    usuario = db.query(Usuario).filter(Usuario.NombreUsuario == username).first()
+    usuario = (
+        db.query(Usuario)
+        .filter(Usuario.NombreUsuario == username)
+        .first()
+    )
+
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -62,18 +78,42 @@ def get_current_user(
         )
 
     filas_roles = (
-        db.query(Rol.IdRol, Rol.NombreRol)
-        .join(UsuarioRol, UsuarioRol.IdRol == Rol.IdRol)
-        .filter(UsuarioRol.IdUsuario == usuario.IdUsuario)
+        db.query(
+            Rol.IdRol,
+            Rol.NombreRol,
+        )
+        .join(
+            UsuarioRol,
+            UsuarioRol.IdRol == Rol.IdRol,
+        )
+        .filter(
+            UsuarioRol.IdUsuario == usuario.IdUsuario,
+        )
         .all()
     )
 
-    roles_ids: List[int] = [int(r[0]) for r in filas_roles]
-    roles: List[str] = [r[1] for r in filas_roles]
+    roles_ids: List[int] = [
+        int(r[0])
+        for r in filas_roles
+    ]
+
+    roles: List[str] = [
+        r[1]
+        for r in filas_roles
+    ]
+
+    permisos_payload = payload.get("permisos") or []
+
+    permisos: List[str] = [
+        str(permiso).strip()
+        for permiso in permisos_payload
+        if str(permiso).strip()
+    ]
 
     return {
         "usuario": usuario,
         "roles": roles,
         "roles_ids": roles_ids,
+        "permisos": permisos,
         "payload": payload,
     }
