@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 from infrastructure.security.auth_dependencies import get_current_user
+from services.email_service import enviar_correo_sin_adjunto
 
 
 router = APIRouter(
@@ -18,6 +20,10 @@ ROLES_NOMINA_PERMITIDOS = {
     "Nómina",
     "Nomina",
 }
+
+
+class RechazoIncapacidadRequest(BaseModel):
+    observacion: str = Field(..., min_length=3, max_length=1000)
 
 
 def _obtener_valor_usuario(usuario, *nombres):
@@ -69,6 +75,48 @@ def _obtener_rol_actual(usuario) -> str:
     return ""
 
 
+def _obtener_usuario_gestion(usuario_actual) -> str:
+    if isinstance(usuario_actual, dict):
+        usuario_obj = usuario_actual.get("usuario")
+
+        if usuario_obj is not None:
+            nombre_usuario = getattr(
+                usuario_obj,
+                "NombreUsuario",
+                None,
+            )
+
+            if nombre_usuario:
+                return str(nombre_usuario).strip()[:150]
+
+        payload = usuario_actual.get("payload")
+
+        if isinstance(payload, dict):
+            sub = payload.get("sub")
+
+            if sub:
+                return str(sub).strip()[:150]
+
+    valor = _obtener_valor_usuario(
+        usuario_actual,
+        "NombreUsuario",
+        "nombre_usuario",
+        "Username",
+        "username",
+        "Email",
+        "email",
+        "Correo",
+        "correo",
+        "Nombre",
+        "nombre",
+    )
+
+    if valor:
+        return str(valor).strip()[:150]
+
+    return "usuario_nomina"
+
+
 def _validar_acceso_nomina(usuario_actual) -> None:
     rol = _obtener_rol_actual(usuario_actual)
 
@@ -102,6 +150,9 @@ def _incapacidad_a_dict(fila):
         "fecha_final": fila["FechaFinal"],
         "es_prorroga": fila["EsProrroga"],
         "estado": _normalizar_estado(fila["Estado"]),
+        "observacion_nomina": fila["ObservacionNomina"],
+        "usuario_gestion_nomina": fila["UsuarioGestionNomina"],
+        "fecha_gestion_nomina": fila["FechaGestionNomina"],
         "fecha_creacion": fila["FechaCreacion"],
         "fecha_actualizacion": fila["FechaActualizacion"],
         "total_documentos": int(fila["TotalDocumentos"] or 0),
@@ -119,6 +170,191 @@ def _documento_a_dict(fila):
         "tamano_bytes": fila["TamanoBytes"],
         "fecha_creacion": fila["FechaCreacion"],
     }
+
+
+def _obtener_datos_correo_incapacidad(
+    db: Session,
+    id_incapacidad: int,
+):
+    consulta = text(
+        """
+        SELECT
+            rp."Email",
+            rp."Nombres",
+            rp."Apellidos",
+            i."FechaInicio",
+            i."FechaFinal",
+            i."DiasIncapacidad"
+        FROM public."IncapacidadTrabajador" i
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
+        WHERE
+            i."IdIncapacidadTrabajador" = :id_incapacidad
+            AND i."Activo" = TRUE
+        LIMIT 1
+        """
+    )
+
+    return db.execute(
+        consulta,
+        {"id_incapacidad": id_incapacidad},
+    ).mappings().first()
+
+
+def _formatear_fecha_correo(fecha) -> str:
+    if not fecha:
+        return "Sin información"
+
+    try:
+        return fecha.strftime("%d/%m/%Y")
+    except AttributeError:
+        return str(fecha)
+
+
+def _enviar_notificacion_gestion(
+    db: Session,
+    id_incapacidad: int,
+    estado: str,
+    observacion: str | None = None,
+) -> tuple[bool, str]:
+    datos = _obtener_datos_correo_incapacidad(
+        db,
+        id_incapacidad,
+    )
+
+    if not datos:
+        return (
+            False,
+            "No fue posible obtener los datos del trabajador.",
+        )
+
+    destinatario = str(
+        datos["Email"] or ""
+    ).strip()
+
+    if not destinatario:
+        return (
+            False,
+            "El trabajador no tiene correo registrado.",
+        )
+
+    nombre = (
+        f'{datos["Nombres"] or ""} {datos["Apellidos"] or ""}'
+    ).strip()
+
+    fecha_inicio = _formatear_fecha_correo(
+        datos["FechaInicio"]
+    )
+    fecha_final = _formatear_fecha_correo(
+        datos["FechaFinal"]
+    )
+    dias = datos["DiasIncapacidad"] or 0
+
+    if estado == "APROBADA":
+        asunto = "Incapacidad aprobada - Aseos La Perfección"
+        cuerpo = (
+            f"Hola {nombre},\n\n"
+            "Te informamos que la incapacidad registrada "
+            "fue aprobada por el área de Nómina.\n\n"
+            f"Fecha de inicio: {fecha_inicio}\n"
+            f"Fecha final: {fecha_final}\n"
+            f"Días de incapacidad: {dias}\n\n"
+            "Cordialmente,\n"
+            "Aseos La Perfección"
+        )
+    else:
+        asunto = "Incapacidad rechazada - Aseos La Perfección"
+        cuerpo = (
+            f"Hola {nombre},\n\n"
+            "Te informamos que la incapacidad registrada "
+            "fue rechazada por el área de Nómina.\n\n"
+            f"Fecha de inicio: {fecha_inicio}\n"
+            f"Fecha final: {fecha_final}\n"
+            f"Días de incapacidad: {dias}\n\n"
+            "Motivo del rechazo:\n"
+            f"{str(observacion or '').strip()}\n\n"
+            "Por favor revisa la información correspondiente.\n\n"
+            "Cordialmente,\n"
+            "Aseos La Perfección"
+        )
+
+    try:
+        enviar_correo_sin_adjunto(
+            destinatario=destinatario,
+            asunto=asunto,
+            cuerpo=cuerpo,
+        )
+
+        return (
+            True,
+            f"Notificación enviada a {destinatario}.",
+        )
+
+    except Exception as exc:
+        print(
+            "No fue posible enviar la notificación "
+            f"de incapacidad {id_incapacidad}: {exc}"
+        )
+
+        return (
+            False,
+            "La gestión quedó registrada, pero no fue posible "
+            "enviar la notificación por correo.",
+        )
+
+
+def _consultar_estado_incapacidad(
+    db: Session,
+    id_incapacidad: int,
+):
+    consulta = text(
+        """
+        SELECT
+            "IdIncapacidadTrabajador",
+            "Estado",
+            "Activo"
+        FROM public."IncapacidadTrabajador"
+        WHERE "IdIncapacidadTrabajador" = :id_incapacidad
+        LIMIT 1
+        """
+    )
+
+    return db.execute(
+        consulta,
+        {"id_incapacidad": id_incapacidad},
+    ).mappings().first()
+
+
+def _resolver_incapacidad_no_actualizada(
+    db: Session,
+    id_incapacidad: int,
+):
+    fila = _consultar_estado_incapacidad(
+        db,
+        id_incapacidad,
+    )
+
+    if not fila or fila["Activo"] is not True:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La incapacidad no existe o no está disponible.",
+        )
+
+    estado_actual = _normalizar_estado(fila["Estado"])
+
+    if estado_actual.upper() == "BORRADOR":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La incapacidad no existe o no está disponible.",
+        )
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "La incapacidad ya fue gestionada por Nómina "
+            f"y actualmente se encuentra en estado {estado_actual}."
+        ),
+    )
 
 
 @router.get("")
@@ -144,6 +380,9 @@ def listar_incapacidades_nomina(
             i."FechaFinal",
             i."EsProrroga",
             i."Estado",
+            i."ObservacionNomina",
+            i."UsuarioGestionNomina",
+            i."FechaGestionNomina",
             i."FechaCreacion",
             i."FechaActualizacion",
             COUNT(d."IdDocumentoIncapacidadTrabajador") AS "TotalDocumentos"
@@ -172,6 +411,9 @@ def listar_incapacidades_nomina(
             i."FechaFinal",
             i."EsProrroga",
             i."Estado",
+            i."ObservacionNomina",
+            i."UsuarioGestionNomina",
+            i."FechaGestionNomina",
             i."FechaCreacion",
             i."FechaActualizacion"
         ORDER BY
@@ -218,6 +460,9 @@ def obtener_detalle_incapacidad_nomina(
             i."FechaFinal",
             i."EsProrroga",
             i."Estado",
+            i."ObservacionNomina",
+            i."UsuarioGestionNomina",
+            i."FechaGestionNomina",
             i."FechaCreacion",
             i."FechaActualizacion",
             (
@@ -285,6 +530,155 @@ def obtener_detalle_incapacidad_nomina(
     return {
         "success": True,
         "data": data,
+    }
+
+
+@router.put("/{id_incapacidad}/aprobar")
+def aprobar_incapacidad_nomina(
+    id_incapacidad: int,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    usuario_gestion = _obtener_usuario_gestion(usuario_actual)
+
+    consulta = text(
+        """
+        UPDATE public."IncapacidadTrabajador"
+        SET
+            "Estado" = 'APROBADA',
+            "ObservacionNomina" = NULL,
+            "UsuarioGestionNomina" = :usuario_gestion,
+            "FechaGestionNomina" = CURRENT_TIMESTAMP,
+            "FechaActualizacion" = CURRENT_TIMESTAMP
+        WHERE
+            "IdIncapacidadTrabajador" = :id_incapacidad
+            AND "Activo" = TRUE
+            AND UPPER(COALESCE("Estado", '')) = 'REGISTRADA'
+        RETURNING
+            "IdIncapacidadTrabajador",
+            "Estado",
+            "ObservacionNomina",
+            "UsuarioGestionNomina",
+            "FechaGestionNomina",
+            "FechaActualizacion"
+        """
+    )
+
+    fila = db.execute(
+        consulta,
+        {
+            "id_incapacidad": id_incapacidad,
+            "usuario_gestion": usuario_gestion,
+        },
+    ).mappings().first()
+
+    if not fila:
+        db.rollback()
+        _resolver_incapacidad_no_actualizada(db, id_incapacidad)
+
+    db.commit()
+
+    correo_enviado, detalle_correo = _enviar_notificacion_gestion(
+        db=db,
+        id_incapacidad=id_incapacidad,
+        estado="APROBADA",
+    )
+
+    return {
+        "success": True,
+        "message": "Incapacidad aprobada correctamente.",
+        "correo_enviado": correo_enviado,
+        "detalle_correo": detalle_correo,
+        "data": {
+            "id_incapacidad": fila["IdIncapacidadTrabajador"],
+            "estado": fila["Estado"],
+            "observacion_nomina": fila["ObservacionNomina"],
+            "usuario_gestion_nomina": fila["UsuarioGestionNomina"],
+            "fecha_gestion_nomina": fila["FechaGestionNomina"],
+            "fecha_actualizacion": fila["FechaActualizacion"],
+        },
+    }
+
+
+@router.put("/{id_incapacidad}/rechazar")
+def rechazar_incapacidad_nomina(
+    id_incapacidad: int,
+    payload: RechazoIncapacidadRequest,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    observacion = payload.observacion.strip()
+
+    if len(observacion) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe registrar un motivo de rechazo válido.",
+        )
+
+    usuario_gestion = _obtener_usuario_gestion(usuario_actual)
+
+    consulta = text(
+        """
+        UPDATE public."IncapacidadTrabajador"
+        SET
+            "Estado" = 'RECHAZADA',
+            "ObservacionNomina" = :observacion,
+            "UsuarioGestionNomina" = :usuario_gestion,
+            "FechaGestionNomina" = CURRENT_TIMESTAMP,
+            "FechaActualizacion" = CURRENT_TIMESTAMP
+        WHERE
+            "IdIncapacidadTrabajador" = :id_incapacidad
+            AND "Activo" = TRUE
+            AND UPPER(COALESCE("Estado", '')) = 'REGISTRADA'
+        RETURNING
+            "IdIncapacidadTrabajador",
+            "Estado",
+            "ObservacionNomina",
+            "UsuarioGestionNomina",
+            "FechaGestionNomina",
+            "FechaActualizacion"
+        """
+    )
+
+    fila = db.execute(
+        consulta,
+        {
+            "id_incapacidad": id_incapacidad,
+            "observacion": observacion,
+            "usuario_gestion": usuario_gestion,
+        },
+    ).mappings().first()
+
+    if not fila:
+        db.rollback()
+        _resolver_incapacidad_no_actualizada(db, id_incapacidad)
+
+    db.commit()
+
+    correo_enviado, detalle_correo = _enviar_notificacion_gestion(
+        db=db,
+        id_incapacidad=id_incapacidad,
+        estado="RECHAZADA",
+        observacion=observacion,
+    )
+
+    return {
+        "success": True,
+        "message": "Incapacidad rechazada correctamente.",
+        "correo_enviado": correo_enviado,
+        "detalle_correo": detalle_correo,
+        "data": {
+            "id_incapacidad": fila["IdIncapacidadTrabajador"],
+            "estado": fila["Estado"],
+            "observacion_nomina": fila["ObservacionNomina"],
+            "usuario_gestion_nomina": fila["UsuarioGestionNomina"],
+            "fecha_gestion_nomina": fila["FechaGestionNomina"],
+            "fecha_actualizacion": fila["FechaActualizacion"],
+        },
     }
 
 
