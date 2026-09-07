@@ -96,6 +96,26 @@ def _clear_paragraph(paragraph):
         paragraph._p.remove(child)
 
 
+def _remove_trailing_empty_paragraphs(paragraphs, start_index: int):
+    """
+    Elimina únicamente los párrafos vacíos que quedan después del bloque de firma.
+
+    Se usa en modo compacto para la carta de finalización, evitando que Word
+    empuje párrafos vacíos a una segunda hoja. No modifica el encabezado,
+    el pie de página ni otros documentos.
+    """
+    for paragraph in list(paragraphs[start_index:]):
+        if paragraph.text.strip():
+            break
+
+        if _paragraph_has_image(paragraph):
+            break
+
+        parent = paragraph._p.getparent()
+        if parent is not None:
+            parent.remove(paragraph._p)
+
+
 def _iter_document_paragraph_groups(doc):
     """
     Devuelve grupos de párrafos del cuerpo y de las tablas para poder
@@ -175,6 +195,13 @@ def _insertar_firma_yeny(doc, modo_compacto: bool = False):
                         company_paragraph = paragraphs[index + 2]
                         if company_paragraph.text.strip().upper() == "ASEOS LA PERFECCIÓN S.A.S.":
                             _clear_paragraph(company_paragraph)
+
+            if modo_compacto:
+                # La plantilla de finalización ya cabe en una sola hoja.
+                # Al insertar la firma quedan párrafos vacíos al final del cuerpo
+                # que Word puede desplazar a una segunda página. Se eliminan solo
+                # esos párrafos vacíos posteriores al bloque de firma.
+                _remove_trailing_empty_paragraphs(paragraphs, index + 1)
 
     if not firma_insertada:
         raise ValueError(
@@ -348,11 +375,19 @@ def generar_carta_finalizacion(db, id_retiro_laboral: int):
         "{{CARGO}}": _upper_text(datos.get("Cargo", "")),
         "{{CIUDAD}}": "CIUDAD",
         "{{FECHA_AUSENCIA}}": fecha_ausencia,
-        "{{ASUNTO}}": "CARTA DE FINALIZACIÓN DEL CONTRATO",
+        "{{ASUNTO}}": "FINALIZACION DE CONTRATO POR INASISTENCIA Y ABANDONO AL CARGO DE TRABAJO",
     }
 
     for paragraph in doc.paragraphs:
         _replace_text_in_paragraph(paragraph, replacements)
+
+        # Solo en la carta de finalización:
+        # desplaza el asunto hacia la derecha como en el formato de referencia.
+        if "FINALIZACION DE CONTRATO POR INASISTENCIA Y ABANDONO AL CARGO DE TRABAJO" in paragraph.text:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            paragraph.paragraph_format.left_indent = Inches(1.50)
+            paragraph.paragraph_format.keep_together = True
+            paragraph.paragraph_format.keep_with_next = False
 
     for table in doc.tables:
         _replace_text_in_table(table, replacements)
