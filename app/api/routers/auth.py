@@ -100,6 +100,10 @@ class LoginRequest(BaseModel):
     contrasena: str
 
 
+class TrabajadorLoginRequest(BaseModel):
+    numero_identificacion: str
+
+
 class RegisterRequest(BaseModel):
     nombre_completo: str
     usuario: str
@@ -314,6 +318,85 @@ def _get_catalogo_permisos(db: Session) -> list[dict]:
     ]
 
 
+
+def _get_trabajador_para_portal(
+    db: Session,
+    numero_identificacion: str,
+):
+    """
+    Consulta independiente para el Portal del Trabajador.
+
+    No usa Usuario, UsuarioRoles ni permisos corporativos.
+    Solo valida contra RegistroPersonal y la vinculación laboral vigente.
+
+    Un trabajador puede ingresar cuando:
+    - su IdEstadoProceso es 25 (Contratado), o
+    - existe una VinculacionLaboral con EstadoVinculacion = ACTIVO.
+
+    La EPS se obtiene desde TipoEps.Descripcion.
+    """
+
+    numero = (numero_identificacion or "").strip()
+
+    if not numero:
+        return None
+
+    row = db.execute(
+        text(
+            """
+            SELECT
+                rp."IdRegistroPersonal",
+                rp."NumeroIdentificacion",
+                rp."Nombres",
+                rp."Apellidos",
+                rp."IdEstadoProceso",
+                rp."IdTipoEps",
+                te."Descripcion" AS "Eps",
+                EXISTS (
+                    SELECT 1
+                    FROM "VinculacionLaboral" vl
+                    WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                      AND UPPER(
+                          COALESCE(vl."EstadoVinculacion", '')
+                      ) = 'ACTIVO'
+                ) AS "TieneVinculacionActiva"
+            FROM "RegistroPersonal" rp
+            LEFT JOIN "TipoEps" te
+                ON te."IdTipoEps" = rp."IdTipoEps"
+            WHERE rp."NumeroIdentificacion" = :numero
+            LIMIT 1;
+            """
+        ),
+        {"numero": numero},
+    ).mappings().first()
+
+    return row
+
+
+def _build_trabajador_token(trabajador) -> str:
+    """
+    Genera un JWT exclusivo para el Portal del Trabajador.
+
+    Se mantiene separado del token corporativo:
+    - no incluye uid de Usuario;
+    - no incluye roles corporativos;
+    - no incluye permisos corporativos.
+    """
+
+    return create_access_token(
+        data={
+            "sub": str(trabajador["NumeroIdentificacion"]),
+            "tipo_acceso": "TRABAJADOR",
+            "id_registro_personal": int(
+                trabajador["IdRegistroPersonal"]
+            ),
+        },
+        expires_delta=timedelta(
+            minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+        ),
+    )
+
+
 def _build_roles_and_token(
     usuario: Usuario,
     db: Session,
@@ -390,6 +473,98 @@ def login(
     data["message"] = "Inicio de sesión exitoso"
 
     return data
+
+
+
+@router.post("/auth/trabajador")
+def login_trabajador(
+    payload: TrabajadorLoginRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Acceso independiente al Portal del Trabajador.
+
+    Recibe únicamente el número de identificación.
+    No modifica ni reutiliza el login corporativo.
+    """
+
+    numero = (
+        payload.numero_identificacion or ""
+    ).strip()
+
+    if not numero:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El número de identificación es obligatorio",
+        )
+
+    if not numero.isdigit():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El número de identificación debe contener solo números",
+        )
+
+    trabajador = _get_trabajador_para_portal(
+        db,
+        numero,
+    )
+
+    if not trabajador:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No encontramos un trabajador asociado "
+                "a este número de identificación."
+            ),
+        )
+
+    estado_contratado = (
+        trabajador["IdEstadoProceso"] == 25
+    )
+    tiene_vinculacion_activa = bool(
+        trabajador["TieneVinculacionActiva"]
+    )
+
+    if not (
+        estado_contratado
+        or tiene_vinculacion_activa
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "El trabajador no se encuentra activo "
+                "para ingresar al portal."
+            ),
+        )
+
+    nombres = (
+        trabajador["Nombres"] or ""
+    ).strip()
+    apellidos = (
+        trabajador["Apellidos"] or ""
+    ).strip()
+    nombre_completo = (
+        f"{nombres} {apellidos}"
+    ).strip()
+
+    access_token = _build_trabajador_token(
+        trabajador
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "tipo_acceso": "TRABAJADOR",
+        "id_registro_personal": int(
+            trabajador["IdRegistroPersonal"]
+        ),
+        "numero_identificacion": str(
+            trabajador["NumeroIdentificacion"]
+        ),
+        "nombre_completo": nombre_completo,
+        "eps": trabajador["Eps"] or "",
+        "message": "Ingreso al Portal del Trabajador exitoso",
+    }
 
 
 @router.get("/auth/me")

@@ -28,6 +28,9 @@ from api.routers.asistente_descargo_proceso_disciplinario_router import (
 )
 from api.routers.aspirante_routers import router as aspirante_router
 from api.routers.auth import router as auth_router
+from api.routers.trabajador_incapacidades_routers import (
+    router as trabajador_incapacidades_router,
+)
 from api.routers.autorizacion_agenda_disciplinaria_router import (
     router as autorizacion_agenda_disciplinaria_router,
 )
@@ -176,6 +179,10 @@ app.add_middleware(
 # Routers
 # ─────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(
+    trabajador_incapacidades_router,
+    prefix="/api",
+)
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
 app.include_router(consultar_combos_router, prefix="/api", tags=["combos"])
 app.include_router(cita_router, prefix="/api", tags=["citas"])
