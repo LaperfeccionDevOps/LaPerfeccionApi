@@ -97,6 +97,7 @@ from api.routers.indicadores_proceso_disciplinario_router import (
     router as indicadores_proceso_disciplinario_router,
 )
 from api.routers.motivo_cierre_routers import router as motivo_cierre_router
+from api.routers.nomina_incapacidades_routers import router as nomina_incapacidades_router
 from api.routers.nomina_retiros_routers import router as nomina_retiros_router
 from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
 from api.routers.observaciones_experiencia_laboral_routers import (
@@ -252,6 +253,7 @@ app.include_router(autorizacion_agenda_disciplinaria_router)
 app.include_router(solicitud_autorizacion_agenda_disciplinaria_router)
 app.include_router(asistente_descargo_proceso_disciplinario_router)
 app.include_router(nomina_retiros_router)
+app.include_router(nomina_incapacidades_router)
 app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(panel_gerencial_rrll_router)
 app.include_router(reintegros_router)
