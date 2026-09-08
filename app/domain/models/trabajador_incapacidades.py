@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     ForeignKey,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     TIMESTAMP,
-    BigInteger,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -68,6 +70,41 @@ class IncapacidadTrabajador(Base):
         String(50),
         nullable=False,
         default="REGISTRADA",
+    )
+
+    ObservacionNomina: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+    )
+
+    UsuarioGestionNomina: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
+    FechaGestionNomina: Mapped[datetime.datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+
+    NumeroRadicado: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    FechaRadicacion: Mapped[datetime.date | None] = mapped_column(
+        Date,
+        nullable=True,
+    )
+
+    CausalNegacion: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+    )
+
+    ValorPagado: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2),
+        nullable=True,
     )
 
     Activo: Mapped[bool] = mapped_column(

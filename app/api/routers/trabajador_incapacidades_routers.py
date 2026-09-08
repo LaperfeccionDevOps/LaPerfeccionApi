@@ -702,6 +702,12 @@ def _incapacidad_historial_a_dict(
             ),
         "estado":
             incapacidad.Estado,
+        "observacion_nomina":
+            getattr(
+                incapacidad,
+                "ObservacionNomina",
+                None,
+            ),
         "tipo_incapacidad":
             incapacidad.TipoIncapacidad,
         "descripcion_tipo":
