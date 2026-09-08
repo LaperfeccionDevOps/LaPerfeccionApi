@@ -3732,16 +3732,175 @@ def obtener_dashboard_contratacion(
 
 @router.get("/reporte-excel")
 def generar_reporte_excel_seleccion(db: Annotated[Session, Depends(get_db)]):
-    rows = db.execute(text("""
+    """
+    Genera el reporte Excel de Selección.
+
+    Ajustes del reporte:
+    - Agrega nombre_completo uniendo Nombres y Apellidos.
+    - Agrega observaciones_finales_entrevista tomando la entrevista
+      más reciente registrada para cada candidato.
+    - Conserva las columnas, cálculos y dashboard existentes.
+    """
+
+    # Detectar de forma segura las columnas reales de EntrevistaCandidato.
+    # Esto conserva compatibilidad con los nombres históricos usados
+    # por el módulo de entrevistas.
+    entrevista_cols = {
+        row[0]
+        for row in db.execute(
+            text("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'EntrevistaCandidato'
+            """)
+        ).fetchall()
+    }
+
+    observacion_col = next(
+        (
+            col
+            for col in (
+                "ObservacionesF",
+                "ObservacionesFinales",
+                "Observaciones",
+                "ObservacionFinal",
+            )
+            if col in entrevista_cols
+        ),
+        None,
+    )
+
+    fk_cols = [
+        col
+        for col in (
+            "IdRegistroPersonal",
+            "IdRegistroPerso",
+            "IdRegistro",
+            "IdAspirante",
+            "IdPersona",
+        )
+        if col in entrevista_cols
+    ]
+
+    pk_col = next(
+        (
+            col
+            for col in (
+                "IdEntrevista",
+                "IdEntrevistaCandidato",
+                "Id",
+                "id",
+            )
+            if col in entrevista_cols
+        ),
+        None,
+    )
+
+    fecha_actualizacion_col = next(
+        (
+            col
+            for col in (
+                "FechaActualizacion",
+                "FechaActualiza",
+                "Fecha_Actualizacion",
+                "UpdatedAt",
+                "updated_at",
+            )
+            if col in entrevista_cols
+        ),
+        None,
+    )
+
+    fecha_creacion_col = next(
+        (
+            col
+            for col in (
+                "FechaCreacion",
+                "Fecha_Creacion",
+                "CreatedAt",
+                "created_at",
+            )
+            if col in entrevista_cols
+        ),
+        None,
+    )
+
+    # La columna de observaciones siempre se incluye en el Excel.
+    # Si la tabla o la columna no están disponibles, queda vacía y
+    # el reporte continúa generándose sin afectar las demás columnas.
+    observaciones_select = (
+        "COALESCE(ec.observaciones_finales_entrevista, '') "
+        "AS observaciones_finales_entrevista"
+    )
+
+    if observacion_col and fk_cols:
+        condiciones_fk = " OR ".join(
+            f'ec_detalle."{col}" = rp."IdRegistroPersonal"'
+            for col in fk_cols
+        )
+
+        orden_entrevista = []
+
+        if fecha_actualizacion_col and fecha_creacion_col:
+            orden_entrevista.append(
+                "COALESCE("
+                f'ec_detalle."{fecha_actualizacion_col}", '
+                f'ec_detalle."{fecha_creacion_col}"'
+                ") DESC NULLS LAST"
+            )
+        elif fecha_actualizacion_col:
+            orden_entrevista.append(
+                f'ec_detalle."{fecha_actualizacion_col}" DESC NULLS LAST'
+            )
+        elif fecha_creacion_col:
+            orden_entrevista.append(
+                f'ec_detalle."{fecha_creacion_col}" DESC NULLS LAST'
+            )
+
+        if pk_col:
+            orden_entrevista.append(
+                f'ec_detalle."{pk_col}" DESC'
+            )
+
+        if not orden_entrevista:
+            orden_entrevista.append("1")
+
+        order_sql = ", ".join(orden_entrevista)
+
+        join_entrevista = f"""
+        LEFT JOIN LATERAL (
+            SELECT
+                ec_detalle."{observacion_col}"
+                    AS observaciones_finales_entrevista
+            FROM public."EntrevistaCandidato" ec_detalle
+            WHERE ({condiciones_fk})
+            ORDER BY {order_sql}
+            LIMIT 1
+        ) ec ON TRUE
+        """
+    else:
+        join_entrevista = """
+        LEFT JOIN LATERAL (
+            SELECT
+                NULL::text AS observaciones_finales_entrevista
+        ) ec ON TRUE
+        """
+
+    rows = db.execute(text(f"""
         SELECT
-            rp."Nombres",
-            rp."Apellidos",
-            rp."NumeroIdentificacion" as cedula,
-            COALESCE(rp."Celular", '') as telefono,
-            COALESCE(rp."Email", '') as correo,
-            cg."NombreCargo" as cargo,
-            rp."FechaCreacion" as fecha_registro,
-            mcp."MotivoCierre" as motivo_rechazo,
+            CONCAT_WS(
+                ' ',
+                NULLIF(TRIM(COALESCE(rp."Nombres", '')), ''),
+                NULLIF(TRIM(COALESCE(rp."Apellidos", '')), '')
+            ) AS nombre_completo,
+            rp."NumeroIdentificacion" AS cedula,
+            COALESCE(rp."Celular", '') AS telefono,
+            COALESCE(rp."Email", '') AS correo,
+            cg."NombreCargo" AS cargo,
+            rp."FechaCreacion" AS fecha_registro,
+            {observaciones_select},
+            mcp."MotivoCierre" AS motivo_rechazo,
             CASE rp."IdEstadoProceso"
                 WHEN 18 THEN 'Nuevo'
                 WHEN 19 THEN 'Entrevista'
@@ -3756,12 +3915,15 @@ def generar_reporte_excel_seleccion(db: Annotated[Session, Depends(get_db)]):
                 WHEN 30 THEN 'Abierto'
                 WHEN 34 THEN 'Pendiente de Contratación'
                 ELSE CONCAT('Estado ', rp."IdEstadoProceso")
-            END as estado
+            END AS estado
         FROM public."RegistroPersonal" rp
         LEFT JOIN public."AsignacionCargoCliente" acc
             ON acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
         LEFT JOIN public."Cargo" cg
             ON cg."IdCargo" = acc."IdCargo"
+
+        {join_entrevista}
+
         LEFT JOIN (
             SELECT DISTINCT ON ("IdRegistroPersonal")
                 "IdRegistroPersonal",
