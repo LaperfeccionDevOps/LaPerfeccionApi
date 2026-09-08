@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 from passlib.context import CryptContext
 
 from infrastructure.db.deps import get_db
@@ -172,7 +172,9 @@ def _get_usuario_by_username(
     if not username:
         return None
 
-    # Nuevos usuarios: login almacenado en Usuario.
+    # 1. Se conserva primero la búsqueda exacta para no afectar
+    #    usuarios históricos que ya existen con distintas combinaciones
+    #    de mayúsculas y minúsculas.
     usuario = (
         db.query(Usuario)
         .filter(Usuario.Usuario == username)
@@ -182,12 +184,40 @@ def _get_usuario_by_username(
     if usuario is not None:
         return usuario
 
-    # Compatibilidad con todos los usuarios existentes.
-    return (
+    usuario_historico = (
         db.query(Usuario)
         .filter(Usuario.NombreUsuario == username)
         .first()
     )
+
+    if usuario_historico is not None:
+        return usuario_historico
+
+    # 2. Compatibilidad adicional:
+    #    si no hubo coincidencia exacta, se permite encontrar el usuario
+    #    ignorando mayúsculas/minúsculas únicamente cuando existe una sola
+    #    coincidencia. Esto evita escoger arbitrariamente entre cuentas
+    #    históricas duplicadas como lorenzo.bonilla / Lorenzo.Bonilla /
+    #    LORENZO.BONILLA.
+    username_normalizado = username.upper()
+
+    coincidencias = (
+        db.query(Usuario)
+        .filter(
+            func.upper(
+                func.coalesce(
+                    Usuario.Usuario,
+                    Usuario.NombreUsuario,
+                )
+            ) == username_normalizado
+        )
+        .all()
+    )
+
+    if len(coincidencias) == 1:
+        return coincidencias[0]
+
+    return None
 
 
 def _authenticate_user(
@@ -438,8 +468,8 @@ def registrar_usuario(
     db: Session = Depends(get_db),
     current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
 ):
-    nombre_completo = (payload.nombre_completo or "").strip()
-    login_usuario = (payload.usuario or "").strip()
+    nombre_completo = (payload.nombre_completo or "").strip().upper()
+    login_usuario = (payload.usuario or "").strip().upper()
     correo_corporativo = ((payload.correo_corporativo or "").strip().lower() or None)
     estado_usuario = (payload.estado or "ACTIVO").strip().upper()
 
@@ -458,15 +488,33 @@ def registrar_usuario(
     if estado_usuario not in {"ACTIVO", "INACTIVO"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El estado debe ser ACTIVO o INACTIVO")
 
-    existente_login = db.query(Usuario).filter(Usuario.Usuario == login_usuario).first()
+    existente_login = (
+        db.query(Usuario)
+        .filter(func.upper(Usuario.Usuario) == login_usuario)
+        .first()
+    )
     if existente_login:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El nombre de usuario ya existe")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El nombre de usuario ya existe",
+        )
 
-    existente_historico = db.query(Usuario).filter(Usuario.NombreUsuario == login_usuario).first()
+    existente_historico = (
+        db.query(Usuario)
+        .filter(func.upper(Usuario.NombreUsuario) == login_usuario)
+        .first()
+    )
     if existente_historico:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El nombre de usuario ya existe")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El nombre de usuario ya existe",
+        )
 
-    existente_nombre = db.query(Usuario).filter(Usuario.NombreUsuario == nombre_completo).first()
+    existente_nombre = (
+        db.query(Usuario)
+        .filter(func.upper(Usuario.NombreUsuario) == nombre_completo)
+        .first()
+    )
     if existente_nombre:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -476,7 +524,7 @@ def registrar_usuario(
     if correo_corporativo:
         existente_correo = (
             db.query(Usuario)
-            .filter(Usuario.CorreoCorporativo == correo_corporativo)
+            .filter(func.lower(Usuario.CorreoCorporativo) == correo_corporativo)
             .first()
         )
         if existente_correo:
@@ -610,8 +658,8 @@ def actualizar_usuario(
     if not usuario:
         raise HTTPException(status_code=404, detail="El usuario no existe")
 
-    nombre_completo = (payload.nombre_completo or "").strip()
-    login_usuario = (payload.usuario or "").strip()
+    nombre_completo = (payload.nombre_completo or "").strip().upper()
+    login_usuario = (payload.usuario or "").strip().upper()
     correo_corporativo = ((payload.correo_corporativo or "").strip().lower() or None)
     estado_usuario = (payload.estado or "").strip().upper()
 
@@ -626,15 +674,27 @@ def actualizar_usuario(
     if not rol:
         raise HTTPException(status_code=400, detail="El rol especificado no existe")
 
-    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.Usuario == login_usuario).first():
+    if db.query(Usuario).filter(
+        Usuario.IdUsuario != usuario.IdUsuario,
+        func.upper(Usuario.Usuario) == login_usuario,
+    ).first():
         raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
-    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.NombreUsuario == login_usuario).first():
+
+    if db.query(Usuario).filter(
+        Usuario.IdUsuario != usuario.IdUsuario,
+        func.upper(Usuario.NombreUsuario) == login_usuario,
+    ).first():
         raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
-    if db.query(Usuario).filter(Usuario.IdUsuario != usuario.IdUsuario, Usuario.NombreUsuario == nombre_completo).first():
+
+    if db.query(Usuario).filter(
+        Usuario.IdUsuario != usuario.IdUsuario,
+        func.upper(Usuario.NombreUsuario) == nombre_completo,
+    ).first():
         raise HTTPException(status_code=400, detail="Ya existe un usuario registrado con ese nombre completo")
+
     if correo_corporativo and db.query(Usuario).filter(
         Usuario.IdUsuario != usuario.IdUsuario,
-        Usuario.CorreoCorporativo == correo_corporativo,
+        func.lower(Usuario.CorreoCorporativo) == correo_corporativo,
     ).first():
         raise HTTPException(status_code=400, detail="El correo corporativo ya se encuentra registrado")
 
