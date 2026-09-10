@@ -1,6 +1,7 @@
 # app/api/routers/trabajador_incapacidades_routers.py
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 
 from fastapi import (
@@ -13,6 +14,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import Response
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from domain.models.aspirante import RegistroPersonal
@@ -852,6 +854,708 @@ def _crear_documento(
                 True,
         )
     )
+
+
+
+
+def _hash_token_correccion(
+    token: str,
+) -> str:
+    token_limpio = _normalizar_texto(
+        token
+    )
+
+    if not token_limpio:
+        raise HTTPException(
+            status_code=
+                status.HTTP_404_NOT_FOUND,
+            detail=(
+                "El enlace de corrección no es válido "
+                "o ya no se encuentra disponible."
+            ),
+        )
+
+    return hashlib.sha256(
+        token_limpio.encode("utf-8")
+    ).hexdigest()
+
+
+def _obtener_correccion_valida(
+    db: Session,
+    token: str,
+):
+    token_hash = _hash_token_correccion(
+        token
+    )
+
+    consulta = text(
+        """
+        SELECT
+            c."IdCorreccionIncapacidad",
+            c."IdIncapacidadTrabajador",
+            c."MotivoCorreccion",
+            c."UsuarioSolicitud",
+            c."FechaSolicitud",
+            c."EstadoCorreccion",
+            c."FechaExpiracionToken",
+            c."FechaReenvio",
+            c."Activo" AS "CorreccionActiva",
+            i."IdRegistroPersonal",
+            i."TipoIncapacidad",
+            i."DescripcionTipoIncapacidad",
+            i."FechaInicio",
+            i."DiasIncapacidad",
+            i."FechaFinal",
+            i."EsProrroga",
+            i."Estado",
+            i."ObservacionNomina",
+            i."FechaCreacion",
+            i."FechaActualizacion",
+            rp."NumeroIdentificacion",
+            rp."Nombres",
+            rp."Apellidos",
+            rp."IdTipoEps",
+            te."Descripcion" AS "Eps"
+        FROM public."CorreccionIncapacidadTrabajador" c
+        INNER JOIN public."IncapacidadTrabajador" i
+            ON i."IdIncapacidadTrabajador"
+                = c."IdIncapacidadTrabajador"
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal"
+                = i."IdRegistroPersonal"
+        LEFT JOIN public."TipoEps" te
+            ON te."IdTipoEps"
+                = rp."IdTipoEps"
+        WHERE
+            c."TokenCorreccionHash" = :token_hash
+            AND c."Activo" = TRUE
+            AND UPPER(
+                COALESCE(
+                    c."EstadoCorreccion",
+                    ''
+                )
+            ) = 'PENDIENTE'
+            AND (
+                c."FechaExpiracionToken" IS NULL
+                OR c."FechaExpiracionToken" > CURRENT_TIMESTAMP
+            )
+            AND i."Activo" = TRUE
+            AND UPPER(
+                COALESCE(
+                    i."Estado",
+                    ''
+                )
+            ) = 'RECHAZADA'
+        LIMIT 1
+        """
+    )
+
+    fila = db.execute(
+        consulta,
+        {
+            "token_hash":
+                token_hash,
+        },
+    ).mappings().first()
+
+    if not fila:
+        raise HTTPException(
+            status_code=
+                status.HTTP_404_NOT_FOUND,
+            detail=(
+                "El enlace de corrección no es válido, "
+                "ya fue utilizado o se encuentra vencido."
+            ),
+        )
+
+    return fila
+
+
+def _correccion_a_dict(
+    db: Session,
+    correccion,
+) -> dict:
+    id_incapacidad = int(
+        correccion[
+            "IdIncapacidadTrabajador"
+        ]
+    )
+
+    documentos = (
+        _obtener_documentos_activos(
+            db=db,
+            id_incapacidad=
+                id_incapacidad,
+        )
+    )
+
+    return {
+        "id_correccion":
+            int(
+                correccion[
+                    "IdCorreccionIncapacidad"
+                ]
+            ),
+        "id_incapacidad":
+            id_incapacidad,
+        "motivo_correccion":
+            correccion[
+                "MotivoCorreccion"
+            ],
+        "fecha_solicitud":
+            correccion[
+                "FechaSolicitud"
+            ],
+        "fecha_expiracion":
+            correccion[
+                "FechaExpiracionToken"
+            ],
+        "tipo_incapacidad":
+            correccion[
+                "TipoIncapacidad"
+            ],
+        "descripcion_tipo":
+            correccion[
+                "DescripcionTipoIncapacidad"
+            ],
+        "fecha_inicio":
+            correccion[
+                "FechaInicio"
+            ],
+        "dias_incapacidad":
+            correccion[
+                "DiasIncapacidad"
+            ],
+        "fecha_final":
+            correccion[
+                "FechaFinal"
+            ],
+        "es_prorroga":
+            correccion[
+                "EsProrroga"
+            ],
+        "numero_identificacion":
+            correccion[
+                "NumeroIdentificacion"
+            ],
+        "nombres":
+            correccion[
+                "Nombres"
+            ],
+        "apellidos":
+            correccion[
+                "Apellidos"
+            ],
+        "id_tipo_eps":
+            correccion[
+                "IdTipoEps"
+            ],
+        "eps":
+            correccion[
+                "Eps"
+            ],
+        "nombre_completo":
+            (
+                f'{correccion["Nombres"] or ""} '
+                f'{correccion["Apellidos"] or ""}'
+            ).strip(),
+        "documentos": [
+            _documento_a_dict(
+                documento
+            )
+            for documento
+            in documentos
+        ],
+    }
+
+
+def _marcar_correccion_reenviada(
+    db: Session,
+    id_correccion: int,
+) -> None:
+    resultado = db.execute(
+        text(
+            """
+            UPDATE public."CorreccionIncapacidadTrabajador"
+            SET
+                "EstadoCorreccion" = 'REENVIADA',
+                "FechaReenvio" = CURRENT_TIMESTAMP,
+                "Activo" = FALSE
+            WHERE
+                "IdCorreccionIncapacidad" = :id_correccion
+                AND "Activo" = TRUE
+                AND UPPER(
+                    COALESCE(
+                        "EstadoCorreccion",
+                        ''
+                    )
+                ) = 'PENDIENTE'
+            """
+        ),
+        {
+            "id_correccion":
+                id_correccion,
+        },
+    )
+
+    if resultado.rowcount != 1:
+        raise HTTPException(
+            status_code=
+                status.HTTP_409_CONFLICT,
+            detail=(
+                "La solicitud de corrección ya fue utilizada "
+                "o dejó de estar disponible."
+            ),
+        )
+
+
+
+@router.get(
+    "/corregir/{token}",
+    status_code=
+        status.HTTP_200_OK,
+)
+def obtener_incapacidad_para_correccion(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Valida un enlace de corrección y devuelve
+    únicamente la incapacidad asociada a ese token.
+
+    Este acceso no crea una sesión general del
+    Portal del Trabajador. El token solamente
+    autoriza la corrección de esta incapacidad.
+    """
+
+    correccion = (
+        _obtener_correccion_valida(
+            db=db,
+            token=token,
+        )
+    )
+
+    return {
+        "success":
+            True,
+        "data":
+            _correccion_a_dict(
+                db=db,
+                correccion=
+                    correccion,
+            ),
+    }
+
+
+@router.get(
+    "/corregir/{token}/documentos/{id_documento}",
+)
+def ver_documento_correccion(
+    token: str,
+    id_documento: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Permite visualizar exclusivamente un documento
+    activo de la incapacidad autorizada por el token.
+    """
+
+    correccion = (
+        _obtener_correccion_valida(
+            db=db,
+            token=token,
+        )
+    )
+
+    id_incapacidad = int(
+        correccion[
+            "IdIncapacidadTrabajador"
+        ]
+    )
+
+    documento = (
+        db.query(
+            DocumentoIncapacidadTrabajador
+        )
+        .filter(
+            DocumentoIncapacidadTrabajador
+            .IdDocumentoIncapacidadTrabajador
+            == id_documento,
+            DocumentoIncapacidadTrabajador
+            .IdIncapacidadTrabajador
+            == id_incapacidad,
+            DocumentoIncapacidadTrabajador
+            .Activo
+            .is_(True),
+        )
+        .first()
+    )
+
+    if not documento:
+        raise HTTPException(
+            status_code=
+                status.HTTP_404_NOT_FOUND,
+            detail=(
+                "El documento no existe o no corresponde "
+                "a esta solicitud de corrección."
+            ),
+        )
+
+    contenido = (
+        documento.DocumentoCargado
+        or b""
+    )
+
+    if not contenido:
+        raise HTTPException(
+            status_code=
+                status.HTTP_404_NOT_FOUND,
+            detail=(
+                "El documento no contiene información "
+                "para visualizar."
+            ),
+        )
+
+    nombre_archivo = (
+        _normalizar_texto(
+            documento.NombreArchivo
+        )
+        .replace('"', "")
+        .replace("\r", "")
+        .replace("\n", "")
+        or "documento_incapacidad"
+    )
+
+    return Response(
+        content=contenido,
+        media_type=(
+            documento.MimeType
+            or "application/octet-stream"
+        ),
+        headers={
+            "Content-Disposition":
+                (
+                    'inline; filename="'
+                    f'{nombre_archivo}"'
+                ),
+            "Cache-Control":
+                "no-store",
+        },
+    )
+
+
+@router.post(
+    "/corregir/{token}",
+    status_code=
+        status.HTTP_200_OK,
+)
+async def reenviar_incapacidad_corregida(
+    token: str,
+    tipo_incapacidad: str = Form(...),
+    fecha_inicio: date = Form(...),
+    dias_incapacidad: int = Form(...),
+    es_prorroga: str = Form(...),
+    tipos_documento: list[str] = Form(
+        default=[]
+    ),
+    archivos: list[UploadFile] = File(
+        default=[]
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Corrige y reenvía la MISMA incapacidad.
+
+    El token solamente permite modificar la
+    incapacidad rechazada asociada a esa solicitud.
+    Los documentos reemplazados se inactivan y se
+    inserta una nueva versión, conservando trazabilidad.
+    """
+
+    correccion = (
+        _obtener_correccion_valida(
+            db=db,
+            token=token,
+        )
+    )
+
+    id_incapacidad = int(
+        correccion[
+            "IdIncapacidadTrabajador"
+        ]
+    )
+
+    id_correccion = int(
+        correccion[
+            "IdCorreccionIncapacidad"
+        ]
+    )
+
+    tipo_normalizado = (
+        _normalizar_tipo_incapacidad(
+            tipo_incapacidad
+        )
+    )
+
+    configuracion_tipo = (
+        _validar_tipo_incapacidad(
+            tipo_normalizado
+        )
+    )
+
+    _validar_dias_incapacidad(
+        tipo_incapacidad=
+            tipo_normalizado,
+        dias_incapacidad=
+            dias_incapacidad,
+    )
+
+    prorroga = (
+        _convertir_es_prorroga(
+            es_prorroga
+        )
+    )
+
+    fecha_final = (
+        _calcular_fecha_final(
+            fecha_inicio=
+                fecha_inicio,
+            dias_incapacidad=
+                dias_incapacidad,
+        )
+    )
+
+    tipos_limpios = (
+        _validar_documentos_parciales(
+            configuracion_tipo=
+                configuracion_tipo,
+            tipos_documento=
+                tipos_documento,
+            cantidad_archivos=
+                len(archivos),
+        )
+    )
+
+    documentos_validados = []
+
+    for (
+        tipo_documento,
+        archivo,
+    ) in zip(
+        tipos_limpios,
+        archivos,
+    ):
+        datos_archivo = (
+            await _leer_y_validar_archivo(
+                archivo=
+                    archivo,
+                tipo_documento=
+                    tipo_documento,
+            )
+        )
+
+        documentos_validados.append(
+            {
+                "tipo_documento":
+                    tipo_documento,
+                **datos_archivo,
+            }
+        )
+
+    try:
+        incapacidad = (
+            db.query(
+                IncapacidadTrabajador
+            )
+            .filter(
+                IncapacidadTrabajador
+                .IdIncapacidadTrabajador
+                == id_incapacidad,
+                IncapacidadTrabajador
+                .Activo
+                .is_(True),
+                IncapacidadTrabajador
+                .Estado
+                == "RECHAZADA",
+            )
+            .first()
+        )
+
+        if not incapacidad:
+            raise HTTPException(
+                status_code=
+                    status.HTTP_409_CONFLICT,
+                detail=(
+                    "La incapacidad ya no se encuentra "
+                    "disponible para corrección."
+                ),
+            )
+
+        incapacidad.TipoIncapacidad = (
+            tipo_normalizado
+        )
+
+        incapacidad.DescripcionTipoIncapacidad = (
+            configuracion_tipo[
+                "descripcion"
+            ]
+        )
+
+        incapacidad.FechaInicio = (
+            fecha_inicio
+        )
+
+        incapacidad.DiasIncapacidad = (
+            dias_incapacidad
+        )
+
+        incapacidad.FechaFinal = (
+            fecha_final
+        )
+
+        incapacidad.EsProrroga = (
+            prorroga
+        )
+
+        incapacidad.FechaActualizacion = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        _marcar_documentos_no_validos_por_tipo(
+            db=db,
+            borrador=incapacidad,
+            configuracion_tipo=
+                configuracion_tipo,
+        )
+
+        for documento in (
+            documentos_validados
+        ):
+            _reemplazar_documento_si_existe(
+                db=db,
+                id_incapacidad=
+                    id_incapacidad,
+                tipo_documento=
+                    documento[
+                        "tipo_documento"
+                    ],
+            )
+
+            db.add(
+                _crear_documento(
+                    incapacidad=
+                        incapacidad,
+                    documento=
+                        documento,
+                )
+            )
+
+        db.flush()
+
+        documentos_finales = (
+            _obtener_documentos_activos(
+                db=db,
+                id_incapacidad=
+                    id_incapacidad,
+            )
+        )
+
+        tipos_finales = [
+            _normalizar_texto(
+                documento.TipoDocumento
+            )
+            for documento
+            in documentos_finales
+        ]
+
+        _validar_documentos_recibidos(
+            configuracion_tipo=
+                configuracion_tipo,
+            tipos_documento=
+                tipos_finales,
+            cantidad_archivos=
+                len(tipos_finales),
+        )
+
+        incapacidad.Estado = (
+            "REGISTRADA"
+        )
+
+        incapacidad.FechaActualizacion = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        _marcar_correccion_reenviada(
+            db=db,
+            id_correccion=
+                id_correccion,
+        )
+
+        db.commit()
+
+        db.refresh(
+            incapacidad
+        )
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No fue posible guardar y reenviar "
+                "la corrección de la incapacidad."
+            ),
+        ) from exc
+
+    return {
+        "success":
+            True,
+        "message":
+            (
+                "Incapacidad corregida y enviada "
+                "nuevamente a Nómina."
+            ),
+        "id_incapacidad":
+            int(
+                incapacidad
+                .IdIncapacidadTrabajador
+            ),
+        "id_correccion":
+            id_correccion,
+        "estado":
+            incapacidad.Estado,
+        "tipo_incapacidad":
+            incapacidad.TipoIncapacidad,
+        "descripcion_tipo":
+            incapacidad
+            .DescripcionTipoIncapacidad,
+        "fecha_inicio":
+            incapacidad.FechaInicio,
+        "dias_incapacidad":
+            incapacidad.DiasIncapacidad,
+        "fecha_final":
+            incapacidad.FechaFinal,
+        "es_prorroga":
+            incapacidad.EsProrroga,
+        "documentos_registrados":
+            len(
+                _obtener_documentos_activos(
+                    db=db,
+                    id_incapacidad=
+                        id_incapacidad,
+                )
+            ),
+    }
 
 
 @router.get(

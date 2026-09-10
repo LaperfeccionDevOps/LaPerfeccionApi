@@ -1,6 +1,9 @@
 from datetime import date
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+import hashlib
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -33,6 +36,28 @@ NOTIFICACIONES_CORREO_ESTADO = {
 }
 
 
+TIPOS_INCAPACIDAD_NOMINA = {
+    "INCAPACIDAD_1_2_DIAS": "Incapacidad de 1 y 2 días",
+    "ACCIDENTE_TRANSITO": "Accidente de tránsito",
+    "ACCIDENTE_TRABAJO": "Accidente de trabajo (ARL)",
+    "INCAPACIDAD_3_MAS_DIAS": "Incapacidad de 3 o más días",
+    "LICENCIA_MATERNA": "Licencia materna",
+    "LICENCIA_PATERNA": "Licencia paterna",
+}
+
+
+DIAS_VIGENCIA_ENLACE_CORRECCION = 15
+
+ORIGENES_FRONTEND_PERMITIDOS = {
+    "https://laperfeccion.app",
+    "https://qa.laperfeccion.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+}
+
+FRONTEND_PRODUCCION = "https://laperfeccion.app"
+
+
 class RechazoIncapacidadRequest(BaseModel):
     observacion: str = Field(..., min_length=3, max_length=1000)
 
@@ -48,6 +73,11 @@ class NegarIncapacidadRequest(BaseModel):
 
 class PagarIncapacidadRequest(BaseModel):
     valor_pagado: Decimal = Field(..., gt=0, max_digits=14, decimal_places=2)
+
+
+
+class ActualizarTipoIncapacidadRequest(BaseModel):
+    tipo_incapacidad: str = Field(..., min_length=1, max_length=60)
 
 
 def _obtener_valor_usuario(usuario, *nombres):
@@ -184,6 +214,12 @@ def _incapacidad_a_dict(fila):
         "fecha_creacion": fila["FechaCreacion"],
         "fecha_actualizacion": fila["FechaActualizacion"],
         "total_documentos": int(fila["TotalDocumentos"] or 0),
+        "fue_corregida": bool(fila["FueCorregida"]),
+        "total_correcciones": int(fila["TotalCorrecciones"] or 0),
+        "motivo_ultima_correccion": fila["MotivoUltimaCorreccion"],
+        "estado_ultima_correccion": fila["EstadoUltimaCorreccion"],
+        "fecha_solicitud_ultima_correccion": fila["FechaSolicitudUltimaCorreccion"],
+        "fecha_reenvio_ultima_correccion": fila["FechaReenvioUltimaCorreccion"],
     }
 
 
@@ -198,6 +234,120 @@ def _documento_a_dict(fila):
         "tamano_bytes": fila["TamanoBytes"],
         "fecha_creacion": fila["FechaCreacion"],
     }
+
+
+def _generar_token_correccion() -> tuple[str, str]:
+    token_plano = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(
+        token_plano.encode("utf-8")
+    ).hexdigest()
+
+    return token_plano, token_hash
+
+
+def _resolver_origen_frontend(request: Request) -> str:
+    origen = str(
+        request.headers.get("origin") or ""
+    ).strip().rstrip("/")
+
+    if origen in ORIGENES_FRONTEND_PERMITIDOS:
+        return origen
+
+    return FRONTEND_PRODUCCION
+
+
+def _construir_url_correccion(
+    request: Request,
+    token_plano: str,
+) -> str:
+    origen = _resolver_origen_frontend(request)
+
+    return (
+        f"{origen}/trabajador/incapacidades/"
+        f"corregir/{token_plano}"
+    )
+
+
+def _crear_solicitud_correccion(
+    db: Session,
+    id_incapacidad: int,
+    motivo_correccion: str,
+    usuario_solicitud: str,
+) -> tuple[dict, str]:
+    token_plano, token_hash = _generar_token_correccion()
+
+    db.execute(
+        text(
+            """
+            UPDATE public."CorreccionIncapacidadTrabajador"
+            SET
+                "EstadoCorreccion" = 'CERRADA',
+                "Activo" = FALSE
+            WHERE
+                "IdIncapacidadTrabajador" = :id_incapacidad
+                AND "Activo" = TRUE
+                AND UPPER(COALESCE("EstadoCorreccion", '')) = 'PENDIENTE'
+            """
+        ),
+        {
+            "id_incapacidad": id_incapacidad,
+        },
+    )
+
+    correccion = db.execute(
+        text(
+            """
+            INSERT INTO public."CorreccionIncapacidadTrabajador"
+            (
+                "IdIncapacidadTrabajador",
+                "MotivoCorreccion",
+                "UsuarioSolicitud",
+                "FechaSolicitud",
+                "EstadoCorreccion",
+                "TokenCorreccionHash",
+                "FechaExpiracionToken",
+                "FechaReenvio",
+                "Activo"
+            )
+            VALUES
+            (
+                :id_incapacidad,
+                :motivo_correccion,
+                :usuario_solicitud,
+                CURRENT_TIMESTAMP,
+                'PENDIENTE',
+                :token_hash,
+                CURRENT_TIMESTAMP
+                    + (:dias_vigencia * INTERVAL '1 day'),
+                NULL,
+                TRUE
+            )
+            RETURNING
+                "IdCorreccionIncapacidad",
+                "IdIncapacidadTrabajador",
+                "MotivoCorreccion",
+                "UsuarioSolicitud",
+                "FechaSolicitud",
+                "EstadoCorreccion",
+                "FechaExpiracionToken",
+                "Activo"
+            """
+        ),
+        {
+            "id_incapacidad": id_incapacidad,
+            "motivo_correccion": motivo_correccion,
+            "usuario_solicitud": usuario_solicitud,
+            "token_hash": token_hash,
+            "dias_vigencia": DIAS_VIGENCIA_ENLACE_CORRECCION,
+        },
+    ).mappings().first()
+
+    if not correccion:
+        raise RuntimeError(
+            "No fue posible crear la solicitud de corrección."
+        )
+
+    return dict(correccion), token_plano
 
 
 def _obtener_datos_correo_incapacidad(
@@ -245,6 +395,7 @@ def _enviar_notificacion_gestion(
     id_incapacidad: int,
     estado: str,
     observacion: str | None = None,
+    url_correccion: str | None = None,
 ) -> tuple[bool, str]:
     estado_normalizado = _normalizar_estado(estado).upper()
 
@@ -305,16 +456,26 @@ def _enviar_notificacion_gestion(
 
     elif estado_normalizado == "RECHAZADA":
         asunto = "Incapacidad rechazada - Aseos La Perfección"
+
+        enlace = str(url_correccion or "").strip()
+
         cuerpo = (
             f"Hola {nombre},\n\n"
             "Te informamos que la incapacidad registrada "
-            "fue rechazada por el área de Nómina.\n\n"
+            "fue rechazada por el área de Nómina y requiere "
+            "una corrección.\n\n"
             f"Fecha de inicio: {fecha_inicio}\n"
             f"Fecha final: {fecha_final}\n"
             f"Días de incapacidad: {dias}\n\n"
             "Motivo del rechazo:\n"
             f"{str(observacion or '').strip()}\n\n"
-            "Por favor revisa la información correspondiente.\n\n"
+            "Para corregir la información y reenviar la misma "
+            "incapacidad para revisión, abre el siguiente enlace "
+            "del Portal del Trabajador:\n"
+            f"{enlace}\n\n"
+            "El enlace es personal, corresponde únicamente a esta "
+            "solicitud y tiene una vigencia limitada. No lo compartas "
+            "con otras personas.\n\n"
             "Cordialmente,\n"
             "Aseos La Perfección"
         )
@@ -493,12 +654,47 @@ def listar_incapacidades_nomina(
             i."ValorPagado",
             i."FechaCreacion",
             i."FechaActualizacion",
-            COUNT(d."IdDocumentoIncapacidadTrabajador") AS "TotalDocumentos"
+            COUNT(d."IdDocumentoIncapacidadTrabajador") AS "TotalDocumentos",
+            COALESCE(corr."FueCorregida", FALSE) AS "FueCorregida",
+            COALESCE(corr."TotalCorrecciones", 0) AS "TotalCorrecciones",
+            corr."MotivoUltimaCorreccion",
+            corr."EstadoUltimaCorreccion",
+            corr."FechaSolicitudUltimaCorreccion",
+            corr."FechaReenvioUltimaCorreccion"
         FROM public."IncapacidadTrabajador" i
         INNER JOIN public."RegistroPersonal" rp
             ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
         LEFT JOIN public."TipoEps" te
             ON te."IdTipoEps" = rp."IdTipoEps"
+        LEFT JOIN LATERAL (
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM public."CorreccionIncapacidadTrabajador" c2
+                    WHERE c2."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                      AND UPPER(COALESCE(c2."EstadoCorreccion", '')) = 'REENVIADA'
+                ) AS "FueCorregida",
+                (
+                    SELECT COUNT(*)
+                    FROM public."CorreccionIncapacidadTrabajador" c3
+                    WHERE c3."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ) AS "TotalCorrecciones",
+                ult."MotivoCorreccion" AS "MotivoUltimaCorreccion",
+                ult."EstadoCorreccion" AS "EstadoUltimaCorreccion",
+                ult."FechaSolicitud" AS "FechaSolicitudUltimaCorreccion",
+                ult."FechaReenvio" AS "FechaReenvioUltimaCorreccion"
+            FROM (
+                SELECT
+                    c1."MotivoCorreccion",
+                    c1."EstadoCorreccion",
+                    c1."FechaSolicitud",
+                    c1."FechaReenvio"
+                FROM public."CorreccionIncapacidadTrabajador" c1
+                WHERE c1."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ORDER BY c1."IdCorreccionIncapacidad" DESC
+                LIMIT 1
+            ) ult
+        ) corr ON TRUE
         LEFT JOIN public."DocumentoIncapacidadTrabajador" d
             ON d."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
             AND d."Activo" = TRUE
@@ -527,7 +723,13 @@ def listar_incapacidades_nomina(
             i."CausalNegacion",
             i."ValorPagado",
             i."FechaCreacion",
-            i."FechaActualizacion"
+            i."FechaActualizacion",
+            corr."FueCorregida",
+            corr."TotalCorrecciones",
+            corr."MotivoUltimaCorreccion",
+            corr."EstadoUltimaCorreccion",
+            corr."FechaSolicitudUltimaCorreccion",
+            corr."FechaReenvioUltimaCorreccion"
         ORDER BY
             i."FechaCreacion" DESC,
             i."IdIncapacidadTrabajador" DESC
@@ -587,7 +789,46 @@ def obtener_detalle_incapacidad_nomina(
                 WHERE
                     d."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
                     AND d."Activo" = TRUE
-            ) AS "TotalDocumentos"
+            ) AS "TotalDocumentos",
+            EXISTS (
+                SELECT 1
+                FROM public."CorreccionIncapacidadTrabajador" c2
+                WHERE c2."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                  AND UPPER(COALESCE(c2."EstadoCorreccion", '')) = 'REENVIADA'
+            ) AS "FueCorregida",
+            (
+                SELECT COUNT(*)
+                FROM public."CorreccionIncapacidadTrabajador" c3
+                WHERE c3."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+            ) AS "TotalCorrecciones",
+            (
+                SELECT c1."MotivoCorreccion"
+                FROM public."CorreccionIncapacidadTrabajador" c1
+                WHERE c1."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ORDER BY c1."IdCorreccionIncapacidad" DESC
+                LIMIT 1
+            ) AS "MotivoUltimaCorreccion",
+            (
+                SELECT c1."EstadoCorreccion"
+                FROM public."CorreccionIncapacidadTrabajador" c1
+                WHERE c1."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ORDER BY c1."IdCorreccionIncapacidad" DESC
+                LIMIT 1
+            ) AS "EstadoUltimaCorreccion",
+            (
+                SELECT c1."FechaSolicitud"
+                FROM public."CorreccionIncapacidadTrabajador" c1
+                WHERE c1."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ORDER BY c1."IdCorreccionIncapacidad" DESC
+                LIMIT 1
+            ) AS "FechaSolicitudUltimaCorreccion",
+            (
+                SELECT c1."FechaReenvio"
+                FROM public."CorreccionIncapacidadTrabajador" c1
+                WHERE c1."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador"
+                ORDER BY c1."IdCorreccionIncapacidad" DESC
+                LIMIT 1
+            ) AS "FechaReenvioUltimaCorreccion"
         FROM public."IncapacidadTrabajador" i
         INNER JOIN public."RegistroPersonal" rp
             ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
@@ -646,6 +887,101 @@ def obtener_detalle_incapacidad_nomina(
     return {
         "success": True,
         "data": data,
+    }
+
+
+@router.put("/{id_incapacidad}/tipo")
+def actualizar_tipo_incapacidad_nomina(
+    id_incapacidad: int,
+    payload: ActualizarTipoIncapacidadRequest,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    tipo_incapacidad = str(payload.tipo_incapacidad or "").strip().upper()
+    descripcion_tipo = TIPOS_INCAPACIDAD_NOMINA.get(tipo_incapacidad)
+
+    if not descripcion_tipo:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El tipo de incapacidad seleccionado no es válido.",
+        )
+
+    consulta = text(
+        """
+        UPDATE public."IncapacidadTrabajador"
+        SET
+            "TipoIncapacidad" = :tipo_incapacidad,
+            "DescripcionTipoIncapacidad" = :descripcion_tipo,
+            "FechaActualizacion" = CURRENT_TIMESTAMP
+        WHERE
+            "IdIncapacidadTrabajador" = :id_incapacidad
+            AND "Activo" = TRUE
+            AND UPPER(COALESCE("Estado", '')) = 'REGISTRADA'
+        RETURNING
+            "IdIncapacidadTrabajador",
+            "TipoIncapacidad",
+            "DescripcionTipoIncapacidad",
+            "Estado",
+            "FechaActualizacion"
+        """
+    )
+
+    fila = db.execute(
+        consulta,
+        {
+            "id_incapacidad": id_incapacidad,
+            "tipo_incapacidad": tipo_incapacidad,
+            "descripcion_tipo": descripcion_tipo,
+        },
+    ).mappings().first()
+
+    if not fila:
+        db.rollback()
+
+        estado_actual = _consultar_estado_incapacidad(
+            db,
+            id_incapacidad,
+        )
+
+        if not estado_actual or estado_actual["Activo"] is not True:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="La incapacidad no existe o no está disponible.",
+            )
+
+        estado = _normalizar_estado(
+            estado_actual["Estado"]
+        )
+
+        if estado.upper() == "BORRADOR":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="La incapacidad no existe o no está disponible.",
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "El tipo de incapacidad solo puede modificarse mientras "
+                "la incapacidad se encuentre en estado REGISTRADA. "
+                f"Estado actual: {estado}."
+            ),
+        )
+
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Tipo de incapacidad actualizado correctamente.",
+        "data": {
+            "id_incapacidad": fila["IdIncapacidadTrabajador"],
+            "tipo_incapacidad": fila["TipoIncapacidad"],
+            "descripcion_tipo": fila["DescripcionTipoIncapacidad"],
+            "estado": fila["Estado"],
+            "fecha_actualizacion": fila["FechaActualizacion"],
+        },
     }
 
 
@@ -722,6 +1058,7 @@ def aprobar_incapacidad_nomina(
 def rechazar_incapacidad_nomina(
     id_incapacidad: int,
     payload: RechazoIncapacidadRequest,
+    request: Request,
     db: Session = Depends(get_db),
     usuario_actual=Depends(get_current_user),
 ):
@@ -760,33 +1097,68 @@ def rechazar_incapacidad_nomina(
         """
     )
 
-    fila = db.execute(
-        consulta,
-        {
-            "id_incapacidad": id_incapacidad,
-            "observacion": observacion,
-            "usuario_gestion": usuario_gestion,
-        },
-    ).mappings().first()
+    try:
+        fila = db.execute(
+            consulta,
+            {
+                "id_incapacidad": id_incapacidad,
+                "observacion": observacion,
+                "usuario_gestion": usuario_gestion,
+            },
+        ).mappings().first()
 
-    if not fila:
+        if not fila:
+            db.rollback()
+            _resolver_incapacidad_no_actualizada(
+                db,
+                id_incapacidad,
+            )
+
+        correccion, token_plano = _crear_solicitud_correccion(
+            db=db,
+            id_incapacidad=id_incapacidad,
+            motivo_correccion=observacion,
+            usuario_solicitud=usuario_gestion,
+        )
+
+        url_correccion = _construir_url_correccion(
+            request=request,
+            token_plano=token_plano,
+        )
+
+        db.commit()
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
         db.rollback()
-        _resolver_incapacidad_no_actualizada(db, id_incapacidad)
 
-    db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No fue posible registrar el rechazo y generar "
+                "la solicitud de corrección."
+            ),
+        ) from exc
 
     correo_enviado, detalle_correo = _enviar_notificacion_gestion(
         db=db,
         id_incapacidad=id_incapacidad,
         estado="RECHAZADA",
         observacion=observacion,
+        url_correccion=url_correccion,
     )
 
     return {
         "success": True,
-        "message": "Incapacidad rechazada correctamente.",
+        "message": (
+            "Incapacidad rechazada correctamente. "
+            "Se generó la solicitud de corrección para el trabajador."
+        ),
         "correo_enviado": correo_enviado,
         "detalle_correo": detalle_correo,
+        "correccion_generada": True,
         "data": {
             "id_incapacidad": fila["IdIncapacidadTrabajador"],
             "estado": fila["Estado"],
@@ -794,6 +1166,12 @@ def rechazar_incapacidad_nomina(
             "usuario_gestion_nomina": fila["UsuarioGestionNomina"],
             "fecha_gestion_nomina": fila["FechaGestionNomina"],
             "fecha_actualizacion": fila["FechaActualizacion"],
+            "id_correccion": correccion["IdCorreccionIncapacidad"],
+            "estado_correccion": correccion["EstadoCorreccion"],
+            "fecha_solicitud_correccion": correccion["FechaSolicitud"],
+            "fecha_expiracion_enlace": correccion[
+                "FechaExpiracionToken"
+            ],
         },
     }
 
