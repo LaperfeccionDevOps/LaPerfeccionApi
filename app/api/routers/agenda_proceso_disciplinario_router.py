@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
+from infrastructure.security.auth_dependencies import get_current_user
 
 from domain.models.agenda_proceso_disciplinario import (
     AgendaProcesoDisciplinario,
@@ -56,6 +57,46 @@ router = APIRouter(
     prefix="/api/agenda-disciplinaria",
     tags=["Agenda Disciplinaria"],
 )
+
+
+ROL_ADMIN = 1
+ROL_SUPER_ADMIN = 5
+ROL_RELACIONES_LABORALES = 12
+ROL_TALENTO_HUMANO = 13
+ROL_DESARROLLADOR = 15
+
+ROLES_GESTION_AGENDA_RRLL = {
+    ROL_ADMIN,
+    ROL_SUPER_ADMIN,
+    ROL_RELACIONES_LABORALES,
+    ROL_TALENTO_HUMANO,
+    ROL_DESARROLLADOR,
+}
+
+
+def require_gestion_agenda_rrll(
+    current=Depends(get_current_user),
+):
+    roles_ids = current.get("roles_ids") or []
+
+    roles_actuales = {
+        int(id_rol)
+        for id_rol in roles_ids
+        if str(id_rol).strip()
+    }
+
+    if roles_actuales & ROLES_GESTION_AGENDA_RRLL:
+        return current
+
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "mensaje": (
+                "No tienes permiso para modificar "
+                "la agenda disciplinaria."
+            )
+        },
+    )
 
 
 TIPO_EVENTO_CITACION_ID = 1
@@ -2130,6 +2171,7 @@ def reprogramar_evento_agenda(
     id_agenda: int,
     data: ReprogramarAgendaDisciplinariaRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
 ):
     evento = (
         db.query(AgendaProcesoDisciplinario)
@@ -2311,6 +2353,7 @@ def cancelar_evento_agenda(
     id_agenda: int,
     data: CancelarAgendaDisciplinariaRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
 ):
     evento = (
         db.query(AgendaProcesoDisciplinario)
@@ -2452,6 +2495,7 @@ def registrar_enlace_virtual_rrll(
     id_agenda: int,
     data: EnlaceVirtualRRLLRequest,
     db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
 ):
     evento = (
         db.query(AgendaProcesoDisciplinario)
