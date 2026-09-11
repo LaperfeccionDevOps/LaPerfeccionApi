@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from io import BytesIO
 import hashlib
 import secrets
 
@@ -78,6 +79,13 @@ class PagarIncapacidadRequest(BaseModel):
 
 class ActualizarTipoIncapacidadRequest(BaseModel):
     tipo_incapacidad: str = Field(..., min_length=1, max_length=60)
+
+
+class ActualizarDatosIncapacidadRequest(BaseModel):
+    tipo_incapacidad: str = Field(..., min_length=1, max_length=60)
+    fecha_inicio: date
+    dias_incapacidad: int = Field(..., gt=0, le=3650)
+    es_prorroga: bool
 
 
 def _obtener_valor_usuario(usuario, *nombres):
@@ -186,6 +194,38 @@ def _normalizar_estado(estado) -> str:
     return valor or "REGISTRADA"
 
 
+def _validar_dias_segun_tipo(
+    tipo_incapacidad: str,
+    dias_incapacidad: int,
+) -> None:
+    tipo = str(tipo_incapacidad or "").strip().upper()
+    dias = int(dias_incapacidad)
+
+    if tipo == "INCAPACIDAD_1_2_DIAS" and dias not in {1, 2}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Para el tipo INCAPACIDAD DE 1 Y 2 DÍAS "
+                "solo se permite registrar 1 o 2 días."
+            ),
+        )
+
+    if tipo == "INCAPACIDAD_3_MAS_DIAS" and dias < 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Para el tipo INCAPACIDAD DE 3 O MÁS DÍAS "
+                "se deben registrar mínimo 3 días."
+            ),
+        )
+
+    if dias <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Los días de incapacidad deben ser mayores que cero.",
+        )
+
+
 def _incapacidad_a_dict(fila):
     return {
         "id_incapacidad": fila["IdIncapacidadTrabajador"],
@@ -234,6 +274,162 @@ def _documento_a_dict(fila):
         "tamano_bytes": fila["TamanoBytes"],
         "fecha_creacion": fila["FechaCreacion"],
     }
+
+
+def _construir_pdf_consolidado(documentos) -> bytes:
+    try:
+        try:
+            from pypdf import PdfReader, PdfWriter
+        except ImportError:
+            from PyPDF2 import PdfReader, PdfWriter
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No está instalada una librería para unir archivos PDF. "
+                "Instala pypdf en el entorno del backend."
+            ),
+        ) from exc
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No está instalada Pillow, necesaria para convertir "
+                "imágenes JPG/PNG a PDF."
+            ),
+        ) from exc
+
+    writer = PdfWriter()
+    buffers_temporales = []
+
+    try:
+        for documento in documentos:
+            nombre_archivo = str(
+                documento["NombreArchivo"] or "documento"
+            ).strip()
+
+            contenido = documento["DocumentoCargado"]
+
+            if not contenido:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f'El soporte "{nombre_archivo}" no contiene información.'
+                    ),
+                )
+
+            contenido_bytes = bytes(contenido)
+
+            formato = str(
+                documento["Formato"] or ""
+            ).strip().lower().lstrip(".")
+
+            mime_type = str(
+                documento["MimeType"] or ""
+            ).strip().lower()
+
+            es_pdf = (
+                formato == "pdf"
+                or mime_type == "application/pdf"
+                or nombre_archivo.lower().endswith(".pdf")
+            )
+
+            es_imagen = (
+                formato in {"jpg", "jpeg", "png"}
+                or mime_type in {"image/jpeg", "image/png"}
+                or nombre_archivo.lower().endswith(
+                    (".jpg", ".jpeg", ".png")
+                )
+            )
+
+            try:
+                if es_pdf:
+                    buffer_pdf = BytesIO(contenido_bytes)
+                    buffers_temporales.append(buffer_pdf)
+                    lector = PdfReader(buffer_pdf)
+
+                elif es_imagen:
+                    buffer_imagen = BytesIO(contenido_bytes)
+                    buffers_temporales.append(buffer_imagen)
+
+                    imagen = Image.open(buffer_imagen)
+
+                    if imagen.mode in ("RGBA", "LA"):
+                        fondo = Image.new(
+                            "RGB",
+                            imagen.size,
+                            (255, 255, 255),
+                        )
+
+                        if imagen.mode == "RGBA":
+                            fondo.paste(
+                                imagen,
+                                mask=imagen.getchannel("A"),
+                            )
+                        else:
+                            fondo.paste(
+                                imagen.convert("RGBA"),
+                                mask=imagen.getchannel("A"),
+                            )
+
+                        imagen_pdf = fondo
+                    else:
+                        imagen_pdf = imagen.convert("RGB")
+
+                    buffer_pdf = BytesIO()
+                    buffers_temporales.append(buffer_pdf)
+
+                    imagen_pdf.save(
+                        buffer_pdf,
+                        format="PDF",
+                        resolution=150.0,
+                    )
+                    buffer_pdf.seek(0)
+
+                    lector = PdfReader(buffer_pdf)
+
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f'El soporte "{nombre_archivo}" tiene un formato '
+                            "que no puede consolidarse en PDF."
+                        ),
+                    )
+
+                for pagina in lector.pages:
+                    writer.add_page(pagina)
+
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f'No fue posible procesar el soporte '
+                        f'"{nombre_archivo}" para el PDF consolidado.'
+                    ),
+                ) from exc
+
+        if len(writer.pages) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No hay páginas disponibles para generar el PDF consolidado.",
+            )
+
+        salida = BytesIO()
+        writer.write(salida)
+        return salida.getvalue()
+
+    finally:
+        for buffer in buffers_temporales:
+            try:
+                buffer.close()
+            except Exception:
+                pass
 
 
 def _generar_token_correccion() -> tuple[str, str]:
@@ -985,6 +1181,142 @@ def actualizar_tipo_incapacidad_nomina(
     }
 
 
+@router.put("/{id_incapacidad}/datos")
+def actualizar_datos_incapacidad_nomina(
+    id_incapacidad: int,
+    payload: ActualizarDatosIncapacidadRequest,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    tipo_incapacidad = str(
+        payload.tipo_incapacidad or ""
+    ).strip().upper()
+
+    descripcion_tipo = TIPOS_INCAPACIDAD_NOMINA.get(
+        tipo_incapacidad
+    )
+
+    if not descripcion_tipo:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El tipo de incapacidad seleccionado no es válido.",
+        )
+
+    dias_incapacidad = int(payload.dias_incapacidad)
+    fecha_inicio = payload.fecha_inicio
+
+    _validar_dias_segun_tipo(
+        tipo_incapacidad,
+        dias_incapacidad,
+    )
+
+    incapacidad_actual = db.execute(
+        text(
+            """
+            SELECT
+                "Estado",
+                "Activo"
+            FROM public."IncapacidadTrabajador"
+            WHERE "IdIncapacidadTrabajador" = :id_incapacidad
+            LIMIT 1
+            """
+        ),
+        {"id_incapacidad": id_incapacidad},
+    ).mappings().first()
+
+    if not incapacidad_actual or incapacidad_actual["Activo"] is not True:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La incapacidad no existe o no está disponible.",
+        )
+
+    estado_actual = _normalizar_estado(
+        incapacidad_actual["Estado"]
+    )
+
+    if estado_actual.upper() != "REGISTRADA":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "La información de la incapacidad solo puede modificarse "
+                "mientras se encuentre en estado REGISTRADA. "
+                f"Estado actual: {estado_actual}."
+            ),
+        )
+
+    fecha_final = fecha_inicio + timedelta(
+        days=dias_incapacidad - 1
+    )
+
+    consulta = text(
+        """
+        UPDATE public."IncapacidadTrabajador"
+        SET
+            "TipoIncapacidad" = :tipo_incapacidad,
+            "DescripcionTipoIncapacidad" = :descripcion_tipo,
+            "FechaInicio" = :fecha_inicio,
+            "DiasIncapacidad" = :dias_incapacidad,
+            "FechaFinal" = :fecha_final,
+            "EsProrroga" = :es_prorroga,
+            "FechaActualizacion" = CURRENT_TIMESTAMP
+        WHERE
+            "IdIncapacidadTrabajador" = :id_incapacidad
+            AND "Activo" = TRUE
+            AND UPPER(COALESCE("Estado", '')) = 'REGISTRADA'
+        RETURNING
+            "IdIncapacidadTrabajador",
+            "TipoIncapacidad",
+            "DescripcionTipoIncapacidad",
+            "FechaInicio",
+            "DiasIncapacidad",
+            "FechaFinal",
+            "EsProrroga",
+            "Estado",
+            "FechaActualizacion"
+        """
+    )
+
+    fila = db.execute(
+        consulta,
+        {
+            "id_incapacidad": id_incapacidad,
+            "tipo_incapacidad": tipo_incapacidad,
+            "descripcion_tipo": descripcion_tipo,
+            "fecha_inicio": fecha_inicio,
+            "dias_incapacidad": dias_incapacidad,
+            "fecha_final": fecha_final,
+            "es_prorroga": bool(payload.es_prorroga),
+        },
+    ).mappings().first()
+
+    if not fila:
+        db.rollback()
+        _resolver_incapacidad_no_actualizada(
+            db,
+            id_incapacidad,
+        )
+
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Información de la incapacidad actualizada correctamente.",
+        "data": {
+            "id_incapacidad": fila["IdIncapacidadTrabajador"],
+            "tipo_incapacidad": fila["TipoIncapacidad"],
+            "descripcion_tipo": fila["DescripcionTipoIncapacidad"],
+            "fecha_inicio": fila["FechaInicio"],
+            "dias_incapacidad": fila["DiasIncapacidad"],
+            "fecha_final": fila["FechaFinal"],
+            "es_prorroga": fila["EsProrroga"],
+            "estado": fila["Estado"],
+            "fecha_actualizacion": fila["FechaActualizacion"],
+        },
+    }
+
+
 @router.put("/{id_incapacidad}/aprobar")
 def aprobar_incapacidad_nomina(
     id_incapacidad: int,
@@ -1679,6 +2011,87 @@ def pagar_incapacidad_nomina(
             "fecha_actualizacion": fila["FechaActualizacion"],
         },
     }
+
+
+@router.get("/{id_incapacidad}/documentos-consolidados")
+def descargar_documentos_consolidados_nomina(
+    id_incapacidad: int,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    consulta = text(
+        """
+        SELECT
+            d."IdDocumentoIncapacidadTrabajador",
+            d."IdIncapacidadTrabajador",
+            d."TipoDocumento",
+            d."NombreArchivo",
+            d."Formato",
+            d."MimeType",
+            d."DocumentoCargado",
+            rp."NumeroIdentificacion",
+            i."FechaInicio"
+        FROM public."DocumentoIncapacidadTrabajador" d
+        INNER JOIN public."IncapacidadTrabajador" i
+            ON i."IdIncapacidadTrabajador" = d."IdIncapacidadTrabajador"
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
+        WHERE
+            i."IdIncapacidadTrabajador" = :id_incapacidad
+            AND i."Activo" = TRUE
+            AND d."Activo" = TRUE
+            AND COALESCE(i."Estado", '') <> 'BORRADOR'
+        ORDER BY
+            d."IdDocumentoIncapacidadTrabajador" ASC
+        """
+    )
+
+    documentos = db.execute(
+        consulta,
+        {"id_incapacidad": id_incapacidad},
+    ).mappings().all()
+
+    if not documentos:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="La incapacidad no tiene documentos activos para descargar.",
+        )
+
+    pdf_consolidado = _construir_pdf_consolidado(documentos)
+
+    identificacion = (
+        str(documentos[0]["NumeroIdentificacion"] or "")
+        .strip()
+        .replace(" ", "_")
+    )
+
+    fecha_inicio = documentos[0]["FechaInicio"]
+
+    if fecha_inicio:
+        try:
+            fecha_texto = fecha_inicio.strftime("%Y-%m-%d")
+        except AttributeError:
+            fecha_texto = str(fecha_inicio).replace("/", "-")
+    else:
+        fecha_texto = "sin_fecha"
+
+    nombre_archivo = (
+        f"incapacidad_{identificacion or id_incapacidad}_"
+        f"{fecha_texto}_soportes.pdf"
+    )
+
+    return Response(
+        content=pdf_consolidado,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{nombre_archivo}"'
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/{id_incapacidad}/documentos/{id_documento}")
