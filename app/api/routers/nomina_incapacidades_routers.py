@@ -4,7 +4,11 @@ from io import BytesIO
 import hashlib
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -86,6 +90,8 @@ class ActualizarDatosIncapacidadRequest(BaseModel):
     fecha_inicio: date
     dias_incapacidad: int = Field(..., gt=0, le=3650)
     es_prorroga: bool
+    concepto_sinergy: str | None = Field(default=None, max_length=10)
+    diagnostico: str | None = Field(default=None, max_length=9)
 
 
 def _obtener_valor_usuario(usuario, *nombres):
@@ -243,6 +249,8 @@ def _incapacidad_a_dict(fila):
         "dias_incapacidad": fila["DiasIncapacidad"],
         "fecha_final": fila["FechaFinal"],
         "es_prorroga": fila["EsProrroga"],
+        "concepto_sinergy": fila["ConceptoSinergy"],
+        "diagnostico": fila["Diagnostico"],
         "estado": _normalizar_estado(fila["Estado"]),
         "observacion_nomina": fila["ObservacionNomina"],
         "usuario_gestion_nomina": fila["UsuarioGestionNomina"],
@@ -818,6 +826,559 @@ def _resolver_incapacidad_no_actualizada(
     )
 
 
+def _codigo_tipo_incapacidad_excel(
+    tipo_incapacidad: str,
+    concepto_sinergy: str | None = None,
+):
+    tipo = str(tipo_incapacidad or "").strip().upper()
+    concepto = str(concepto_sinergy or "").strip()
+
+    # Regla principal según el catálogo de conceptos entregado para Sinergy.
+    # 1 = Enfermedad general
+    # 2 = Maternidad / paternidad
+    # 3 = Riesgo laboral
+    if concepto in {"1601", "1602", "1702", "1703"}:
+        return 1
+
+    if concepto in {"1603", "1604"}:
+        return 2
+
+    if concepto in {"1606", "1607", "1704", "1705"}:
+        return 3
+
+    # Respaldo para registros antiguos que todavía no tengan concepto.
+    if tipo in {
+        "INCAPACIDAD_1_2_DIAS",
+        "INCAPACIDAD_3_MAS_DIAS",
+        "ACCIDENTE_TRANSITO",
+    }:
+        return 1
+
+    if tipo in {
+        "LICENCIA_MATERNA",
+        "LICENCIA_PATERNA",
+    }:
+        return 2
+
+    if tipo == "ACCIDENTE_TRABAJO":
+        return 3
+
+    return None
+
+
+def _normalizar_codigo_diagnostico_excel(diagnostico: str | None) -> str:
+    valor = str(diagnostico or "").strip().upper()
+
+    return (
+        valor
+        .replace(".", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+
+def _configurar_excel_incapacidades_aprobadas(ws, filas):
+    encabezados = [
+        "NÚMERO DE INCAPACIDAD ENTIDAD",
+        "FECHA DE EMISIÓN",
+        "EMPLEADO",
+        "FECHA INICIAL INCAPACIDAD",
+        "TOTAL DE DÍAS",
+        "TIPO INCAPACIDAD",
+        "INDICADOR PRÓRROGA",
+        "NÚMERO INCAPACIDAD PRÓRROGA",
+        "DIAGNÓSTICO",
+        "CONCEPTO",
+        "FECHA INICIAL REGISTRO",
+        "ESTADO TRÁMITE",
+    ]
+
+    leyendas = [
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "- DEBE VENIR EN NÚMERO"
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "- DEBE VENIR EN FORMATO DD/MM/YYYY."
+        ),
+        (
+            "CÓDIGO DEL EMPLEADO. DEBE EXISTIR EN EL MAESTRO DE PERSONAL. "
+            "SI HAY INTEGRACIÓN CON GESTIÓN HUMANA CON MANEJO DE CONSECUTIVO "
+            "AUTOMÁTICO PARA CÓDIGOS DE EMPLEADO, EN LUGAR DEL CÓDIGO DEBE "
+            "VENIR EL NÚMERO DEL DOCUMENTO.\n\n"
+            "NOTA: SI EL SISTEMA ESPECIFICA EN LA IMPORTACIÓN QUE EL CÓDIGO "
+            "NO EXISTE, SE DEBE CAMBIAR POR LA CÉDULA DE CIUDADANÍA."
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "- DEBE VENIR EN FORMATO DD/MM/YYYY."
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "- DEBE SER EL NÚMERO DE DÍAS EN INCAPACIDAD DEL EMPLEADO."
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "TIPO DE INCAPACIDAD\n"
+            "(1) ENFERMEDAD GENERAL\n"
+            "(2) MATERNIDAD\n"
+            "(3) RIESGOS PROFESIONALES"
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            "(S) SI ES PRÓRROGA\n"
+            "(N) NO ES PRÓRROGA"
+        ),
+        (
+            "CAMPO OPCIONAL.\n"
+            'SI EN LA COLUMNA "IND_PRORROGA" VIENE S, SE DEBE INDICAR '
+            "LA INCAPACIDAD INICIAL."
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            'DEBE VENIR EL ID DIAGNÓSTICO SEGÚN LA TABLA "DIAGNOSTICO".'
+        ),
+        (
+            "CAMPO OBLIGATORIO.\n"
+            'DEBE VENIR EL CÓDIGO DEL CONCEPTO SEGÚN LA TABLA "CONCEPTO".'
+        ),
+        (
+            "CAMPO OPCIONAL. SI EL CONCEPTO MANEJA CANTIDAD. SI NO, ES OPCIONAL.\n"
+            "- SI VIENE EN BLANCO, SE ASIGNA LA FECHA INICIAL DE REGRESO.\n"
+            "- DEBE VENIR EN FORMATO DD/MM/YYYY.\n"
+            "- DEBE ESTAR ENTRE LAS FECHAS INICIAL Y FINAL DEL PERÍODO.\n"
+            "- DEBE SER MENOR O IGUAL AL CAMPO FECHA FINAL."
+        ),
+        (
+            "TIPOS DE TRÁMITES:\n\n"
+            "01 - EN PROCESO\n"
+            "02 - PAGADA\n"
+            "03 - DEVUELTA\n"
+            "04 - NEGADA\n"
+            "05 - TIEMPO NO CUMPLIDO\n"
+            "06 - INFORMATIVA\n"
+            "07 - INFORMATIVA - PROCESADA\n"
+            "08 - PARCIAL EXT\n"
+            "09 - TOTAL EXT"
+        ),
+    ]
+
+    fill_encabezado = PatternFill(
+        fill_type="solid",
+        fgColor="4A86E8",
+    )
+    fill_leyenda = PatternFill(
+        fill_type="solid",
+        fgColor="C9DAF8",
+    )
+    fill_fila_par = PatternFill(
+        fill_type="solid",
+        fgColor="F7FAFF",
+    )
+
+    fuente_encabezado = Font(
+        color="FFFFFF",
+        bold=True,
+        size=11,
+    )
+    fuente_leyenda = Font(
+        color="000000",
+        bold=False,
+        size=9,
+    )
+    fuente_datos = Font(
+        color="000000",
+        size=10,
+    )
+
+    borde_fino = Side(
+        style="thin",
+        color="7F8C8D",
+    )
+    borde = Border(
+        left=borde_fino,
+        right=borde_fino,
+        top=borde_fino,
+        bottom=borde_fino,
+    )
+
+    ws.title = "INCAPACIDADES APROBADAS"
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A3"
+
+    ultima_fila = max(2, len(filas) + 2)
+    ws.auto_filter.ref = f"A1:L{ultima_fila}"
+
+    for columna, encabezado in enumerate(encabezados, start=1):
+        celda = ws.cell(
+            row=1,
+            column=columna,
+            value=encabezado,
+        )
+        celda.fill = fill_encabezado
+        celda.font = fuente_encabezado
+        celda.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        celda.border = borde
+
+    for columna, leyenda in enumerate(leyendas, start=1):
+        celda = ws.cell(
+            row=2,
+            column=columna,
+            value=leyenda.upper(),
+        )
+        celda.fill = fill_leyenda
+        celda.font = fuente_leyenda
+        celda.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+        celda.border = borde
+
+    ws.row_dimensions[1].height = 34
+    ws.row_dimensions[2].height = 150
+
+    for indice, fila in enumerate(filas, start=3):
+        tipo_codigo = _codigo_tipo_incapacidad_excel(
+            fila["TipoIncapacidad"],
+            fila["ConceptoSinergy"],
+        )
+
+        identificacion = str(
+            fila["NumeroIdentificacion"] or ""
+        ).strip().upper()
+
+        id_diagnostico_sinergy = str(
+            fila["IdDiagnosticoSinergy"] or ""
+        ).strip().upper() or None
+
+        concepto_sinergy = str(
+            fila["ConceptoSinergy"] or ""
+        ).strip().upper() or None
+
+        valores = [
+            identificacion,
+            fila["FechaInicio"],
+            identificacion,
+            fila["FechaInicio"],
+            fila["DiasIncapacidad"],
+            tipo_codigo,
+            "S" if bool(fila["EsProrroga"]) else "N",
+            None,
+            id_diagnostico_sinergy,
+            concepto_sinergy,
+            None,
+            "01",
+        ]
+
+        for columna, valor in enumerate(valores, start=1):
+            if isinstance(valor, str):
+                valor = valor.upper()
+
+            celda = ws.cell(
+                row=indice,
+                column=columna,
+                value=valor,
+            )
+            celda.font = fuente_datos
+            celda.border = borde
+            celda.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+
+            if indice % 2 == 0:
+                celda.fill = fill_fila_par
+
+        # Fechas en formato oficial solicitado por Sinergy.
+        ws.cell(
+            row=indice,
+            column=2,
+        ).number_format = "dd/mm/yyyy"
+        ws.cell(
+            row=indice,
+            column=4,
+        ).number_format = "dd/mm/yyyy"
+
+        # Columnas tratadas expresamente como texto para conservar
+        # ceros a la izquierda y evitar conversiones automáticas.
+        for columna_texto in (1, 3, 9, 10, 12):
+            ws.cell(
+                row=indice,
+                column=columna_texto,
+            ).number_format = "@"
+
+        ws.row_dimensions[indice].height = 24
+
+    anchos = {
+        1: 30,
+        2: 19,
+        3: 24,
+        4: 25,
+        5: 17,
+        6: 21,
+        7: 22,
+        8: 27,
+        9: 18,
+        10: 18,
+        11: 24,
+        12: 24,
+    }
+
+    for columna, ancho in anchos.items():
+        ws.column_dimensions[
+            get_column_letter(columna)
+        ].width = ancho
+
+    ws.sheet_view.zoomScale = 80
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    ws.print_title_rows = "1:2"
+    ws.print_options.horizontalCentered = True
+
+
+
+@router.get("/reporte-excel-aprobadas")
+def descargar_excel_incapacidades_aprobadas(
+    fecha_inicio: date | None = Query(default=None),
+    fecha_fin: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    if (
+        fecha_inicio is not None
+        and fecha_fin is not None
+        and fecha_fin < fecha_inicio
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="La fecha fin no puede ser anterior a la fecha inicio.",
+        )
+
+    condiciones = [
+        'i."Activo" = TRUE',
+        "UPPER(COALESCE(i.\"Estado\", '')) IN ('APROBADA', 'PENDIENTE RADICACION')",
+    ]
+    parametros = {}
+
+    if fecha_inicio is not None:
+        condiciones.append('i."FechaInicio" >= :fecha_inicio')
+        parametros["fecha_inicio"] = fecha_inicio
+
+    if fecha_fin is not None:
+        condiciones.append('i."FechaInicio" <= :fecha_fin')
+        parametros["fecha_fin"] = fecha_fin
+
+    consulta_sql = f"""
+        SELECT
+            i."IdIncapacidadTrabajador",
+            rp."NumeroIdentificacion",
+            rp."Nombres",
+            rp."Apellidos",
+            i."TipoIncapacidad",
+            i."FechaInicio",
+            i."DiasIncapacidad",
+            i."EsProrroga",
+            i."Diagnostico",
+            i."ConceptoSinergy",
+            i."Estado",
+            diag."IdDiagnostico" AS "IdDiagnosticoSinergy",
+            diag."CoincidenciasDiagnostico"
+        FROM public."IncapacidadTrabajador" i
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
+        LEFT JOIN LATERAL (
+            SELECT
+                d."IdDiagnostico",
+                COUNT(*) OVER () AS "CoincidenciasDiagnostico"
+            FROM public."DiagnosticoSinergy" d
+            WHERE
+                d."Activo" = TRUE
+                AND UPPER(
+                    REPLACE(
+                        REPLACE(
+                            REPLACE(
+                                COALESCE(i."Diagnostico", ''),
+                                '.',
+                                ''
+                            ),
+                            '-',
+                            ''
+                        ),
+                        ' ',
+                        ''
+                    )
+                ) = UPPER(
+                    REPLACE(
+                        REPLACE(
+                            REPLACE(
+                                COALESCE(d."CodigoDiagnostico", ''),
+                                '.',
+                                ''
+                            ),
+                            '-',
+                            ''
+                        ),
+                        ' ',
+                        ''
+                    )
+                )
+            ORDER BY d."IdDiagnostico" ASC
+            LIMIT 1
+        ) diag ON TRUE
+        WHERE {" AND ".join(condiciones)}
+        ORDER BY
+            i."FechaInicio" ASC,
+            rp."NumeroIdentificacion" ASC,
+            i."IdIncapacidadTrabajador" ASC
+    """
+
+    filas = db.execute(
+        text(consulta_sql),
+        parametros,
+    ).mappings().all()
+
+    if not filas:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No hay incapacidades aprobadas para el rango "
+                "de fechas seleccionado."
+            ),
+        )
+
+    filas_validas = []
+    filas_omitidas = []
+
+    for fila in filas:
+        id_incapacidad = fila["IdIncapacidadTrabajador"]
+        diagnostico = str(fila["Diagnostico"] or "").strip()
+        concepto = str(fila["ConceptoSinergy"] or "").strip()
+        id_diagnostico = str(
+            fila["IdDiagnosticoSinergy"] or ""
+        ).strip()
+
+        coincidencias_diagnostico = int(
+            fila["CoincidenciasDiagnostico"] or 0
+        )
+
+        tipo_excel = _codigo_tipo_incapacidad_excel(
+            fila["TipoIncapacidad"],
+            concepto,
+        )
+
+        motivos = []
+
+        if not diagnostico:
+            motivos.append("falta diagnóstico")
+        elif not id_diagnostico:
+            motivos.append(
+                f"diagnóstico {diagnostico} no existe en DiagnosticoSinergy"
+            )
+        elif coincidencias_diagnostico > 1:
+            motivos.append(
+                (
+                    f"diagnóstico {diagnostico} tiene "
+                    f"{coincidencias_diagnostico} coincidencias"
+                )
+            )
+
+        if not concepto:
+            motivos.append("falta concepto Sinergy")
+
+        if tipo_excel is None:
+            motivos.append(
+                "no fue posible determinar el tipo de incapacidad 1, 2 o 3"
+            )
+
+        if motivos:
+            filas_omitidas.append(
+                {
+                    "id_incapacidad": id_incapacidad,
+                    "motivos": motivos,
+                }
+            )
+        else:
+            filas_validas.append(fila)
+
+    if not filas_validas:
+        detalle = "; ".join(
+            (
+                f'Incapacidad {item["id_incapacidad"]}: '
+                + ", ".join(item["motivos"])
+            )
+            for item in filas_omitidas[:10]
+        )
+
+        if len(filas_omitidas) > 10:
+            detalle += (
+                f"; hay {len(filas_omitidas) - 10} incapacidad(es) "
+                "adicional(es) con información pendiente"
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "No hay incapacidades completas para generar el Excel "
+                "de Sinergy en el rango seleccionado. "
+                f"{detalle}"
+            ),
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    _configurar_excel_incapacidades_aprobadas(
+        ws,
+        filas_validas,
+    )
+
+    salida = BytesIO()
+    wb.save(salida)
+    salida.seek(0)
+
+    sufijo_inicio = (
+        fecha_inicio.strftime("%Y%m%d")
+        if fecha_inicio
+        else "todas"
+    )
+    sufijo_fin = (
+        fecha_fin.strftime("%Y%m%d")
+        if fecha_fin
+        else "todas"
+    )
+
+    nombre_archivo = (
+        "Incapacidades_Aprobadas_"
+        f"{sufijo_inicio}_{sufijo_fin}.xlsx"
+    )
+
+    return StreamingResponse(
+        salida,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{nombre_archivo}"'
+            ),
+            "X-Registros-Exportados": str(len(filas_validas)),
+            "X-Registros-Omitidos": str(len(filas_omitidas)),
+        },
+    )
+
+
 @router.get("")
 def listar_incapacidades_nomina(
     db: Session = Depends(get_db),
@@ -840,6 +1401,8 @@ def listar_incapacidades_nomina(
             i."DiasIncapacidad",
             i."FechaFinal",
             i."EsProrroga",
+            i."Diagnostico",
+            i."ConceptoSinergy",
             i."Estado",
             i."ObservacionNomina",
             i."UsuarioGestionNomina",
@@ -910,6 +1473,8 @@ def listar_incapacidades_nomina(
             i."DiasIncapacidad",
             i."FechaFinal",
             i."EsProrroga",
+            i."Diagnostico",
+            i."ConceptoSinergy",
             i."Estado",
             i."ObservacionNomina",
             i."UsuarioGestionNomina",
@@ -969,6 +1534,8 @@ def obtener_detalle_incapacidad_nomina(
             i."DiasIncapacidad",
             i."FechaFinal",
             i."EsProrroga",
+            i."Diagnostico",
+            i."ConceptoSinergy",
             i."Estado",
             i."ObservacionNomina",
             i."UsuarioGestionNomina",
@@ -1206,6 +1773,47 @@ def actualizar_datos_incapacidad_nomina(
 
     dias_incapacidad = int(payload.dias_incapacidad)
     fecha_inicio = payload.fecha_inicio
+    concepto_sinergy = str(payload.concepto_sinergy or "").strip()
+    diagnostico = str(payload.diagnostico or "").strip()
+
+    if len(concepto_sinergy) > 10:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El concepto permite máximo 10 caracteres.",
+        )
+
+    if concepto_sinergy:
+        concepto_valido = db.execute(
+            text(
+                """
+                SELECT
+                    "CodigoConcepto"
+                FROM public."ConceptoIncapacidadSinergy"
+                WHERE
+                    "CodigoConcepto" = :codigo_concepto
+                    AND "Activo" = TRUE
+                LIMIT 1
+                """
+            ),
+            {
+                "codigo_concepto": concepto_sinergy,
+            },
+        ).mappings().first()
+
+        if not concepto_valido:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"El concepto {concepto_sinergy} no existe o no está "
+                    "activo en el catálogo de conceptos de Sinergy."
+                ),
+            )
+
+    if len(diagnostico) > 9:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El diagnóstico permite máximo 9 caracteres.",
+        )
 
     _validar_dias_segun_tipo(
         tipo_incapacidad,
@@ -1260,6 +1868,8 @@ def actualizar_datos_incapacidad_nomina(
             "DiasIncapacidad" = :dias_incapacidad,
             "FechaFinal" = :fecha_final,
             "EsProrroga" = :es_prorroga,
+            "ConceptoSinergy" = :concepto_sinergy,
+            "Diagnostico" = :diagnostico,
             "FechaActualizacion" = CURRENT_TIMESTAMP
         WHERE
             "IdIncapacidadTrabajador" = :id_incapacidad
@@ -1273,6 +1883,8 @@ def actualizar_datos_incapacidad_nomina(
             "DiasIncapacidad",
             "FechaFinal",
             "EsProrroga",
+            "ConceptoSinergy",
+            "Diagnostico",
             "Estado",
             "FechaActualizacion"
         """
@@ -1288,6 +1900,8 @@ def actualizar_datos_incapacidad_nomina(
             "dias_incapacidad": dias_incapacidad,
             "fecha_final": fecha_final,
             "es_prorroga": bool(payload.es_prorroga),
+            "concepto_sinergy": concepto_sinergy or None,
+            "diagnostico": diagnostico or None,
         },
     ).mappings().first()
 
@@ -1311,6 +1925,8 @@ def actualizar_datos_incapacidad_nomina(
             "dias_incapacidad": fila["DiasIncapacidad"],
             "fecha_final": fila["FechaFinal"],
             "es_prorroga": fila["EsProrroga"],
+            "concepto_sinergy": fila["ConceptoSinergy"],
+            "diagnostico": fila["Diagnostico"],
             "estado": fila["Estado"],
             "fecha_actualizacion": fila["FechaActualizacion"],
         },
