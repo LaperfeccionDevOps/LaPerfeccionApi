@@ -841,6 +841,172 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
         raise HTTPException(status_code=500, detail=f"Error al consultar retiro laboral: {str(e)}")
 
 
+
+@router.get("/{id_retiro_laboral}/evidencias-operaciones")
+def listar_evidencias_operaciones_retiro(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna las evidencias cargadas por Operaciones para el Paz y Salvo
+    asociado al retiro laboral.
+
+    Estas evidencias son visibles para RRLL y permanecen separadas del
+    documento oficial de Paz y Salvo registrado en RetiroLaboralAdjunto.
+    """
+    try:
+        retiro = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    pso."IdPazYSalvo"
+                FROM public."RetiroLaboral" rl
+                LEFT JOIN LATERAL (
+                    SELECT p."IdPazYSalvo"
+                    FROM public."PazYSalvoOperaciones" p
+                    WHERE p."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                    ORDER BY p."IdPazYSalvo" DESC
+                    LIMIT 1
+                ) pso ON true
+                WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
+            """),
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro:
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado."
+            )
+
+        rows = db.execute(
+            text("""
+                SELECT
+                    e."IdPazYSalvoEvidencia",
+                    e."IdPazYSalvo",
+                    e."IdRetiroLaboral",
+                    e."TipoEvidencia",
+                    e."NombreArchivo",
+                    e."NombreArchivoOriginal",
+                    e."RutaArchivo",
+                    e."ExtensionArchivo",
+                    e."MimeType",
+                    e."PesoArchivo",
+                    e."Observacion",
+                    e."Activo",
+                    e."Eliminado",
+                    e."FechaCreacion",
+                    e."FechaActualizacion",
+                    e."CreadoPor",
+                    e."UsuarioActualizacion"
+                FROM public."PazYSalvoOperacionesEvidencia" e
+                WHERE e."IdRetiroLaboral" = :id_retiro_laboral
+                  AND (
+                        :id_paz_y_salvo IS NULL
+                        OR e."IdPazYSalvo" = :id_paz_y_salvo
+                      )
+                  AND COALESCE(e."Activo", true) = true
+                  AND COALESCE(e."Eliminado", false) = false
+                ORDER BY
+                    e."FechaCreacion" ASC,
+                    e."IdPazYSalvoEvidencia" ASC;
+            """),
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_paz_y_salvo": retiro["IdPazYSalvo"],
+            }
+        ).mappings().all()
+
+        return {
+            "success": True,
+            "message": "Evidencias de Operaciones consultadas correctamente.",
+            "data": [dict(row) for row in rows],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar evidencias de Operaciones: {str(e)}"
+        )
+
+
+@router.get(
+    "/{id_retiro_laboral}/evidencias-operaciones/{id_evidencia}/descargar"
+)
+def descargar_evidencia_operaciones_retiro(
+    id_retiro_laboral: int,
+    id_evidencia: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Descarga una evidencia de Operaciones asociada al retiro laboral.
+
+    El filtro por IdRetiroLaboral + IdPazYSalvoEvidencia evita que una
+    evidencia de otro retiro pueda consultarse desde este endpoint.
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT
+                    e."IdPazYSalvoEvidencia",
+                    e."IdRetiroLaboral",
+                    e."NombreArchivo",
+                    e."NombreArchivoOriginal",
+                    e."RutaArchivo",
+                    e."ExtensionArchivo",
+                    e."MimeType"
+                FROM public."PazYSalvoOperacionesEvidencia" e
+                WHERE e."IdPazYSalvoEvidencia" = :id_evidencia
+                  AND e."IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE(e."Activo", true) = true
+                  AND COALESCE(e."Eliminado", false) = false
+                LIMIT 1;
+            """),
+            {
+                "id_evidencia": id_evidencia,
+                "id_retiro_laboral": id_retiro_laboral,
+            }
+        ).mappings().first()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Evidencia de Operaciones no encontrada."
+            )
+
+        ruta_archivo = Path(row["RutaArchivo"])
+
+        if not ruta_archivo.exists() or not ruta_archivo.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="El archivo de evidencia no existe en el servidor."
+            )
+
+        nombre_descarga = (
+            row["NombreArchivoOriginal"]
+            or row["NombreArchivo"]
+            or f"evidencia_operaciones_{id_evidencia}"
+        )
+
+        media_type = row["MimeType"] or "application/octet-stream"
+
+        return FileResponse(
+            path=str(ruta_archivo),
+            media_type=media_type,
+            filename=nombre_descarga,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al descargar evidencia de Operaciones: {str(e)}"
+        )
+
 @router.put("/{id_retiro_laboral}/estado")
 def actualizar_estado_retiro_laboral(
     id_retiro_laboral: int,
