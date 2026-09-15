@@ -1179,6 +1179,93 @@ def devolver_retiro_rrll(
         )
 
 
+
+# ============================================================
+# ABIERTOS OPERACIONES - SOLO CONSULTA
+# NO INSERTA
+# NO ACTUALIZA
+# NO ELIMINA
+# ============================================================
+@router.get("/abiertos-operaciones")
+def listar_retiros_abiertos_operaciones(db: Session = Depends(get_db)):
+    """
+    Consulta exclusivamente retiros que todavía se encuentran en gestión
+    de Operaciones.
+
+    Se mantiene separado del listado general de Nómina para no incluir
+    PENDIENTE_OPERACIONES en indicadores, reporte Excel ni flujo editable.
+    """
+    try:
+        query = text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rp."NumeroIdentificacion",
+                rp."Nombres",
+                rp."Apellidos",
+                COALESCE(c."Nombre", 'SIN CLIENTE') AS "NombreCliente",
+                rl."FechaProceso",
+                rl."FechaRetiro",
+                rl."FechaCreacion",
+                rl."EstadoCasoRRLL",
+                rp."IdEstadoProceso",
+                ep."Nombre" AS "EstadoProceso",
+                mr."Nombre" AS "MotivoRetiro",
+                ps."IdPazYSalvo",
+                psd."IdPazYSalvoDetalle",
+                psd."EstadoPazYSalvo",
+                false AS "PuedeGestionarNomina"
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            LEFT JOIN public."Cliente" c
+                ON c."IdCliente" = rl."IdCliente"
+            LEFT JOIN public."EstadoProceso" ep
+                ON ep."IdEstadoProceso" = rp."IdEstadoProceso"
+            LEFT JOIN public."MotivoRetiro" mr
+                ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+            LEFT JOIN LATERAL (
+                SELECT pso."IdPazYSalvo"
+                FROM public."PazYSalvoOperaciones" pso
+                WHERE pso."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                ORDER BY
+                    pso."FechaCreacion" DESC NULLS LAST,
+                    pso."IdPazYSalvo" DESC
+                LIMIT 1
+            ) ps ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    psod."IdPazYSalvoDetalle",
+                    psod."EstadoPazYSalvo"
+                FROM public."PazYSalvoOperacionesDetalle" psod
+                WHERE psod."IdPazYSalvo" = ps."IdPazYSalvo"
+                ORDER BY
+                    psod."FechaActualizacion" DESC NULLS LAST,
+                    psod."IdPazYSalvoDetalle" DESC
+                LIMIT 1
+            ) psd ON true
+            WHERE UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", '')))
+                    = 'PENDIENTE_OPERACIONES'
+              AND COALESCE(rl."Activo", true) = true
+              AND rl."FechaEnvioOperaciones" IS NULL
+            ORDER BY rl."FechaCreacion" DESC;
+        """)
+
+        rows = db.execute(query).mappings().all()
+
+        return {
+            "success": True,
+            "message": "Retiros abiertos en Operaciones consultados correctamente.",
+            "data": [dict(row) for row in rows],
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar retiros abiertos en Operaciones: {e!s}",
+        )
+
+
 @router.get("/{id_retiro_laboral}/adjuntos")
 def listar_adjuntos_nomina_retiro(
     id_retiro_laboral: int,
