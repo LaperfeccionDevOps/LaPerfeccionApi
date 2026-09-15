@@ -99,6 +99,64 @@ def require_gestion_agenda_rrll(
     )
 
 
+ROL_OPERACIONES = 6
+
+PERMISOS_CONSULTA_AGENDA = {
+    "OPERACIONES_PROCESOS_DISCIPLINARIOS",
+    "RECEPCION_AGENDA_DISCIPLINARIA",
+}
+
+
+def require_consulta_agenda_disciplinaria(
+    current=Depends(get_current_user),
+):
+    """
+    Autoriza únicamente la consulta de la agenda disciplinaria.
+
+    Permite:
+    - Roles de gestión de RRLL.
+    - Rol Operaciones.
+    - Usuarios con permiso granular de Procesos Disciplinarios de Operaciones.
+    - Usuarios con permiso granular de Agenda Disciplinaria de Recepción.
+
+    Esta dependencia NO concede permisos de creación, edición,
+    reprogramación ni cancelación.
+    """
+    roles_ids = current.get("roles_ids") or []
+    permisos = current.get("permisos") or []
+
+    roles_actuales = {
+        int(id_rol)
+        for id_rol in roles_ids
+        if str(id_rol).strip()
+    }
+
+    permisos_actuales = {
+        str(permiso).strip().upper()
+        for permiso in permisos
+        if str(permiso).strip()
+    }
+
+    if roles_actuales & ROLES_GESTION_AGENDA_RRLL:
+        return current
+
+    if ROL_OPERACIONES in roles_actuales:
+        return current
+
+    if permisos_actuales & PERMISOS_CONSULTA_AGENDA:
+        return current
+
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "mensaje": (
+                "No tienes permiso para consultar "
+                "la agenda disciplinaria."
+            )
+        },
+    )
+
+
 TIPO_EVENTO_CITACION_ID = 1
 DIAS_HABILES_MINIMOS_CITACION = 5
 DIAS_HABILES_VENTANA_EXTRAORDINARIA = 5
@@ -1701,6 +1759,7 @@ def listar_agenda_general_por_rango(
     estado: str | None = None,
     buscar: str | None = None,
     db: Session = Depends(get_db),
+    current=Depends(require_consulta_agenda_disciplinaria),
 ):
     """
     Consulta la agenda general de RRLL por rango de fechas.
