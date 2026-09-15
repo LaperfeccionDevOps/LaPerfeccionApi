@@ -192,23 +192,6 @@ def _normalizar_opcion(
     return opcion
 
 
-def _validar_correo(correo: str | None) -> str:
-    valor = _normalizar_texto_requerido(
-        correo,
-        "CorreoSupervisora",
-    )
-
-    dominio = valor.rsplit("@", 1)[-1] if "@" in valor else ""
-
-    if "@" not in valor or "." not in dominio:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El correo de la supervisora no tiene un formato válido.",
-        )
-
-    return valor
-
-
 def _validar_valor_descuento(
     aplica_descuento: str,
     valor_descuento: Decimal | None,
@@ -1882,7 +1865,7 @@ async def actualizar_paz_salvo_proceso_pendiente(
     PendientePagoVacunas: str = Form(...),
 
     UsuariosClavesDispositivos: str | None = Form(None),
-    CorreoSupervisora: str = Form(...),
+    CorreoSupervisora: str | None = Form(None),
     EstadoPazYSalvo: str = Form(...),
 
     # Compatibilidad con un PDF manual.
@@ -2032,7 +2015,7 @@ async def actualizar_paz_salvo_proceso_pendiente(
         usuarios_claves_dispositivos = _normalizar_texto_opcional(
             UsuariosClavesDispositivos
         )
-        correo_supervisora = _validar_correo(CorreoSupervisora)
+        correo_supervisora = _normalizar_texto_opcional(CorreoSupervisora)
         estado_paz_y_salvo = _normalizar_opcion(
             EstadoPazYSalvo,
             "EstadoPazYSalvo",
@@ -3005,9 +2988,82 @@ async def guardar_rq_operaciones(
 
         db.commit()
 
+        # Si Operaciones confirma que NO requiere reemplazo y el Paz y Salvo
+        # ya está CERRADO, no existe una vacante para Selección. El retiro
+        # debe continuar directamente hacia Relaciones Laborales.
+        enviado_rrll_automaticamente = False
+
+        if (
+            not datos["RequiereReemplazo"]
+            and estado_paz_salvo == "CERRADO"
+        ):
+            db.execute(
+                text("""
+                    UPDATE public."RQOperaciones"
+                    SET
+                        "EstadoRQ" = 'ENVIADO_RRLL',
+                        "EnviadoRRLL" = true,
+                        "FechaEnvioRRLL" = CURRENT_TIMESTAMP,
+                        "EnviadoSeleccion" = false,
+                        "FechaEnvioSeleccion" = NULL,
+                        "UsuarioActualizacion" = :usuario,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP
+                    WHERE "IdRQOperaciones" = :id_rq_operaciones
+                      AND COALESCE("Activo", true) = true;
+                """),
+                {
+                    "usuario": usuario_auditoria,
+                    "id_rq_operaciones": id_rq_operaciones,
+                },
+            )
+
+            db.execute(
+                text("""
+                    UPDATE public."RetiroLaboral"
+                    SET
+                        "EstadoCasoRRLL" = 'ABIERTO',
+                        "FechaEnvioOperaciones" = COALESCE(
+                            "FechaEnvioOperaciones",
+                            CURRENT_TIMESTAMP
+                        ),
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+                """),
+                {
+                    "usuario": usuario_auditoria,
+                    "id_retiro_laboral": IdRetiroLaboral,
+                },
+            )
+
+            db.execute(
+                text("""
+                    UPDATE public."RegistroPersonal"
+                    SET
+                        "IdEstadoProceso" = :id_estado_proceso,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRegistroPersonal" = :id_registro_personal;
+                """),
+                {
+                    "id_estado_proceso": ID_ESTADO_RETIRO_ABIERTO,
+                    "usuario": usuario_auditoria,
+                    "id_registro_personal": contexto["IdRegistroPersonal"],
+                },
+            )
+
+            db.commit()
+            enviado_rrll_automaticamente = True
+            estado_rq = "ENVIADO_RRLL"
+
         return {
             "success": True,
-            "message": "RQ guardado correctamente en Operaciones.",
+            "message": (
+                "Se confirmó que el retiro no requiere reemplazo y fue "
+                "enviado correctamente a Relaciones Laborales."
+                if enviado_rrll_automaticamente
+                else "RQ guardado correctamente en Operaciones."
+            ),
             "data": {
                 "IdRQOperaciones": int(id_rq_operaciones),
                 "IdRetiroLaboral": IdRetiroLaboral,
@@ -3040,7 +3096,9 @@ async def guardar_rq_operaciones(
                 "TipoRQ": parametros_rq["tipo_rq"],
                 "CantidadSolicitada": parametros_rq["cantidad_solicitada"],
                 "EstadoRQ": estado_rq,
-                "EnviadoRRLL": False,
+                "EnviadoRRLL": enviado_rrll_automaticamente,
+                "EnviadoSeleccion": False,
+                "EnvioAutomaticoRRLL": enviado_rrll_automaticamente,
                 "IdRQOperacionesAdjunto": id_adjunto,
             },
         }
@@ -3368,7 +3426,7 @@ async def guardar_retiro_operaciones(
     PendientePagoVacunas: str = Form(...),
 
     UsuariosClavesDispositivos: str | None = Form(None),
-    CorreoSupervisora: str = Form(...),
+    CorreoSupervisora: str | None = Form(None),
     EstadoPazYSalvo: str = Form(...),
 
     # Compatibilidad con el flujo anterior.
@@ -3517,7 +3575,7 @@ async def guardar_retiro_operaciones(
         usuarios_claves_dispositivos = _normalizar_texto_opcional(
             UsuariosClavesDispositivos
         )
-        correo_supervisora = _validar_correo(CorreoSupervisora)
+        correo_supervisora = _normalizar_texto_opcional(CorreoSupervisora)
         estado_paz_y_salvo = _normalizar_opcion(
             EstadoPazYSalvo,
             "EstadoPazYSalvo",
