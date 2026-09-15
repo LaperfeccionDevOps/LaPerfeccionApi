@@ -124,6 +124,7 @@ from api.routers.retiro_laboral_adjunto_routers import (
 )
 from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
 from api.routers.rrll_excel_routers import router as rrll_excel_router
+from api.routers.seleccion_rq_routers import router as seleccion_rq_router
 from api.routers.solicitud_autorizacion_agenda_disciplinaria_router import (
     router as solicitud_autorizacion_agenda_disciplinaria_router,
 )
@@ -232,6 +233,7 @@ app.include_router(retiro_laboral_adjunto_router)
 app.include_router(operaciones_retiros_router)
 app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
+app.include_router(seleccion_rq_router)
 app.include_router(documentos_activos_routers.router)
 app.include_router(proceso_disciplinario_router)
 app.include_router(indicadores_proceso_disciplinario_router)

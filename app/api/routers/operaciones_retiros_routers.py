@@ -818,6 +818,10 @@ def _guardar_adjunto_rq(
 def _serializar_rq(row) -> dict:
     return {
         "IdRQOperaciones": int(row["IdRQOperaciones"]),
+        "TipoRQ": row.get("TipoRQ"),
+        "CantidadSolicitada": int(row.get("CantidadSolicitada") or 1),
+        "EnviadoSeleccion": bool(row.get("EnviadoSeleccion") or False),
+        "FechaEnvioSeleccion": row.get("FechaEnvioSeleccion"),
         "IdRetiroLaboral": int(row["IdRetiroLaboral"]),
         "IdPazYSalvo": int(row["IdPazYSalvo"]),
         "IdRegistroPersonal": int(row["IdRegistroPersonal"]),
@@ -828,7 +832,11 @@ def _serializar_rq(row) -> dict:
         "IdCargo": (
             int(row["IdCargo"])
             if row.get("IdCargo") is not None
-            else None
+            else (
+                int(row["IdCargoDerivado"])
+                if row.get("IdCargoDerivado") is not None
+                else None
+            )
         ),
         "NombreCargo": row.get("NombreCargo"),
         "IdUsuarioLider": str(row["IdUsuarioLider"]),
@@ -2632,7 +2640,7 @@ def obtener_rq_por_retiro(
                     COALESCE(rp."Apellidos", '')
                 ) AS "NombreCompleto",
                 c."Nombre" AS "NombreCliente",
-                acc."IdCargo",
+                acc."IdCargo" AS "IdCargoDerivado",
                 ca."NombreCargo",
                 u."NombreUsuario" AS "NombreLider",
                 prq."CodigoPerfil",
@@ -2831,6 +2839,18 @@ async def guardar_rq_operaciones(
             "motivo_vacante": datos["MotivoVacante"],
             "observacion_cliente": datos["ObservacionCliente"],
             "estado_rq": estado_rq,
+            "tipo_rq": (
+                "REEMPLAZO"
+                if datos["RequiereReemplazo"]
+                else None
+            ),
+            "id_cargo": (
+                int(contexto["IdCargo"])
+                if datos["RequiereReemplazo"]
+                and contexto["IdCargo"] is not None
+                else None
+            ),
+            "cantidad_solicitada": 1,
         }
 
         if rq_existente:
@@ -2857,6 +2877,9 @@ async def guardar_rq_operaciones(
                         "MotivoVacante" = :motivo_vacante,
                         "ObservacionCliente" = :observacion_cliente,
                         "EstadoRQ" = :estado_rq,
+                        "TipoRQ" = :tipo_rq,
+                        "IdCargo" = :id_cargo,
+                        "CantidadSolicitada" = :cantidad_solicitada,
                         "UsuarioActualizacion" = :usuario_actualizacion,
                         "FechaActualizacion" = CURRENT_TIMESTAMP
                     WHERE "IdRQOperaciones" = :id_rq_operaciones;
@@ -2888,6 +2911,9 @@ async def guardar_rq_operaciones(
                         "ObservacionCliente",
                         "FechaRegistro",
                         "EstadoRQ",
+                        "TipoRQ",
+                        "IdCargo",
+                        "CantidadSolicitada",
                         "EnviadoRRLL",
                         "Activo",
                         "UsuarioCreacion",
@@ -2911,6 +2937,9 @@ async def guardar_rq_operaciones(
                         :observacion_cliente,
                         CURRENT_DATE,
                         :estado_rq,
+                        :tipo_rq,
+                        :id_cargo,
+                        :cantidad_solicitada,
                         false,
                         true,
                         :usuario_creacion,
@@ -3008,6 +3037,8 @@ async def guardar_rq_operaciones(
                 ),
                 "TipoNotificacion": datos["TipoNotificacion"],
                 "RequiereReemplazo": datos["RequiereReemplazo"],
+                "TipoRQ": parametros_rq["tipo_rq"],
+                "CantidadSolicitada": parametros_rq["cantidad_solicitada"],
                 "EstadoRQ": estado_rq,
                 "EnviadoRRLL": False,
                 "IdRQOperacionesAdjunto": id_adjunto,
@@ -3158,6 +3189,18 @@ def enviar_rq_retiro_a_rrll(
                     "EstadoRQ" = 'ENVIADO_RRLL',
                     "EnviadoRRLL" = true,
                     "FechaEnvioRRLL" = CURRENT_TIMESTAMP,
+                    "EnviadoSeleccion" = CASE
+                        WHEN "TipoRQ" = 'REEMPLAZO'
+                             AND COALESCE("RequiereReemplazo", false) = true
+                        THEN true
+                        ELSE "EnviadoSeleccion"
+                    END,
+                    "FechaEnvioSeleccion" = CASE
+                        WHEN "TipoRQ" = 'REEMPLAZO'
+                             AND COALESCE("RequiereReemplazo", false) = true
+                        THEN COALESCE("FechaEnvioSeleccion", CURRENT_TIMESTAMP)
+                        ELSE "FechaEnvioSeleccion"
+                    END,
                     "UsuarioActualizacion" = :usuario,
                     "FechaActualizacion" = CURRENT_TIMESTAMP
                 WHERE "IdRQOperaciones" = :id_rq_operaciones
