@@ -167,6 +167,19 @@ class EnlaceVirtualRRLLRequest(BaseModel):
     EnlaceVirtual: str
     UsuarioMovimiento: str | None = None
 
+
+class BloqueoAgendaDisciplinariaCreateRequest(BaseModel):
+    FechaBloqueo: date
+    TipoBloqueo: str
+    HoraInicio: time | None = None
+    HoraFin: time | None = None
+    Motivo: str
+    UsuarioMovimiento: str | None = None
+
+
+class DesbloqueoAgendaDisciplinariaRequest(BaseModel):
+    UsuarioMovimiento: str | None = None
+
 HORA_INICIO_MANANA = time(7, 10)
 HORA_FIN_MANANA = time(13, 0)
 HORA_INICIO_TARDE = time(14, 0)
@@ -735,6 +748,298 @@ def generar_bloques_citacion() -> list[tuple[time, time]]:
 
 BLOQUES_CITACION = generar_bloques_citacion()
 
+def _normalizar_usuario_movimiento(
+    current: dict | None,
+    usuario_solicitado: str | None = None,
+) -> str:
+    usuario = str(usuario_solicitado or "").strip()
+    if usuario:
+        return usuario[:100]
+
+    current = current or {}
+    for clave in (
+        "username",
+        "usuario",
+        "sub",
+        "email",
+        "nombreUsuario",
+        "NombreUsuario",
+    ):
+        valor = str(current.get(clave) or "").strip()
+        if valor:
+            return valor[:100]
+
+    return "RRLL"
+
+
+def _fila_bloqueo_a_dict(row) -> dict:
+    return {
+        "IdBloqueoAgendaDisciplinaria": row["IdBloqueoAgendaDisciplinaria"],
+        "FechaBloqueo": row["FechaBloqueo"],
+        "TipoBloqueo": row["TipoBloqueo"],
+        "HoraInicio": row["HoraInicio"],
+        "HoraFin": row["HoraFin"],
+        "Motivo": row["Motivo"],
+        "Activo": row["Activo"],
+        "UsuarioCreacion": row["UsuarioCreacion"],
+        "FechaCreacion": row["FechaCreacion"],
+        "UsuarioDesbloqueo": row["UsuarioDesbloqueo"],
+        "FechaDesbloqueo": row["FechaDesbloqueo"],
+    }
+
+
+def listar_bloqueos_activos_fecha(
+    db: Session,
+    fecha_evento: date,
+):
+    sql = text(
+        """
+        SELECT
+            b."IdBloqueoAgendaDisciplinaria",
+            b."FechaBloqueo",
+            b."TipoBloqueo",
+            b."HoraInicio",
+            b."HoraFin",
+            b."Motivo",
+            b."Activo",
+            b."UsuarioCreacion",
+            b."FechaCreacion",
+            b."UsuarioDesbloqueo",
+            b."FechaDesbloqueo"
+        FROM public."BloqueoAgendaDisciplinaria" b
+        WHERE b."Activo" = TRUE
+          AND b."FechaBloqueo" = :fecha_evento
+        ORDER BY
+            CASE
+                WHEN b."TipoBloqueo" = 'DIA_COMPLETO' THEN 0
+                ELSE 1
+            END,
+            b."HoraInicio" NULLS FIRST,
+            b."IdBloqueoAgendaDisciplinaria" ASC
+        """
+    )
+    return db.execute(
+        sql,
+        {"fecha_evento": fecha_evento},
+    ).mappings().all()
+
+
+def buscar_bloqueo_persistente_cruzado(
+    db: Session,
+    fecha_evento: date,
+    hora_inicio: time,
+    hora_fin: time,
+):
+    sql = text(
+        """
+        SELECT
+            b."IdBloqueoAgendaDisciplinaria",
+            b."FechaBloqueo",
+            b."TipoBloqueo",
+            b."HoraInicio",
+            b."HoraFin",
+            b."Motivo"
+        FROM public."BloqueoAgendaDisciplinaria" b
+        WHERE b."Activo" = TRUE
+          AND b."FechaBloqueo" = :fecha_evento
+          AND (
+                b."TipoBloqueo" = 'DIA_COMPLETO'
+                OR (
+                    b."TipoBloqueo" = 'RANGO_HORARIO'
+                    AND b."HoraInicio" < :hora_fin
+                    AND b."HoraFin" > :hora_inicio
+                )
+          )
+        ORDER BY
+            CASE
+                WHEN b."TipoBloqueo" = 'DIA_COMPLETO' THEN 0
+                ELSE 1
+            END,
+            b."HoraInicio" NULLS FIRST
+        LIMIT 1
+        """
+    )
+    return db.execute(
+        sql,
+        {
+            "fecha_evento": fecha_evento,
+            "hora_inicio": hora_inicio,
+            "hora_fin": hora_fin,
+        },
+    ).mappings().first()
+
+
+def validar_bloqueo_persistente_agenda(
+    db: Session,
+    fecha_evento: date,
+    hora_inicio: time,
+    hora_fin: time,
+) -> None:
+    bloqueo = buscar_bloqueo_persistente_cruzado(
+        db=db,
+        fecha_evento=fecha_evento,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
+
+    if bloqueo:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "AGENDA_BLOQUEADA_RRLL",
+                "mensaje": (
+                    "El horario seleccionado fue bloqueado por "
+                    "Relaciones Laborales y no se encuentra disponible."
+                ),
+                "fecha": fecha_evento.strftime("%d/%m/%Y"),
+                "horaInicio": hora_inicio.strftime("%H:%M"),
+                "horaFin": hora_fin.strftime("%H:%M"),
+                "bloqueo": {
+                    "IdBloqueoAgendaDisciplinaria": (
+                        bloqueo["IdBloqueoAgendaDisciplinaria"]
+                    ),
+                    "TipoBloqueo": bloqueo["TipoBloqueo"],
+                    "HoraInicio": bloqueo["HoraInicio"],
+                    "HoraFin": bloqueo["HoraFin"],
+                    "Motivo": bloqueo["Motivo"],
+                },
+            },
+        )
+
+
+def buscar_eventos_activos_para_bloqueo(
+    db: Session,
+    fecha_bloqueo: date,
+    tipo_bloqueo: str,
+    hora_inicio: time | None,
+    hora_fin: time | None,
+):
+    condiciones = [
+        'ag."Activo" = TRUE',
+        'ag."EstadoAgenda" != \'CANCELADO\'',
+        'ag."FechaEvento" = :fecha_bloqueo',
+    ]
+    parametros = {"fecha_bloqueo": fecha_bloqueo}
+
+    if tipo_bloqueo == "RANGO_HORARIO":
+        condiciones.extend(
+            [
+                'ag."HoraInicio" < :hora_fin',
+                'ag."HoraFin" > :hora_inicio',
+            ]
+        )
+        parametros["hora_inicio"] = hora_inicio
+        parametros["hora_fin"] = hora_fin
+
+    sql = text(
+        f"""
+        SELECT
+            ag."IdAgendaProcesoDisciplinario",
+            ag."IdProcesoDisciplinario",
+            ag."IdRegistroPersonal",
+            rp."NumeroIdentificacion",
+            CONCAT(
+                COALESCE(rp."Nombres", ''),
+                ' ',
+                COALESCE(rp."Apellidos", '')
+            ) AS "NombreCompleto",
+            ag."FechaEvento",
+            ag."HoraInicio",
+            ag."HoraFin",
+            ag."EstadoAgenda"
+        FROM public."AgendaProcesoDisciplinario" ag
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = ag."IdRegistroPersonal"
+        WHERE {' AND '.join(condiciones)}
+        ORDER BY ag."HoraInicio" ASC
+        """
+    )
+
+    return db.execute(
+        sql,
+        parametros,
+    ).mappings().all()
+
+
+def buscar_cruce_bloqueos_activos(
+    db: Session,
+    fecha_bloqueo: date,
+    tipo_bloqueo: str,
+    hora_inicio: time | None,
+    hora_fin: time | None,
+):
+    if tipo_bloqueo == "DIA_COMPLETO":
+        sql = text(
+            """
+            SELECT
+                b."IdBloqueoAgendaDisciplinaria",
+                b."FechaBloqueo",
+                b."TipoBloqueo",
+                b."HoraInicio",
+                b."HoraFin",
+                b."Motivo"
+            FROM public."BloqueoAgendaDisciplinaria" b
+            WHERE b."Activo" = TRUE
+              AND b."FechaBloqueo" = :fecha_bloqueo
+            ORDER BY b."IdBloqueoAgendaDisciplinaria" ASC
+            LIMIT 1
+            """
+        )
+        parametros = {"fecha_bloqueo": fecha_bloqueo}
+    else:
+        sql = text(
+            """
+            SELECT
+                b."IdBloqueoAgendaDisciplinaria",
+                b."FechaBloqueo",
+                b."TipoBloqueo",
+                b."HoraInicio",
+                b."HoraFin",
+                b."Motivo"
+            FROM public."BloqueoAgendaDisciplinaria" b
+            WHERE b."Activo" = TRUE
+              AND b."FechaBloqueo" = :fecha_bloqueo
+              AND (
+                    b."TipoBloqueo" = 'DIA_COMPLETO'
+                    OR (
+                        b."TipoBloqueo" = 'RANGO_HORARIO'
+                        AND b."HoraInicio" < :hora_fin
+                        AND b."HoraFin" > :hora_inicio
+                    )
+              )
+            ORDER BY b."IdBloqueoAgendaDisciplinaria" ASC
+            LIMIT 1
+            """
+        )
+        parametros = {
+            "fecha_bloqueo": fecha_bloqueo,
+            "hora_inicio": hora_inicio,
+            "hora_fin": hora_fin,
+        }
+
+    return db.execute(
+        sql,
+        parametros,
+    ).mappings().first()
+
+
+def es_bloque_persistente_bloqueado(
+    db: Session,
+    fecha_evento: date,
+    hora_inicio: time,
+    hora_fin: time,
+) -> bool:
+    return (
+        buscar_bloqueo_persistente_cruzado(
+            db=db,
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        )
+        is not None
+    )
+
+
 def es_bloque_temporalmente_bloqueado(
     fecha_evento: date,
     hora_inicio: time,
@@ -1047,6 +1352,12 @@ def obtener_bloques_ordinarios_disponibles(
             hora_inicio=hora_inicio,
             hora_fin=hora_fin,
         )
+        and not es_bloque_persistente_bloqueado(
+            db=db,
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        )
         and buscar_cruce_horario(
             db=db,
             fecha_evento=fecha_evento,
@@ -1071,7 +1382,13 @@ def obtener_bloques_extraordinarios_disponibles(
     bloques_contingencia = [
         (hora_inicio, hora_fin)
         for hora_inicio, hora_fin in BLOQUES_EXTRAORDINARIOS_CONTINGENCIA
-        if buscar_cruce_horario(
+        if not es_bloque_persistente_bloqueado(
+            db=db,
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        )
+        and buscar_cruce_horario(
             db=db,
             fecha_evento=fecha_evento,
             hora_inicio=hora_inicio,
@@ -1139,6 +1456,13 @@ def validar_programacion_extraordinaria_citacion(
             },
         )
 
+    validar_bloqueo_persistente_agenda(
+        db=db,
+        fecha_evento=fecha_evento,
+        hora_inicio=bloque[0],
+        hora_fin=bloque[1],
+    )
+
     validar_cruce_horario(
         db=db,
         fecha_evento=fecha_evento,
@@ -1204,6 +1528,13 @@ def validar_programacion_citacion(
                 "horaFin": hora_fin.strftime("%H:%M"),
             },
         )
+
+    validar_bloqueo_persistente_agenda(
+        db=db,
+        fecha_evento=fecha_evento,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
 
     validar_cruce_horario(
         db=db,
@@ -1583,10 +1914,34 @@ def obtener_horarios_disponibles(
             )
         )
 
+    bloqueos_activos_fecha = listar_bloqueos_activos_fecha(
+        db=db,
+        fecha_evento=fecha_evento,
+    )
+
+    bloqueo_dia_completo_rrll = next(
+        (
+            bloqueo
+            for bloqueo in bloqueos_activos_fecha
+            if str(
+                bloqueo["TipoBloqueo"] or ""
+            ).strip().upper() == "DIA_COMPLETO"
+        ),
+        None,
+    )
+
     horarios_disponibles = []
 
     for hora_inicio, hora_fin in BLOQUES_CITACION:
         if es_bloque_temporalmente_bloqueado(
+            fecha_evento=fecha_evento,
+            hora_inicio=hora_inicio,
+            hora_fin=hora_fin,
+        ):
+            continue
+
+        if es_bloque_persistente_bloqueado(
+            db=db,
             fecha_evento=fecha_evento,
             hora_inicio=hora_inicio,
             hora_fin=hora_fin,
@@ -1635,8 +1990,426 @@ def obtener_horarios_disponibles(
         "viernesAprobadoRRLL": (
             solicitud_viernes_aprobada is not None
         ),
+        "bloqueadoDiaCompletoRRLL": (
+            bloqueo_dia_completo_rrll is not None
+        ),
+        "bloqueoRRLL": (
+            {
+                "IdBloqueoAgendaDisciplinaria": (
+                    bloqueo_dia_completo_rrll[
+                        "IdBloqueoAgendaDisciplinaria"
+                    ]
+                ),
+                "TipoBloqueo": (
+                    bloqueo_dia_completo_rrll["TipoBloqueo"]
+                ),
+                "Motivo": (
+                    bloqueo_dia_completo_rrll["Motivo"]
+                ),
+            }
+            if bloqueo_dia_completo_rrll
+            else None
+        ),
         "horarios": horarios_disponibles,
     }
+
+
+@router.get("/bloqueos")
+def listar_bloqueos_agenda_disciplinaria(
+    fecha_desde: date,
+    fecha_hasta: date,
+    incluir_inactivos: bool = False,
+    db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
+):
+    if fecha_desde > fecha_hasta:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "La fecha inicial no puede ser mayor "
+                    "que la fecha final."
+                ),
+            },
+        )
+
+    condiciones = [
+        'b."FechaBloqueo" BETWEEN :fecha_desde AND :fecha_hasta'
+    ]
+    if not incluir_inactivos:
+        condiciones.append('b."Activo" = TRUE')
+
+    sql = text(
+        f"""
+        SELECT
+            b."IdBloqueoAgendaDisciplinaria",
+            b."FechaBloqueo",
+            b."TipoBloqueo",
+            b."HoraInicio",
+            b."HoraFin",
+            b."Motivo",
+            b."Activo",
+            b."UsuarioCreacion",
+            b."FechaCreacion",
+            b."UsuarioDesbloqueo",
+            b."FechaDesbloqueo"
+        FROM public."BloqueoAgendaDisciplinaria" b
+        WHERE {' AND '.join(condiciones)}
+        ORDER BY
+            b."FechaBloqueo" ASC,
+            b."HoraInicio" NULLS FIRST,
+            b."IdBloqueoAgendaDisciplinaria" ASC
+        """
+    )
+
+    rows = db.execute(
+        sql,
+        {
+            "fecha_desde": fecha_desde,
+            "fecha_hasta": fecha_hasta,
+        },
+    ).mappings().all()
+
+    return {
+        "fechaDesde": fecha_desde,
+        "fechaHasta": fecha_hasta,
+        "total": len(rows),
+        "bloqueos": [
+            _fila_bloqueo_a_dict(row)
+            for row in rows
+        ],
+    }
+
+
+@router.post("/bloqueos")
+def crear_bloqueo_agenda_disciplinaria(
+    data: BloqueoAgendaDisciplinariaCreateRequest,
+    db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
+):
+    fecha_actual = obtener_fecha_actual_colombia()
+    tipo_bloqueo = str(data.TipoBloqueo or "").strip().upper()
+    motivo = str(data.Motivo or "").strip()
+
+    if data.FechaBloqueo < fecha_actual:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "FECHA_BLOQUEO_PASADA",
+                "mensaje": (
+                    "No se puede bloquear una fecha anterior "
+                    "a la fecha actual."
+                ),
+                "fechaServidor": fecha_actual,
+                "fechaIngresada": data.FechaBloqueo,
+            },
+        )
+
+    if tipo_bloqueo not in {
+        "DIA_COMPLETO",
+        "RANGO_HORARIO",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "TIPO_BLOQUEO_INVALIDO",
+                "mensaje": (
+                    "El tipo de bloqueo debe ser DIA_COMPLETO "
+                    "o RANGO_HORARIO."
+                ),
+            },
+        )
+
+    if not motivo:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "MOTIVO_BLOQUEO_REQUERIDO",
+                "mensaje": (
+                    "Debe indicar el motivo del bloqueo de agenda."
+                ),
+            },
+        )
+
+    hora_inicio = data.HoraInicio
+    hora_fin = data.HoraFin
+
+    if tipo_bloqueo == "DIA_COMPLETO":
+        hora_inicio = None
+        hora_fin = None
+    else:
+        if (
+            hora_inicio is None
+            or hora_fin is None
+            or hora_inicio >= hora_fin
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "codigo": "RANGO_HORARIO_INVALIDO",
+                    "mensaje": (
+                        "Para un bloqueo por horario debe indicar "
+                        "una hora inicial y una hora final válidas."
+                    ),
+                },
+            )
+
+    eventos_activos = buscar_eventos_activos_para_bloqueo(
+        db=db,
+        fecha_bloqueo=data.FechaBloqueo,
+        tipo_bloqueo=tipo_bloqueo,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
+
+    if eventos_activos:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "AGENDA_CON_PROCESOS_ACTIVOS",
+                "mensaje": (
+                    "No es posible bloquear este período porque "
+                    "existen procesos disciplinarios activos programados. "
+                    "Consulte su Agenda Disciplinaria y reprograma las "
+                    "citaciones correspondientes antes de realizar el bloqueo."
+                ),
+                "fecha": data.FechaBloqueo.isoformat(),
+                "tipoBloqueo": tipo_bloqueo,
+                "totalProcesos": len(eventos_activos),
+                "procesosActivos": [
+                    {
+                        "IdAgendaProcesoDisciplinario": (
+                            row["IdAgendaProcesoDisciplinario"]
+                        ),
+                        "IdProcesoDisciplinario": (
+                            row["IdProcesoDisciplinario"]
+                        ),
+                        "IdRegistroPersonal": (
+                            row["IdRegistroPersonal"]
+                        ),
+                        "NumeroIdentificacion": (
+                            row["NumeroIdentificacion"]
+                        ),
+                        "NombreCompleto": (
+                            str(row["NombreCompleto"] or "").strip()
+                        ),
+                        "HoraInicio": (
+                            row["HoraInicio"].strftime("%H:%M")
+                            if row["HoraInicio"]
+                            else None
+                        ),
+                        "HoraFin": (
+                            row["HoraFin"].strftime("%H:%M")
+                            if row["HoraFin"]
+                            else None
+                        ),
+                        "EstadoAgenda": row["EstadoAgenda"],
+                    }
+                    for row in eventos_activos
+                ],
+            },
+        )
+
+    bloqueo_cruzado = buscar_cruce_bloqueos_activos(
+        db=db,
+        fecha_bloqueo=data.FechaBloqueo,
+        tipo_bloqueo=tipo_bloqueo,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+    )
+
+    if bloqueo_cruzado:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "BLOQUEO_AGENDA_SUPERPUESTO",
+                "mensaje": (
+                    "Ya existe un bloqueo activo que se cruza "
+                    "con el período seleccionado."
+                ),
+                "bloqueoExistente": dict(bloqueo_cruzado),
+            },
+        )
+
+    usuario = _normalizar_usuario_movimiento(
+        current=current,
+        usuario_solicitado=data.UsuarioMovimiento,
+    )
+    fecha_creacion = obtener_ahora_colombia().replace(tzinfo=None)
+
+    try:
+        row = db.execute(
+            text(
+                """
+                INSERT INTO public."BloqueoAgendaDisciplinaria" (
+                    "FechaBloqueo",
+                    "TipoBloqueo",
+                    "HoraInicio",
+                    "HoraFin",
+                    "Motivo",
+                    "Activo",
+                    "UsuarioCreacion",
+                    "FechaCreacion"
+                )
+                VALUES (
+                    :fecha_bloqueo,
+                    :tipo_bloqueo,
+                    :hora_inicio,
+                    :hora_fin,
+                    :motivo,
+                    TRUE,
+                    :usuario_creacion,
+                    :fecha_creacion
+                )
+                RETURNING
+                    "IdBloqueoAgendaDisciplinaria",
+                    "FechaBloqueo",
+                    "TipoBloqueo",
+                    "HoraInicio",
+                    "HoraFin",
+                    "Motivo",
+                    "Activo",
+                    "UsuarioCreacion",
+                    "FechaCreacion",
+                    "UsuarioDesbloqueo",
+                    "FechaDesbloqueo"
+                """
+            ),
+            {
+                "fecha_bloqueo": data.FechaBloqueo,
+                "tipo_bloqueo": tipo_bloqueo,
+                "hora_inicio": hora_inicio,
+                "hora_fin": hora_fin,
+                "motivo": motivo,
+                "usuario_creacion": usuario,
+                "fecha_creacion": fecha_creacion,
+            },
+        ).mappings().one()
+
+        db.commit()
+
+        return {
+            "mensaje": "Agenda bloqueada correctamente.",
+            "bloqueo": _fila_bloqueo_a_dict(row),
+        }
+
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No se pudo guardar el bloqueo "
+                    "de la agenda disciplinaria."
+                ),
+            },
+        ) from error
+
+
+@router.put(
+    "/bloqueos/{id_bloqueo}/desbloquear"
+)
+def desbloquear_agenda_disciplinaria(
+    id_bloqueo: int,
+    data: DesbloqueoAgendaDisciplinariaRequest,
+    db: Session = Depends(get_db),
+    current=Depends(require_gestion_agenda_rrll),
+):
+    bloqueo = db.execute(
+        text(
+            """
+            SELECT
+                b."IdBloqueoAgendaDisciplinaria",
+                b."FechaBloqueo",
+                b."TipoBloqueo",
+                b."HoraInicio",
+                b."HoraFin",
+                b."Motivo",
+                b."Activo"
+            FROM public."BloqueoAgendaDisciplinaria" b
+            WHERE b."IdBloqueoAgendaDisciplinaria" = :id_bloqueo
+            FOR UPDATE
+            """
+        ),
+        {"id_bloqueo": id_bloqueo},
+    ).mappings().first()
+
+    if not bloqueo:
+        db.rollback()
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "mensaje": "Bloqueo de agenda no encontrado.",
+            },
+        )
+
+    if not bloqueo["Activo"]:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "BLOQUEO_YA_INACTIVO",
+                "mensaje": (
+                    "El bloqueo seleccionado ya se encuentra inactivo."
+                ),
+            },
+        )
+
+    usuario = _normalizar_usuario_movimiento(
+        current=current,
+        usuario_solicitado=data.UsuarioMovimiento,
+    )
+    fecha_desbloqueo = obtener_ahora_colombia().replace(tzinfo=None)
+
+    try:
+        row = db.execute(
+            text(
+                """
+                UPDATE public."BloqueoAgendaDisciplinaria"
+                SET
+                    "Activo" = FALSE,
+                    "UsuarioDesbloqueo" = :usuario_desbloqueo,
+                    "FechaDesbloqueo" = :fecha_desbloqueo
+                WHERE "IdBloqueoAgendaDisciplinaria" = :id_bloqueo
+                RETURNING
+                    "IdBloqueoAgendaDisciplinaria",
+                    "FechaBloqueo",
+                    "TipoBloqueo",
+                    "HoraInicio",
+                    "HoraFin",
+                    "Motivo",
+                    "Activo",
+                    "UsuarioCreacion",
+                    "FechaCreacion",
+                    "UsuarioDesbloqueo",
+                    "FechaDesbloqueo"
+                """
+            ),
+            {
+                "id_bloqueo": id_bloqueo,
+                "usuario_desbloqueo": usuario,
+                "fecha_desbloqueo": fecha_desbloqueo,
+            },
+        ).mappings().one()
+
+        db.commit()
+
+        return {
+            "mensaje": "Agenda desbloqueada correctamente.",
+            "bloqueo": _fila_bloqueo_a_dict(row),
+        }
+
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No se pudo desbloquear "
+                    "la agenda disciplinaria."
+                ),
+            },
+        ) from error
 
 
 @router.post(
