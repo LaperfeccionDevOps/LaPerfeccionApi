@@ -810,7 +810,9 @@ def _construir_contenido_correo_supervisor(
         )
         mensaje_cierre_supervisor = (
             "La fecha y hora mostradas corresponden a la nueva "
-            "programación de la diligencia."
+            "programación de la diligencia. Se adjunta copia de la "
+            "carta oficial de citación actualizada enviada al colaborador "
+            "para su conocimiento y seguimiento."
         )
     elif tipo_normalizado == TIPO_CANCELACION:
         titulo_supervisor = (
@@ -1197,8 +1199,11 @@ def enviar_notificacion_agenda_disciplinaria(
         or datos.get("ModalidadCitacion")
     ).upper()
 
-    citacion_inicial_lista_para_envio = (
-        tipo_normalizado == TIPO_CITACION_INICIAL
+    carta_requerida_para_envio = (
+        tipo_normalizado in {
+            TIPO_CITACION_INICIAL,
+            TIPO_REPROGRAMACION,
+        }
         and modalidad_normalizada in {
             "PRESENCIAL",
             "VIRTUAL",
@@ -1206,8 +1211,7 @@ def enviar_notificacion_agenda_disciplinaria(
     )
 
     notificar_supervisor = (
-        citacion_inicial_lista_para_envio
-        or tipo_normalizado == TIPO_REPROGRAMACION
+        carta_requerida_para_envio
         or tipo_normalizado == TIPO_CANCELACION
     )
 
@@ -1223,12 +1227,20 @@ def enviar_notificacion_agenda_disciplinaria(
     contenido_carta = None
     error_generacion_carta = None
 
-    if citacion_inicial_lista_para_envio:
+    if carta_requerida_para_envio:
         try:
-            buffer_carta = generar_carta_citacion_descargos_pdf(
-                db=db,
-                id_proceso=id_proceso,
-            )
+            if tipo_normalizado == TIPO_REPROGRAMACION:
+                buffer_carta = generar_carta_citacion_descargos_pdf(
+                    db=db,
+                    id_proceso=id_proceso,
+                    fecha_citacion_override=datos.get("FechaEvento"),
+                    hora_citacion_override=datos.get("HoraInicio"),
+                )
+            else:
+                buffer_carta = generar_carta_citacion_descargos_pdf(
+                    db=db,
+                    id_proceso=id_proceso,
+                )
 
             contenido_carta = buffer_carta.getvalue()
 
@@ -1284,7 +1296,7 @@ def enviar_notificacion_agenda_disciplinaria(
         }
 
     elif (
-        citacion_inicial_lista_para_envio
+        carta_requerida_para_envio
         and error_generacion_carta
     ):
         mensaje_error = (
@@ -1454,7 +1466,7 @@ def enviar_notificacion_agenda_disciplinaria(
             )
 
             if (
-                citacion_inicial_lista_para_envio
+                carta_requerida_para_envio
                 and error_generacion_carta
             ):
                 mensaje_error_supervisor = (
