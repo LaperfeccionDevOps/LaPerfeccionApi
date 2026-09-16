@@ -788,7 +788,10 @@ def actualizar_datos_trabajador(
                 # En QA se validó:
                 # IdCiudad 10 = Bogotá D.C.
                 # IdGrupoSanguineo 1 = Sin definir
-                # IdLocalidad 40 = SIN DEFINIR
+                # En PRODUCCIÓN se validó:
+                # IdCiudad 10 = Bogotá D.C.
+                # IdGrupoSanguineo 1 = Sin definir
+                # IdLocalidad 41 = SIN DEFINIR
                 id_ciudad_nuevo = 10
                 id_grupo_sanguineo_nuevo = 1
 
@@ -807,7 +810,7 @@ def actualizar_datos_trabajador(
                 id_localidad_nueva = (
                     payload.IdLocalidad
                     if "IdLocalidad" in campos_da_enviados
-                    else 40
+                    else 41
                 )
 
                 nuevo_dato_adicional = db.execute(
