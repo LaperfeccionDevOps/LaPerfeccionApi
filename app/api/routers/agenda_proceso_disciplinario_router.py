@@ -605,6 +605,32 @@ def validar_fecha_minima_citacion(
         )
 
 
+def validar_fecha_minima_reprogramacion(
+    fecha_evento: date,
+    fecha_movimiento: date | datetime,
+) -> None:
+    """
+    Regla exclusiva para REPROGRAMACIÓN:
+    permite seleccionar una nueva fecha desde el día calendario siguiente.
+    """
+    fecha_base = obtener_fecha_sin_hora(fecha_movimiento)
+    fecha_minima = fecha_base + timedelta(days=1)
+
+    if fecha_evento < fecha_minima:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "mensaje": (
+                    "La reprogramación debe realizarse "
+                    "como mínimo para el día siguiente."
+                ),
+                "fechaMovimiento": fecha_base.strftime("%d/%m/%Y"),
+                "fechaIngresada": fecha_evento.strftime("%d/%m/%Y"),
+                "fechaMinimaPermitida": fecha_minima.strftime("%d/%m/%Y"),
+            },
+        )
+
+
 def convertir_hora_a_minutos(
     valor: time,
 ) -> int:
@@ -1459,42 +1485,60 @@ def obtener_horarios_disponibles(
     fecha_evento: date,
     id_registro_personal: int | None = None,
     id_proceso_disciplinario: int | None = None,
+    es_reprogramacion: bool = False,
     db: Session = Depends(get_db),
 ):
     fecha_servidor = (
         obtener_fecha_actual_colombia()
     )
 
-    fecha_minima = sumar_dias_habiles(
-        fecha_servidor,
-        DIAS_HABILES_MINIMOS_CITACION,
-    )
+    if es_reprogramacion:
+        fecha_minima = fecha_servidor + timedelta(days=1)
 
-    if fecha_evento < fecha_minima:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "mensaje": (
-                    "La fecha seleccionada no cumple "
-                    "el mínimo de cinco días hábiles."
-                ),
-                "fechaServidor": (
-                    fecha_servidor.strftime(
-                        "%d/%m/%Y"
-                    )
-                ),
-                "fechaIngresada": (
-                    fecha_evento.strftime(
-                        "%d/%m/%Y"
-                    )
-                ),
-                "fechaMinimaPermitida": (
-                    fecha_minima.strftime(
-                        "%d/%m/%Y"
-                    )
-                ),
-            },
+        if fecha_evento < fecha_minima:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "mensaje": (
+                        "La reprogramación debe realizarse "
+                        "como mínimo para el día siguiente."
+                    ),
+                    "fechaServidor": fecha_servidor.strftime("%d/%m/%Y"),
+                    "fechaIngresada": fecha_evento.strftime("%d/%m/%Y"),
+                    "fechaMinimaPermitida": fecha_minima.strftime("%d/%m/%Y"),
+                },
+            )
+    else:
+        fecha_minima = sumar_dias_habiles(
+            fecha_servidor,
+            DIAS_HABILES_MINIMOS_CITACION,
         )
+
+        if fecha_evento < fecha_minima:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "mensaje": (
+                        "La fecha seleccionada no cumple "
+                        "el mínimo de cinco días hábiles."
+                    ),
+                    "fechaServidor": (
+                        fecha_servidor.strftime(
+                            "%d/%m/%Y"
+                        )
+                    ),
+                    "fechaIngresada": (
+                        fecha_evento.strftime(
+                            "%d/%m/%Y"
+                        )
+                    ),
+                    "fechaMinimaPermitida": (
+                        fecha_minima.strftime(
+                            "%d/%m/%Y"
+                        )
+                    ),
+                },
+            )
 
     es_viernes = fecha_evento.weekday() == 4
 
@@ -2291,11 +2335,11 @@ def reprogramar_evento_agenda(
 
     fecha_movimiento = obtener_ahora_colombia()
 
-    # La reprogramación vuelve a exigir cinco días hábiles,
-    # contados desde el día en que Yeny realiza el cambio.
-    validar_fecha_minima_citacion(
+    # Regla exclusiva de reprogramación:
+    # permite mover la cita desde el día calendario siguiente.
+    validar_fecha_minima_reprogramacion(
         fecha_evento=data.FechaEventoNueva,
-        fecha_creacion_evento=fecha_movimiento,
+        fecha_movimiento=fecha_movimiento,
     )
 
     hora_fin_nueva = calcular_hora_fin_citacion(

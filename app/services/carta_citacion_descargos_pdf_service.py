@@ -785,6 +785,8 @@ def _crear_estilos():
 def generar_carta_citacion_descargos_pdf(
     db: Session,
     id_proceso: int,
+    fecha_citacion_override: date | None = None,
+    hora_citacion_override: time | None = None,
 ) -> BytesIO:
     proceso = (
         db.query(ProcesoDisciplinario)
@@ -970,19 +972,33 @@ def generar_carta_citacion_descargos_pdf(
         )
     )
 
-    fecha_citacion = _fecha(
-        getattr(
-            citacion,
-            "FechaCitacion",
-            None,
+    # Por defecto se conserva exactamente la fecha y hora
+    # almacenadas en CitacionProcesoDisciplinario.
+    #
+    # Los valores override se utilizan únicamente cuando el llamador
+    # necesita generar la misma carta con una programación vigente
+    # diferente, por ejemplo durante una REPROGRAMACIÓN.
+    fecha_citacion = (
+        _fecha(fecha_citacion_override)
+        if fecha_citacion_override is not None
+        else _fecha(
+            getattr(
+                citacion,
+                "FechaCitacion",
+                None,
+            )
         )
     )
 
-    hora_citacion = _hora(
-        getattr(
-            citacion,
-            "HoraCitacion",
-            None,
+    hora_citacion = (
+        _hora(hora_citacion_override)
+        if hora_citacion_override is not None
+        else _hora(
+            getattr(
+                citacion,
+                "HoraCitacion",
+                None,
+            )
         )
     )
 
