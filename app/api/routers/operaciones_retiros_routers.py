@@ -14,6 +14,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -35,6 +36,43 @@ ID_TIPO_DOCUMENTO_PAZ_Y_SALVO = 2
 ID_ESTADO_CONTRATADO = 25
 ID_ESTADO_RETIRO_ABIERTO = 30
 TAMANO_MAXIMO_PDF = 10 * 1024 * 1024
+TAMANO_MAXIMO_EVIDENCIA = 10 * 1024 * 1024
+
+TIPOS_EVIDENCIA_PAZ_SALVO = {
+    "NOVEDADES_NOMINA",
+    "FORMATO_DESCUENTO_VACUNAS",
+    "CARNET_ACCESO",
+    "LISTADO_HERRAMIENTAS",
+    "PLANILLA_NOMINA",
+}
+
+TAMANO_MAXIMO_ADJUNTO_RQ = 10 * 1024 * 1024
+
+TIPOS_NOTIFICACION_RQ = {
+    "RENUNCIA FORMAL",
+    "RENUNCIA INFORMADA",
+    "ABANDONO",
+    "NUNCA INGRESO",
+    "TERMINACION DE CONTRATO",
+    "RENUNCIA POR EVASION DISCIPLINARIA",
+}
+
+TIPOS_NOTIFICACION_RQ_CON_CARTA = {
+    "RENUNCIA FORMAL",
+    "RENUNCIA POR EVASION DISCIPLINARIA",
+}
+
+TIPOS_NOTIFICACION_RQ_CON_ULTIMO_DIA = {
+    "RENUNCIA FORMAL",
+    "RENUNCIA INFORMADA",
+    "ABANDONO",
+    "TERMINACION DE CONTRATO",
+}
+
+TURNOS_RQ = {"ROTATIVO", "DIURNO"}
+MOTIVOS_VACANTE_RQ = {"RENUNCIA", "ABANDONO", "NUNCA INGRESO"}
+TIPO_DOCUMENTO_RQ_CARTA_RETIRO = "CARTA_RETIRO"
+
 
 OPCIONES_ENTREGA_GENERAL = {"NO APLICA", "ACEPTADO", "RECHAZADO"}
 OPCIONES_CUMPLIMIENTO = {"NO APLICA", "CUMPLE", "NO CUMPLE"}
@@ -154,23 +192,6 @@ def _normalizar_opcion(
     return opcion
 
 
-def _validar_correo(correo: str | None) -> str:
-    valor = _normalizar_texto_requerido(
-        correo,
-        "CorreoSupervisora",
-    )
-
-    dominio = valor.rsplit("@", 1)[-1] if "@" in valor else ""
-
-    if "@" not in valor or "." not in dominio:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El correo de la supervisora no tiene un formato válido.",
-        )
-
-    return valor
-
-
 def _validar_valor_descuento(
     aplica_descuento: str,
     valor_descuento: Decimal | None,
@@ -235,6 +256,601 @@ def _validar_archivo_pdf(archivo: UploadFile, contenido: bytes) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El archivo cargado no contiene una estructura PDF válida.",
         )
+
+
+def _validar_evidencia(
+    archivo: UploadFile,
+    contenido: bytes,
+    nombre_campo: str,
+) -> tuple[str, str, str]:
+    nombre_original = Path(str(archivo.filename or "")).name.strip()
+
+    if not nombre_original:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El archivo de {nombre_campo} no tiene un nombre válido.",
+        )
+
+    if not contenido:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El archivo de {nombre_campo} está vacío.",
+        )
+
+    if len(contenido) > TAMANO_MAXIMO_EVIDENCIA:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"El archivo de {nombre_campo} supera el tamaño máximo "
+                "permitido de 10 MB."
+            ),
+        )
+
+    extension = Path(nombre_original).suffix.lower()
+    mime_type = str(
+        archivo.content_type or "application/octet-stream"
+    ).strip()
+
+    return nombre_original, extension, mime_type
+
+
+def _guardar_evidencia_paz_salvo(
+    db: Session,
+    *,
+    id_paz_y_salvo: int,
+    id_retiro_laboral: int,
+    tipo_evidencia: str,
+    archivo: UploadFile,
+    contenido: bytes,
+    usuario: str,
+    carpeta_evidencias: Path,
+) -> tuple[int, Path]:
+    if tipo_evidencia not in TIPOS_EVIDENCIA_PAZ_SALVO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tipo de evidencia no permitido: {tipo_evidencia}.",
+        )
+
+    nombre_original, extension, mime_type = _validar_evidencia(
+        archivo=archivo,
+        contenido=contenido,
+        nombre_campo=tipo_evidencia,
+    )
+
+    extension_guardado = extension or ".bin"
+    nombre_guardado = (
+        f"{tipo_evidencia.lower()}_"
+        f"{id_retiro_laboral}_{uuid4().hex}{extension_guardado}"
+    )
+
+    ruta_fisica = carpeta_evidencias / nombre_guardado
+    ruta_fisica.write_bytes(contenido)
+
+    ruta_archivo_bd = str(ruta_fisica).replace("\\", "/")
+
+    query_insert = text("""
+        INSERT INTO public."PazYSalvoOperacionesEvidencia" (
+            "IdPazYSalvo",
+            "IdRetiroLaboral",
+            "TipoEvidencia",
+            "NombreArchivo",
+            "NombreArchivoOriginal",
+            "RutaArchivo",
+            "ExtensionArchivo",
+            "MimeType",
+            "PesoArchivo",
+            "Observacion",
+            "Activo",
+            "Eliminado",
+            "FechaCreacion",
+            "FechaActualizacion",
+            "CreadoPor",
+            "UsuarioActualizacion"
+        )
+        VALUES (
+            :id_paz_y_salvo,
+            :id_retiro_laboral,
+            :tipo_evidencia,
+            :nombre_archivo,
+            :nombre_archivo_original,
+            :ruta_archivo,
+            :extension_archivo,
+            :mime_type,
+            :peso_archivo,
+            :observacion,
+            true,
+            false,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP,
+            :creado_por,
+            :usuario_actualizacion
+        )
+        RETURNING "IdPazYSalvoEvidencia";
+    """)
+
+    id_evidencia = db.execute(
+        query_insert,
+        {
+            "id_paz_y_salvo": id_paz_y_salvo,
+            "id_retiro_laboral": id_retiro_laboral,
+            "tipo_evidencia": tipo_evidencia,
+            "nombre_archivo": nombre_guardado,
+            "nombre_archivo_original": nombre_original,
+            "ruta_archivo": ruta_archivo_bd,
+            "extension_archivo": extension or None,
+            "mime_type": mime_type,
+            "peso_archivo": len(contenido),
+            "observacion": "Evidencia adjunta desde Operaciones.",
+            "creado_por": usuario,
+            "usuario_actualizacion": usuario,
+        },
+    ).scalar_one()
+
+    return id_evidencia, ruta_fisica
+
+
+def _obtener_usuario_actual_rq(current) -> dict:
+    """
+    Obtiene la identidad del usuario autenticado para el RQ.
+
+    IdUsuarioLider se guarda directamente desde la sesión autenticada.
+    El front no puede escoger ni alterar el líder.
+    """
+    usuario = current.get("usuario")
+
+    if usuario is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No fue posible identificar el usuario autenticado.",
+        )
+
+    id_usuario = getattr(usuario, "IdUsuario", None)
+    nombre_completo = str(
+        getattr(usuario, "NombreUsuario", "") or ""
+    ).strip()
+    login_usuario = str(
+        getattr(usuario, "Usuario", "") or ""
+    ).strip()
+
+    if id_usuario is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "El usuario autenticado no tiene IdUsuario y no puede "
+                "registrarse como líder del RQ."
+            ),
+        )
+
+    if not nombre_completo:
+        nombre_completo = login_usuario or "Usuario Operaciones"
+
+    return {
+        "IdUsuario": id_usuario,
+        "NombreCompleto": nombre_completo,
+        "Usuario": login_usuario or nombre_completo,
+    }
+
+
+def _validar_perfil_rq(
+    db: Session,
+    id_perfil_rq: int,
+):
+    query = text("""
+        SELECT
+            "IdPerfilRQ",
+            "CodigoPerfil",
+            "DescripcionPerfil",
+            "Genero",
+            "NivelEscolaridad",
+            "Observaciones"
+        FROM public."PerfilRQ"
+        WHERE "IdPerfilRQ" = :id_perfil_rq
+          AND COALESCE("Activo", true) = true
+        LIMIT 1;
+    """)
+
+    perfil = db.execute(
+        query,
+        {"id_perfil_rq": id_perfil_rq},
+    ).mappings().first()
+
+    if not perfil:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El perfil RQ seleccionado no existe o está inactivo.",
+        )
+
+    return perfil
+
+
+def _obtener_contexto_retiro_rq(
+    db: Session,
+    id_retiro_laboral: int,
+    id_paz_y_salvo: int,
+):
+    """
+    Valida que el retiro y el Paz y Salvo correspondan al mismo trabajador.
+
+    IdRegistroPersonal e IdCliente se toman siempre de la base de datos;
+    no se confían al front para evitar inconsistencias.
+    """
+    query = text("""
+        SELECT
+            rl."IdRetiroLaboral",
+            rl."IdRegistroPersonal",
+            rl."IdCliente",
+            rl."EstadoCasoRRLL",
+            ps."IdPazYSalvo",
+            rp."NumeroIdentificacion",
+            TRIM(
+                COALESCE(rp."Nombres", '') || ' ' ||
+                COALESCE(rp."Apellidos", '')
+            ) AS "NombreCompleto",
+            c."Nombre" AS "NombreCliente",
+            acc."IdCargo",
+            ca."NombreCargo",
+            psd."EstadoPazYSalvo"
+        FROM public."RetiroLaboral" rl
+        INNER JOIN public."PazYSalvoOperaciones" ps
+            ON ps."IdRetiroLaboral" = rl."IdRetiroLaboral"
+           AND ps."IdPazYSalvo" = :id_paz_y_salvo
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+        INNER JOIN public."Cliente" c
+            ON c."IdCliente" = rl."IdCliente"
+        LEFT JOIN LATERAL (
+            SELECT
+                x."IdCargo"
+            FROM public."AsignacionCargoCliente" x
+            WHERE x."IdRegistroPersonal" = rl."IdRegistroPersonal"
+              AND x."IdCargo" IS NOT NULL
+            ORDER BY
+                x."FechaActualizacion" DESC NULLS LAST,
+                x."FechaCreacion" DESC NULLS LAST,
+                x."IdAsignacionCargoCliente" DESC
+            LIMIT 1
+        ) acc ON true
+        LEFT JOIN public."Cargo" ca
+            ON ca."IdCargo" = acc."IdCargo"
+        LEFT JOIN LATERAL (
+            SELECT
+                d."EstadoPazYSalvo"
+            FROM public."PazYSalvoOperacionesDetalle" d
+            WHERE d."IdPazYSalvo" = ps."IdPazYSalvo"
+            ORDER BY d."IdPazYSalvoDetalle" DESC
+            LIMIT 1
+        ) psd ON true
+        WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+          AND COALESCE(rl."Activo", true) = true
+        LIMIT 1;
+    """)
+
+    contexto = db.execute(
+        query,
+        {
+            "id_retiro_laboral": id_retiro_laboral,
+            "id_paz_y_salvo": id_paz_y_salvo,
+        },
+    ).mappings().first()
+
+    if not contexto:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No se encontró un retiro activo asociado al Paz y Salvo "
+                "indicado."
+            ),
+        )
+
+    return contexto
+
+
+def _validar_datos_rq(
+    *,
+    tipo_notificacion: str,
+    fecha_retiro: date | None,
+    fecha_ultimo_dia_laborado: date | None,
+    requiere_reemplazo: bool,
+    id_perfil_rq: int | None,
+    ciudad: str | None,
+    turno: str | None,
+    motivo_vacante: str | None,
+    observacion_cliente: str | None,
+) -> dict:
+    tipo = _normalizar_opcion(
+        tipo_notificacion,
+        "TipoNotificacion",
+        TIPOS_NOTIFICACION_RQ,
+    )
+
+    fecha_retiro_normalizada = fecha_retiro
+    fecha_ultimo_dia_normalizada = fecha_ultimo_dia_laborado
+
+    if tipo == "NUNCA INGRESO":
+        fecha_retiro_normalizada = None
+        fecha_ultimo_dia_normalizada = None
+    else:
+        if fecha_retiro_normalizada is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "La fecha de retiro es obligatoria para la notificación "
+                    f"{tipo}."
+                ),
+            )
+
+        if tipo in TIPOS_NOTIFICACION_RQ_CON_ULTIMO_DIA:
+            if fecha_ultimo_dia_normalizada is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "El último día laborado es obligatorio para la "
+                        f"notificación {tipo}."
+                    ),
+                )
+        else:
+            fecha_ultimo_dia_normalizada = None
+
+    ciudad_normalizada = _normalizar_texto_opcional(ciudad)
+    turno_normalizado = _normalizar_texto_opcional(turno)
+    motivo_vacante_normalizado = _normalizar_texto_opcional(motivo_vacante)
+    observacion_cliente_normalizada = _normalizar_texto_opcional(
+        observacion_cliente
+    )
+
+    if requiere_reemplazo:
+        if id_perfil_rq is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El perfil es obligatorio cuando requiere reemplazo.",
+            )
+
+        ciudad_normalizada = _normalizar_texto_requerido(
+            ciudad_normalizada,
+            "Ciudad",
+        )
+
+        turno_normalizado = _normalizar_opcion(
+            turno_normalizado,
+            "Turno",
+            TURNOS_RQ,
+        )
+
+        motivo_vacante_normalizado = _normalizar_opcion(
+            motivo_vacante_normalizado,
+            "MotivoVacante",
+            MOTIVOS_VACANTE_RQ,
+        )
+
+        observacion_cliente_normalizada = _normalizar_texto_requerido(
+            observacion_cliente_normalizada,
+            "ObservacionCliente",
+        )
+    else:
+        id_perfil_rq = None
+        ciudad_normalizada = None
+        turno_normalizado = None
+        motivo_vacante_normalizado = None
+        observacion_cliente_normalizada = None
+
+    return {
+        "TipoNotificacion": tipo,
+        "FechaRetiro": fecha_retiro_normalizada,
+        "FechaUltimoDiaLaborado": fecha_ultimo_dia_normalizada,
+        "RequiereReemplazo": requiere_reemplazo,
+        "IdPerfilRQ": id_perfil_rq,
+        "Ciudad": ciudad_normalizada,
+        "Turno": turno_normalizado,
+        "MotivoVacante": motivo_vacante_normalizado,
+        "ObservacionCliente": observacion_cliente_normalizada,
+    }
+
+
+def _validar_adjunto_rq(
+    archivo: UploadFile,
+    contenido: bytes,
+) -> tuple[str, str, str]:
+    nombre_original = Path(str(archivo.filename or "")).name.strip()
+
+    if not nombre_original:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El adjunto del RQ no tiene un nombre válido.",
+        )
+
+    if not contenido:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El adjunto del RQ está vacío.",
+        )
+
+    if len(contenido) > TAMANO_MAXIMO_ADJUNTO_RQ:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="El adjunto del RQ supera el tamaño máximo de 10 MB.",
+        )
+
+    extension = Path(nombre_original).suffix.lower()
+    mime_type = str(
+        archivo.content_type or "application/octet-stream"
+    ).strip()
+
+    return nombre_original, extension, mime_type
+
+
+def _existe_carta_retiro_rq(
+    db: Session,
+    id_rq_operaciones: int,
+) -> bool:
+    query = text("""
+        SELECT 1
+        FROM public."RQOperacionesAdjunto"
+        WHERE "IdRQOperaciones" = :id_rq_operaciones
+          AND "TipoDocumento" = :tipo_documento
+          AND COALESCE("Activo", true) = true
+          AND COALESCE("Eliminado", false) = false
+        LIMIT 1;
+    """)
+
+    return db.execute(
+        query,
+        {
+            "id_rq_operaciones": id_rq_operaciones,
+            "tipo_documento": TIPO_DOCUMENTO_RQ_CARTA_RETIRO,
+        },
+    ).first() is not None
+
+
+def _guardar_adjunto_rq(
+    db: Session,
+    *,
+    id_rq_operaciones: int,
+    id_retiro_laboral: int,
+    archivo: UploadFile,
+    contenido: bytes,
+    usuario: str,
+    carpeta_rq: Path,
+) -> tuple[int, Path]:
+    nombre_original, extension, mime_type = _validar_adjunto_rq(
+        archivo,
+        contenido,
+    )
+
+    carpeta_rq.mkdir(parents=True, exist_ok=True)
+
+    extension_guardado = extension or ".bin"
+    nombre_guardado = (
+        f"carta_retiro_{id_rq_operaciones}_{uuid4().hex}"
+        f"{extension_guardado}"
+    )
+
+    ruta_fisica = carpeta_rq / nombre_guardado
+    ruta_fisica.write_bytes(contenido)
+    ruta_archivo_bd = str(ruta_fisica).replace("\\", "/")
+
+    db.execute(
+        text("""
+            UPDATE public."RQOperacionesAdjunto"
+            SET
+                "Activo" = false,
+                "FechaActualizacion" = CURRENT_TIMESTAMP,
+                "UsuarioActualizacion" = :usuario
+            WHERE "IdRQOperaciones" = :id_rq_operaciones
+              AND "TipoDocumento" = :tipo_documento
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false;
+        """),
+        {
+            "usuario": usuario,
+            "id_rq_operaciones": id_rq_operaciones,
+            "tipo_documento": TIPO_DOCUMENTO_RQ_CARTA_RETIRO,
+        },
+    )
+
+    id_adjunto = db.execute(
+        text("""
+            INSERT INTO public."RQOperacionesAdjunto" (
+                "IdRQOperaciones",
+                "IdRetiroLaboral",
+                "TipoDocumento",
+                "NombreArchivo",
+                "NombreArchivoOriginal",
+                "RutaArchivo",
+                "ExtensionArchivo",
+                "MimeType",
+                "PesoArchivo",
+                "Activo",
+                "Eliminado",
+                "UsuarioCreacion",
+                "FechaCreacion"
+            )
+            VALUES (
+                :id_rq_operaciones,
+                :id_retiro_laboral,
+                :tipo_documento,
+                :nombre_archivo,
+                :nombre_archivo_original,
+                :ruta_archivo,
+                :extension_archivo,
+                :mime_type,
+                :peso_archivo,
+                true,
+                false,
+                :usuario_creacion,
+                CURRENT_TIMESTAMP
+            )
+            RETURNING "IdRQOperacionesAdjunto";
+        """),
+        {
+            "id_rq_operaciones": id_rq_operaciones,
+            "id_retiro_laboral": id_retiro_laboral,
+            "tipo_documento": TIPO_DOCUMENTO_RQ_CARTA_RETIRO,
+            "nombre_archivo": nombre_guardado,
+            "nombre_archivo_original": nombre_original,
+            "ruta_archivo": ruta_archivo_bd,
+            "extension_archivo": extension or None,
+            "mime_type": mime_type,
+            "peso_archivo": len(contenido),
+            "usuario_creacion": usuario,
+        },
+    ).scalar_one()
+
+    return id_adjunto, ruta_fisica
+
+
+def _serializar_rq(row) -> dict:
+    return {
+        "IdRQOperaciones": int(row["IdRQOperaciones"]),
+        "TipoRQ": row.get("TipoRQ"),
+        "CantidadSolicitada": int(row.get("CantidadSolicitada") or 1),
+        "EnviadoSeleccion": bool(row.get("EnviadoSeleccion") or False),
+        "FechaEnvioSeleccion": row.get("FechaEnvioSeleccion"),
+        "IdRetiroLaboral": int(row["IdRetiroLaboral"]),
+        "IdPazYSalvo": int(row["IdPazYSalvo"]),
+        "IdRegistroPersonal": int(row["IdRegistroPersonal"]),
+        "NumeroIdentificacion": row.get("NumeroIdentificacion"),
+        "NombreCompleto": row.get("NombreCompleto"),
+        "IdCliente": int(row["IdCliente"]),
+        "NombreCliente": row.get("NombreCliente"),
+        "IdCargo": (
+            int(row["IdCargo"])
+            if row.get("IdCargo") is not None
+            else (
+                int(row["IdCargoDerivado"])
+                if row.get("IdCargoDerivado") is not None
+                else None
+            )
+        ),
+        "NombreCargo": row.get("NombreCargo"),
+        "IdUsuarioLider": str(row["IdUsuarioLider"]),
+        "NombreLider": row.get("NombreLider"),
+        "IdPerfilRQ": (
+            int(row["IdPerfilRQ"])
+            if row.get("IdPerfilRQ") is not None
+            else None
+        ),
+        "CodigoPerfil": row.get("CodigoPerfil"),
+        "DescripcionPerfil": row.get("DescripcionPerfil"),
+        "GeneroPerfil": row.get("GeneroPerfil"),
+        "NivelEscolaridadPerfil": row.get("NivelEscolaridadPerfil"),
+        "ObservacionesPerfil": row.get("ObservacionesPerfil"),
+        "TipoNotificacion": row["TipoNotificacion"],
+        "FechaRetiro": row["FechaRetiro"],
+        "FechaUltimoDiaLaborado": row["FechaUltimoDiaLaborado"],
+        "Observacion": row["Observacion"],
+        "RequiereReemplazo": bool(row["RequiereReemplazo"]),
+        "Ciudad": row["Ciudad"],
+        "Turno": row["Turno"],
+        "MotivoVacante": row["MotivoVacante"],
+        "ObservacionCliente": row["ObservacionCliente"],
+        "FechaRegistro": row["FechaRegistro"],
+        "EstadoRQ": row["EstadoRQ"],
+        "EnviadoRRLL": bool(row["EnviadoRRLL"]),
+        "FechaEnvioRRLL": row["FechaEnvioRRLL"],
+        "Activo": bool(row["Activo"]),
+        "FechaCreacion": row["FechaCreacion"],
+        "FechaActualizacion": row["FechaActualizacion"],
+    }
 
 
 def _obtener_trabajador_contratado(
@@ -360,10 +976,2423 @@ def _obtener_cliente_actual(
     return int(row["IdCliente"]) if row and row["IdCliente"] is not None else None
 
 
+def _obtener_cargo_actual(
+    db: Session,
+    id_registro_personal: int,
+):
+    """
+    Obtiene el cargo vigente del trabajador desde AsignacionCargoCliente.
+
+    Se toma la asignación más reciente por fecha de actualización,
+    fecha de creación e identificador de asignación.
+    """
+    query = text("""
+        SELECT
+            acc."IdCargo",
+            c."NombreCargo"
+        FROM public."AsignacionCargoCliente" acc
+        INNER JOIN public."Cargo" c
+            ON c."IdCargo" = acc."IdCargo"
+        WHERE acc."IdRegistroPersonal" = :id_registro_personal
+          AND acc."IdCargo" IS NOT NULL
+          AND COALESCE(c."Activo", true) = true
+        ORDER BY
+            acc."FechaActualizacion" DESC NULLS LAST,
+            acc."FechaCreacion" DESC NULLS LAST,
+            acc."IdAsignacionCargoCliente" DESC
+        LIMIT 1;
+    """)
+
+    row = db.execute(
+        query,
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    return {
+        "IdCargo": int(row["IdCargo"]),
+        "NombreCargo": str(row["NombreCargo"] or "").strip(),
+    }
+
+
+def _validar_cliente(
+    db: Session,
+    id_cliente: int,
+):
+    query = text("""
+        SELECT
+            c."IdCliente",
+            c."Nombre" AS "NombreCliente"
+        FROM public."Cliente" c
+        WHERE c."IdCliente" = :id_cliente
+        LIMIT 1;
+    """)
+
+    cliente = db.execute(
+        query,
+        {"id_cliente": id_cliente},
+    ).mappings().first()
+
+    if not cliente:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El cliente seleccionado no existe.",
+        )
+
+    return cliente
+
+
+@router.get("/elementos/trabajador/{id_registro_personal}")
+def obtener_elementos_paz_salvo_por_trabajador(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Devuelve los elementos de Paz y Salvo aplicables al trabajador.
+
+    Prioridad:
+    1. Configuración específica del cargo en CargoElementoPazSalvo.
+    2. Si el cargo no tiene elementos específicos activos, usa la
+       clasificación ADMINISTRATIVO / OPERATIVO configurada en
+       CargoClasificacionPazSalvo y toma los elementos generales desde
+       ClasificacionElementoPazSalvo.
+    """
+    trabajador = _obtener_trabajador_contratado(
+        db=db,
+        id_registro_personal=id_registro_personal,
+    )
+
+    cargo = _obtener_cargo_actual(
+        db=db,
+        id_registro_personal=id_registro_personal,
+    )
+
+    if cargo is None:
+        return {
+            "success": True,
+            "data": {
+                "IdRegistroPersonal": id_registro_personal,
+                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
+                "NombreCompleto": trabajador["NombreCompleto"],
+                "IdCargo": None,
+                "NombreCargo": None,
+                "TipoClasificacion": None,
+                "OrigenConfiguracion": "SIN_CONFIGURACION",
+                "Elementos": [],
+            },
+        }
+
+    # ============================================================
+    # PRIORIDAD 1: ELEMENTOS ESPECÍFICOS DEL CARGO
+    # ============================================================
+    query_elementos_cargo = text("""
+        SELECT
+            ceps."IdCargoElementoPazSalvo" AS "IdConfiguracionElemento",
+            ceps."IdCargo",
+            ceps."CodigoElemento",
+            ceps."NombreElemento"
+        FROM public."CargoElementoPazSalvo" ceps
+        WHERE ceps."IdCargo" = :id_cargo
+          AND COALESCE(ceps."Activo", true) = true
+        ORDER BY
+            ceps."IdCargoElementoPazSalvo" ASC;
+    """)
+
+    elementos_cargo = db.execute(
+        query_elementos_cargo,
+        {"id_cargo": cargo["IdCargo"]},
+    ).mappings().all()
+
+    if elementos_cargo:
+        return {
+            "success": True,
+            "data": {
+                "IdRegistroPersonal": id_registro_personal,
+                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
+                "NombreCompleto": trabajador["NombreCompleto"],
+                "IdCargo": cargo["IdCargo"],
+                "NombreCargo": cargo["NombreCargo"],
+                "TipoClasificacion": None,
+                "OrigenConfiguracion": "CARGO",
+                "Elementos": [
+                    {
+                        "IdConfiguracionElemento": int(
+                            row["IdConfiguracionElemento"]
+                        ),
+                        "CodigoElemento": str(
+                            row["CodigoElemento"] or ""
+                        ).strip(),
+                        "NombreElemento": str(
+                            row["NombreElemento"] or ""
+                        ).strip(),
+                    }
+                    for row in elementos_cargo
+                ],
+            },
+        }
+
+    # ============================================================
+    # PRIORIDAD 2: CLASIFICACIÓN ADMINISTRATIVO / OPERATIVO
+    # ============================================================
+    query_clasificacion = text("""
+        SELECT
+            ccps."TipoClasificacion"
+        FROM public."CargoClasificacionPazSalvo" ccps
+        WHERE ccps."IdCargo" = :id_cargo
+          AND COALESCE(ccps."Activo", true) = true
+        LIMIT 1;
+    """)
+
+    clasificacion = db.execute(
+        query_clasificacion,
+        {"id_cargo": cargo["IdCargo"]},
+    ).mappings().first()
+
+    if not clasificacion:
+        return {
+            "success": True,
+            "data": {
+                "IdRegistroPersonal": id_registro_personal,
+                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
+                "NombreCompleto": trabajador["NombreCompleto"],
+                "IdCargo": cargo["IdCargo"],
+                "NombreCargo": cargo["NombreCargo"],
+                "TipoClasificacion": None,
+                "OrigenConfiguracion": "SIN_CONFIGURACION",
+                "Elementos": [],
+            },
+        }
+
+    tipo_clasificacion = str(
+        clasificacion["TipoClasificacion"] or ""
+    ).strip().upper()
+
+    query_elementos_clasificacion = text("""
+        SELECT
+            ceps."IdClasificacionElementoPazSalvo"
+                AS "IdConfiguracionElemento",
+            ceps."TipoClasificacion",
+            ceps."CodigoElemento",
+            ceps."NombreElemento"
+        FROM public."ClasificacionElementoPazSalvo" ceps
+        WHERE ceps."TipoClasificacion" = :tipo_clasificacion
+          AND COALESCE(ceps."Activo", true) = true
+        ORDER BY
+            ceps."IdClasificacionElementoPazSalvo" ASC;
+    """)
+
+    elementos_clasificacion = db.execute(
+        query_elementos_clasificacion,
+        {"tipo_clasificacion": tipo_clasificacion},
+    ).mappings().all()
+
+    return {
+        "success": True,
+        "data": {
+            "IdRegistroPersonal": id_registro_personal,
+            "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
+            "NombreCompleto": trabajador["NombreCompleto"],
+            "IdCargo": cargo["IdCargo"],
+            "NombreCargo": cargo["NombreCargo"],
+            "TipoClasificacion": tipo_clasificacion,
+            "OrigenConfiguracion": (
+                "CLASIFICACION"
+                if elementos_clasificacion
+                else "SIN_CONFIGURACION"
+            ),
+            "Elementos": [
+                {
+                    "IdConfiguracionElemento": int(
+                        row["IdConfiguracionElemento"]
+                    ),
+                    "CodigoElemento": str(
+                        row["CodigoElemento"] or ""
+                    ).strip(),
+                    "NombreElemento": str(
+                        row["NombreElemento"] or ""
+                    ).strip(),
+                }
+                for row in elementos_clasificacion
+            ],
+        },
+    }
+
+
+@router.get("/usuario-actual")
+def obtener_usuario_actual_operaciones_retiros(
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Devuelve el nombre completo del usuario autenticado que está
+    diligenciando el Paz y Salvo.
+
+    Para los usuarios corporativos actuales, NombreUsuario contiene
+    el nombre completo y Usuario contiene el login de ingreso.
+    """
+    usuario = current.get("usuario")
+
+    nombre_completo = str(
+        getattr(usuario, "NombreUsuario", "") or ""
+    ).strip()
+
+    login_usuario = str(
+        getattr(usuario, "Usuario", "") or ""
+    ).strip()
+
+    if not nombre_completo:
+        nombre_completo = login_usuario
+
+    return {
+        "success": True,
+        "data": {
+            "IdUsuario": (
+                str(getattr(usuario, "IdUsuario", ""))
+                if getattr(usuario, "IdUsuario", None) is not None
+                else None
+            ),
+            "NombreCompleto": nombre_completo,
+            "Usuario": login_usuario,
+        },
+    }
+
+
+@router.get("/clientes")
+def listar_clientes_operaciones_retiros(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Devuelve el catálogo de clientes registrado en la base de datos.
+
+    Este catálogo se utiliza en el formulario de Paz y Salvo de Operaciones
+    para permitir validar o corregir el cliente antes de enviar el retiro.
+    """
+    query = text("""
+        SELECT
+            c."IdCliente",
+            c."Nombre" AS "NombreCliente"
+        FROM public."Cliente" c
+        WHERE TRIM(COALESCE(c."Nombre", '')) <> ''
+        ORDER BY c."Nombre" ASC;
+    """)
+
+    rows = db.execute(query).mappings().all()
+
+    return {
+        "success": True,
+        "data": [
+            {
+                "IdCliente": int(row["IdCliente"]),
+                "NombreCliente": str(row["NombreCliente"]).strip(),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/clientes/trabajador/{id_registro_personal}")
+def obtener_cliente_actual_operaciones_retiros(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Devuelve el último cliente asignado al trabajador según
+    AsignacionCargoCliente.
+    """
+    id_cliente = _obtener_cliente_actual(
+        db=db,
+        id_registro_personal=id_registro_personal,
+    )
+
+    if id_cliente is None:
+        return {
+            "success": True,
+            "data": None,
+        }
+
+    cliente = _validar_cliente(
+        db=db,
+        id_cliente=id_cliente,
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "IdCliente": int(cliente["IdCliente"]),
+            "NombreCliente": str(cliente["NombreCliente"] or "").strip(),
+        },
+    }
+
+
+
+# ============================================================
+# PROCESOS ABIERTOS - OPERACIONES
+# ============================================================
+@router.get("/procesos-abiertos")
+def listar_procesos_abiertos_operaciones(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Lista únicamente los retiros que todavía están pendientes en Operaciones.
+
+    Este endpoint es de solo consulta:
+    - No inserta.
+    - No actualiza.
+    - No elimina.
+    - No cambia el estado global del trabajador.
+    - No envía información a Relaciones Laborales.
+
+    Se toma el Paz y Salvo más reciente asociado al retiro y, si existe,
+    el RQ activo más reciente del mismo retiro.
+    """
+    rows = db.execute(
+        text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rp."NumeroIdentificacion",
+                TRIM(
+                    COALESCE(rp."Nombres", '') || ' ' ||
+                    COALESCE(rp."Apellidos", '')
+                ) AS "NombreCompleto",
+                rl."IdCliente",
+                c."Nombre" AS "NombreCliente",
+                rl."FechaProceso",
+                rl."FechaCreacion" AS "FechaApertura",
+                rl."FechaActualizacion",
+                rl."EstadoCasoRRLL",
+
+                ps."IdPazYSalvo",
+                psd."EstadoPazYSalvo",
+
+                rq."IdRQOperaciones",
+                rq."TipoNotificacion",
+                rq."RequiereReemplazo",
+                rq."EstadoRQ",
+                rq."EnviadoRRLL",
+                rq."FechaRegistro" AS "FechaRegistroRQ"
+
+            FROM public."RetiroLaboral" rl
+
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
+            LEFT JOIN public."Cliente" c
+                ON c."IdCliente" = rl."IdCliente"
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    p."IdPazYSalvo"
+                FROM public."PazYSalvoOperaciones" p
+                WHERE p."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                ORDER BY p."IdPazYSalvo" DESC
+                LIMIT 1
+            ) ps ON true
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    d."EstadoPazYSalvo"
+                FROM public."PazYSalvoOperacionesDetalle" d
+                WHERE d."IdPazYSalvo" = ps."IdPazYSalvo"
+                ORDER BY d."IdPazYSalvoDetalle" DESC
+                LIMIT 1
+            ) psd ON true
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    rqo."IdRQOperaciones",
+                    rqo."TipoNotificacion",
+                    rqo."RequiereReemplazo",
+                    rqo."EstadoRQ",
+                    rqo."EnviadoRRLL",
+                    rqo."FechaRegistro"
+                FROM public."RQOperaciones" rqo
+                WHERE rqo."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                  AND COALESCE(rqo."Activo", true) = true
+                ORDER BY rqo."IdRQOperaciones" DESC
+                LIMIT 1
+            ) rq ON true
+
+            WHERE UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", '')))
+                = 'PENDIENTE_OPERACIONES'
+              AND COALESCE(rl."Activo", true) = true
+
+            ORDER BY
+                COALESCE(rl."FechaActualizacion", rl."FechaCreacion") DESC,
+                rl."IdRetiroLaboral" DESC;
+        """)
+    ).mappings().all()
+
+    data = []
+
+    for row in rows:
+        data.append({
+            "IdRetiroLaboral": int(row["IdRetiroLaboral"]),
+            "IdRegistroPersonal": int(row["IdRegistroPersonal"]),
+            "NumeroIdentificacion": row["NumeroIdentificacion"],
+            "NombreCompleto": row["NombreCompleto"],
+            "IdCliente": (
+                int(row["IdCliente"])
+                if row["IdCliente"] is not None
+                else None
+            ),
+            "NombreCliente": row["NombreCliente"],
+            "FechaProceso": row["FechaProceso"],
+            "FechaApertura": row["FechaApertura"],
+            "FechaActualizacion": row["FechaActualizacion"],
+            "EstadoCasoRRLL": row["EstadoCasoRRLL"],
+            "IdPazYSalvo": (
+                int(row["IdPazYSalvo"])
+                if row["IdPazYSalvo"] is not None
+                else None
+            ),
+            "EstadoPazYSalvo": row["EstadoPazYSalvo"],
+            "IdRQOperaciones": (
+                int(row["IdRQOperaciones"])
+                if row["IdRQOperaciones"] is not None
+                else None
+            ),
+            "TipoNotificacion": row["TipoNotificacion"],
+            "RequiereReemplazo": (
+                bool(row["RequiereReemplazo"])
+                if row["RequiereReemplazo"] is not None
+                else None
+            ),
+            "EstadoRQ": row["EstadoRQ"],
+            "EnviadoRRLL": (
+                bool(row["EnviadoRRLL"])
+                if row["EnviadoRRLL"] is not None
+                else False
+            ),
+            "FechaRegistroRQ": row["FechaRegistroRQ"],
+        })
+
+    return {
+        "success": True,
+        "total": len(data),
+        "data": data,
+    }
+
+
+
+# ============================================================
+# CONTINUAR PROCESO PENDIENTE - SOLO CONSULTA
+# ============================================================
+@router.get("/proceso/{id_retiro_laboral}/continuar")
+def obtener_proceso_abierto_para_continuar(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Recupera un retiro que sigue pendiente en Operaciones para continuar
+    diligenciándolo sin crear un nuevo RetiroLaboral, Paz y Salvo o RQ.
+
+    SOLO CONSULTA:
+    - No inserta.
+    - No actualiza.
+    - No elimina.
+    - No cambia EstadoCasoRRLL.
+    - No cambia IdEstadoProceso.
+    - No envía el caso a RRLL.
+    """
+
+    proceso = db.execute(
+        text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rl."IdCliente",
+                rl."IdMotivoRetiro",
+                rl."FechaProceso",
+                rl."FechaRetiro",
+                rl."FechaEnvioOperaciones",
+                rl."ObservacionGeneral",
+                rl."EstadoCasoRRLL",
+                rl."Activo" AS "RetiroActivo",
+                rl."FechaCreacion" AS "FechaCreacionRetiro",
+                rl."FechaActualizacion" AS "FechaActualizacionRetiro",
+
+                rp."NumeroIdentificacion",
+                rp."IdEstadoProceso",
+                TRIM(
+                    COALESCE(rp."Nombres", '') || ' ' ||
+                    COALESCE(rp."Apellidos", '')
+                ) AS "NombreCompleto",
+
+                c."Nombre" AS "NombreCliente",
+                mr."Nombre" AS "NombreMotivoRetiro",
+
+                acc."IdCargo",
+                ca."NombreCargo",
+
+                ps."IdPazYSalvo",
+                ps."FechaUltimoDiaLaborado",
+                ps."Observacion" AS "ObservacionPazYSalvo",
+                ps."UsuarioCreacion" AS "UsuarioCreacionPazYSalvo",
+                ps."FechaCreacion" AS "FechaCreacionPazYSalvo",
+                ps."FechaCarga" AS "FechaCargaPazYSalvo",
+
+                psd."IdPazYSalvoDetalle",
+                psd."FechaHoraInicioDiligenciamiento",
+                psd."ElaboradoPor",
+                psd."DescripcionMotivoRetiro",
+                psd."Locker",
+                psd."Llaves",
+                psd."EntregaHerramientas",
+                psd."TarjetaControlAcceso",
+                psd."EntregaGuantes",
+                psd."EntregaMonogafas",
+                psd."EntregaPeto",
+                psd."ObservacionesEntrega",
+                psd."AplicaDescuento",
+                psd."ValorDescuento",
+                psd."NovedadesNomina",
+                psd."PendienteEntregaUniforme",
+                psd."UniformePatogeno",
+                psd."Botas",
+                psd."Zapatos",
+                psd."Chaqueta",
+                psd."CarnetAlpArl",
+                psd."PendientePagoVacunas",
+                psd."UsuariosClavesDispositivos",
+                psd."CorreoSupervisora",
+                psd."EstadoPazYSalvo",
+                psd."FechaCreacion" AS "FechaCreacionDetalle",
+                psd."FechaActualizacion" AS "FechaActualizacionDetalle"
+
+            FROM public."RetiroLaboral" rl
+
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
+            LEFT JOIN public."Cliente" c
+                ON c."IdCliente" = rl."IdCliente"
+
+            LEFT JOIN public."MotivoRetiro" mr
+                ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    x."IdCargo"
+                FROM public."AsignacionCargoCliente" x
+                WHERE x."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                  AND x."IdCargo" IS NOT NULL
+                ORDER BY
+                    x."FechaActualizacion" DESC NULLS LAST,
+                    x."FechaCreacion" DESC NULLS LAST,
+                    x."IdAsignacionCargoCliente" DESC
+                LIMIT 1
+            ) acc ON true
+
+            LEFT JOIN public."Cargo" ca
+                ON ca."IdCargo" = acc."IdCargo"
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    p.*
+                FROM public."PazYSalvoOperaciones" p
+                WHERE p."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                ORDER BY p."IdPazYSalvo" DESC
+                LIMIT 1
+            ) ps ON true
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    d.*
+                FROM public."PazYSalvoOperacionesDetalle" d
+                WHERE d."IdPazYSalvo" = ps."IdPazYSalvo"
+                ORDER BY d."IdPazYSalvoDetalle" DESC
+                LIMIT 1
+            ) psd ON true
+
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+              AND COALESCE(rl."Activo", true) = true
+              AND UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", '')))
+                  = 'PENDIENTE_OPERACIONES'
+            LIMIT 1;
+        """),
+        {"id_retiro_laboral": id_retiro_laboral},
+    ).mappings().first()
+
+    if not proceso:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No se encontró un proceso activo pendiente en Operaciones "
+                f"con IdRetiroLaboral={id_retiro_laboral}."
+            ),
+        )
+
+    id_paz_y_salvo = proceso["IdPazYSalvo"]
+
+    evidencias = []
+
+    if id_paz_y_salvo is not None:
+        rows_evidencias = db.execute(
+            text("""
+                SELECT
+                    "IdPazYSalvoEvidencia",
+                    "IdPazYSalvo",
+                    "IdRetiroLaboral",
+                    "TipoEvidencia",
+                    "NombreArchivoOriginal",
+                    "ExtensionArchivo",
+                    "MimeType",
+                    "PesoArchivo",
+                    "Observacion",
+                    "FechaCreacion",
+                    "FechaActualizacion"
+                FROM public."PazYSalvoOperacionesEvidencia"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND "IdPazYSalvo" = :id_paz_y_salvo
+                  AND COALESCE("Activo", true) = true
+                  AND COALESCE("Eliminado", false) = false
+                ORDER BY "IdPazYSalvoEvidencia" ASC;
+            """),
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_paz_y_salvo": id_paz_y_salvo,
+            },
+        ).mappings().all()
+
+        evidencias = [
+            {
+                "IdPazYSalvoEvidencia": int(row["IdPazYSalvoEvidencia"]),
+                "IdPazYSalvo": int(row["IdPazYSalvo"]),
+                "IdRetiroLaboral": int(row["IdRetiroLaboral"]),
+                "TipoEvidencia": row["TipoEvidencia"],
+                "NombreArchivoOriginal": row["NombreArchivoOriginal"],
+                "ExtensionArchivo": row["ExtensionArchivo"],
+                "MimeType": row["MimeType"],
+                "PesoArchivo": row["PesoArchivo"],
+                "Observacion": row["Observacion"],
+                "FechaCreacion": row["FechaCreacion"],
+                "FechaActualizacion": row["FechaActualizacion"],
+            }
+            for row in rows_evidencias
+        ]
+
+    pdf_oficial = db.execute(
+        text("""
+            SELECT
+                "IdRetiroLaboralAdjunto",
+                "IdTipoDocumentoRetiro",
+                "NombreArchivoOriginal",
+                "ExtensionArchivo",
+                "MimeType",
+                "PesoArchivo",
+                "Observacion",
+                "OrigenArchivo",
+                "FechaCreacion"
+            FROM public."RetiroLaboralAdjunto"
+            WHERE "IdRetiroLaboral" = :id_retiro_laboral
+              AND "IdTipoDocumentoRetiro" = :id_tipo_documento
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false
+            ORDER BY "IdRetiroLaboralAdjunto" DESC
+            LIMIT 1;
+        """),
+        {
+            "id_retiro_laboral": id_retiro_laboral,
+            "id_tipo_documento": ID_TIPO_DOCUMENTO_PAZ_Y_SALVO,
+        },
+    ).mappings().first()
+
+    data = {
+        "Retiro": {
+            "IdRetiroLaboral": int(proceso["IdRetiroLaboral"]),
+            "IdRegistroPersonal": int(proceso["IdRegistroPersonal"]),
+            "IdCliente": (
+                int(proceso["IdCliente"])
+                if proceso["IdCliente"] is not None
+                else None
+            ),
+            "IdMotivoRetiro": (
+                int(proceso["IdMotivoRetiro"])
+                if proceso["IdMotivoRetiro"] is not None
+                else None
+            ),
+            "NombreMotivoRetiro": proceso["NombreMotivoRetiro"],
+            "FechaProceso": proceso["FechaProceso"],
+            "FechaRetiro": proceso["FechaRetiro"],
+            "FechaEnvioOperaciones": proceso["FechaEnvioOperaciones"],
+            "ObservacionGeneral": proceso["ObservacionGeneral"],
+            "EstadoCasoRRLL": proceso["EstadoCasoRRLL"],
+            "Activo": bool(proceso["RetiroActivo"]),
+            "FechaCreacion": proceso["FechaCreacionRetiro"],
+            "FechaActualizacion": proceso["FechaActualizacionRetiro"],
+        },
+        "Trabajador": {
+            "IdRegistroPersonal": int(proceso["IdRegistroPersonal"]),
+            "NumeroIdentificacion": proceso["NumeroIdentificacion"],
+            "NombreCompleto": proceso["NombreCompleto"],
+            "IdEstadoProceso": (
+                int(proceso["IdEstadoProceso"])
+                if proceso["IdEstadoProceso"] is not None
+                else None
+            ),
+            "IdCargo": (
+                int(proceso["IdCargo"])
+                if proceso["IdCargo"] is not None
+                else None
+            ),
+            "NombreCargo": proceso["NombreCargo"],
+            "IdCliente": (
+                int(proceso["IdCliente"])
+                if proceso["IdCliente"] is not None
+                else None
+            ),
+            "NombreCliente": proceso["NombreCliente"],
+        },
+        "PazYSalvo": None,
+        "Evidencias": evidencias,
+        "PdfOficial": None,
+    }
+
+    if id_paz_y_salvo is not None:
+        data["PazYSalvo"] = {
+            "IdPazYSalvo": int(proceso["IdPazYSalvo"]),
+            "IdPazYSalvoDetalle": (
+                int(proceso["IdPazYSalvoDetalle"])
+                if proceso["IdPazYSalvoDetalle"] is not None
+                else None
+            ),
+            "FechaUltimoDiaLaborado": proceso["FechaUltimoDiaLaborado"],
+            "Observacion": proceso["ObservacionPazYSalvo"],
+            "UsuarioCreacion": proceso["UsuarioCreacionPazYSalvo"],
+            "FechaCreacion": proceso["FechaCreacionPazYSalvo"],
+            "FechaCarga": proceso["FechaCargaPazYSalvo"],
+            "FechaHoraInicioDiligenciamiento": (
+                proceso["FechaHoraInicioDiligenciamiento"]
+            ),
+            "ElaboradoPor": proceso["ElaboradoPor"],
+            "DescripcionMotivoRetiro": proceso["DescripcionMotivoRetiro"],
+            "Locker": proceso["Locker"],
+            "Llaves": proceso["Llaves"],
+            "EntregaHerramientas": proceso["EntregaHerramientas"],
+            "TarjetaControlAcceso": proceso["TarjetaControlAcceso"],
+            "EntregaGuantes": proceso["EntregaGuantes"],
+            "EntregaMonogafas": proceso["EntregaMonogafas"],
+            "EntregaPeto": proceso["EntregaPeto"],
+            "ObservacionesEntrega": proceso["ObservacionesEntrega"],
+            "AplicaDescuento": proceso["AplicaDescuento"],
+            "ValorDescuento": proceso["ValorDescuento"],
+            "NovedadesNomina": proceso["NovedadesNomina"],
+            "PendienteEntregaUniforme": proceso["PendienteEntregaUniforme"],
+            "UniformePatogeno": proceso["UniformePatogeno"],
+            "Botas": proceso["Botas"],
+            "Zapatos": proceso["Zapatos"],
+            "Chaqueta": proceso["Chaqueta"],
+            "CarnetAlpArl": proceso["CarnetAlpArl"],
+            "PendientePagoVacunas": proceso["PendientePagoVacunas"],
+            "UsuariosClavesDispositivos": (
+                proceso["UsuariosClavesDispositivos"]
+            ),
+            "CorreoSupervisora": proceso["CorreoSupervisora"],
+            "EstadoPazYSalvo": proceso["EstadoPazYSalvo"],
+            "FechaCreacionDetalle": proceso["FechaCreacionDetalle"],
+            "FechaActualizacionDetalle": proceso["FechaActualizacionDetalle"],
+        }
+
+    if pdf_oficial:
+        data["PdfOficial"] = {
+            "IdRetiroLaboralAdjunto": int(
+                pdf_oficial["IdRetiroLaboralAdjunto"]
+            ),
+            "IdTipoDocumentoRetiro": int(
+                pdf_oficial["IdTipoDocumentoRetiro"]
+            ),
+            "NombreArchivoOriginal": pdf_oficial["NombreArchivoOriginal"],
+            "ExtensionArchivo": pdf_oficial["ExtensionArchivo"],
+            "MimeType": pdf_oficial["MimeType"],
+            "PesoArchivo": pdf_oficial["PesoArchivo"],
+            "Observacion": pdf_oficial["Observacion"],
+            "OrigenArchivo": pdf_oficial["OrigenArchivo"],
+            "FechaCreacion": pdf_oficial["FechaCreacion"],
+        }
+
+    return {
+        "success": True,
+        "data": data,
+    }
+
+
+
+# ============================================================
+# ACTUALIZAR PROCESO PENDIENTE - PAZ Y SALVO EXISTENTE
+# ============================================================
+@router.put("/proceso/{id_retiro_laboral}/paz-salvo")
+async def actualizar_paz_salvo_proceso_pendiente(
+    id_retiro_laboral: int,
+    IdPazYSalvo: int = Form(...),
+    IdPazYSalvoDetalle: int = Form(...),
+    IdCliente: int = Form(...),
+    IdMotivoRetiro: int = Form(...),
+    FechaUltimoDiaLaborado: date = Form(...),
+    UsuarioActualizacion: str = Form("operaciones"),
+    Observacion: str | None = Form(None),
+
+    FechaHoraInicioDiligenciamiento: datetime = Form(...),
+    ElaboradoPor: str = Form(...),
+    DescripcionMotivoRetiro: str = Form(...),
+
+    Locker: str = Form(...),
+    Llaves: str = Form(...),
+    EntregaHerramientas: str = Form(...),
+    TarjetaControlAcceso: str = Form(...),
+
+    EntregaGuantes: str = Form(...),
+    EntregaMonogafas: str = Form(...),
+    EntregaPeto: str = Form(...),
+    ObservacionesEntrega: str = Form(...),
+
+    AplicaDescuento: str = Form(...),
+    ValorDescuento: Decimal | None = Form(None),
+    NovedadesNomina: str | None = Form(None),
+
+    PendienteEntregaUniforme: str = Form(...),
+    UniformePatogeno: str = Form(...),
+    Botas: str = Form(...),
+    Zapatos: str = Form(...),
+    Chaqueta: str = Form(...),
+    CarnetAlpArl: str = Form(...),
+    PendientePagoVacunas: str = Form(...),
+
+    UsuariosClavesDispositivos: str | None = Form(None),
+    CorreoSupervisora: str | None = Form(None),
+    EstadoPazYSalvo: str = Form(...),
+
+    # Compatibilidad con un PDF manual.
+    archivo: UploadFile | None = File(None),
+
+    # Nuevas evidencias opcionales. Las evidencias ya existentes se conservan.
+    novedadesNominaArchivo: list[UploadFile] | None = File(None),
+    formatoDescuentoVacunasArchivo: UploadFile | None = File(None),
+    fotoCarnetAccesoArchivo: UploadFile | None = File(None),
+    fotoListadoHerramientasArchivo: UploadFile | None = File(None),
+    fotoPlanillaNominaArchivo: UploadFile | None = File(None),
+
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Actualiza el MISMO proceso pendiente de Operaciones.
+
+    Reglas de seguridad:
+    - No crea un nuevo RetiroLaboral.
+    - No crea un nuevo PazYSalvoOperaciones.
+    - No crea un nuevo PazYSalvoOperacionesDetalle.
+    - No crea un nuevo RQOperaciones.
+    - RetiroLaboral debe seguir en PENDIENTE_OPERACIONES.
+    - RegistroPersonal.IdEstadoProceso no se modifica aquí.
+    - FechaEnvioOperaciones no se modifica aquí.
+    - Si el Paz y Salvo queda CERRADO y ya existe RQ, el mismo RQ pasa
+      a LISTO_PARA_ENVIO.
+    - Si queda ABIERTO y ya existe RQ, el mismo RQ queda
+      PENDIENTE_OPERACIONES.
+    - El PDF oficial se regenera. La versión anterior se inactiva y se
+      conserva para trazabilidad.
+    """
+
+    ruta_pdf_nueva: Path | None = None
+    rutas_evidencias_creadas: list[Path] = []
+    ids_evidencias_nuevas: list[int] = []
+    contenido_pdf: bytes | None = None
+    nombre_original_pdf: str | None = None
+
+    archivos_para_cerrar: list[UploadFile] = []
+
+    if archivo is not None:
+        archivos_para_cerrar.append(archivo)
+
+    if novedadesNominaArchivo:
+        archivos_para_cerrar.extend(novedadesNominaArchivo)
+
+    for archivo_opcional in [
+        formatoDescuentoVacunasArchivo,
+        fotoCarnetAccesoArchivo,
+        fotoListadoHerramientasArchivo,
+        fotoPlanillaNominaArchivo,
+    ]:
+        if archivo_opcional is not None:
+            archivos_para_cerrar.append(archivo_opcional)
+
+    try:
+        usuario = _normalizar_usuario(UsuarioActualizacion)
+        observacion = _normalizar_texto_opcional(Observacion)
+
+        elaborado_por = _normalizar_texto_requerido(
+            ElaboradoPor,
+            "ElaboradoPor",
+        )
+        descripcion_motivo = _normalizar_texto_requerido(
+            DescripcionMotivoRetiro,
+            "DescripcionMotivoRetiro",
+        )
+
+        locker = _normalizar_opcion(
+            Locker,
+            "Locker",
+            OPCIONES_ENTREGA_GENERAL,
+        )
+        llaves = _normalizar_opcion(
+            Llaves,
+            "Llaves",
+            OPCIONES_ENTREGA_GENERAL,
+        )
+        entrega_herramientas = _normalizar_opcion(
+            EntregaHerramientas,
+            "EntregaHerramientas",
+            OPCIONES_ENTREGA_GENERAL,
+        )
+        tarjeta_control_acceso = _normalizar_opcion(
+            TarjetaControlAcceso,
+            "TarjetaControlAcceso",
+            OPCIONES_ENTREGA_GENERAL,
+        )
+
+        entrega_guantes = _normalizar_opcion(
+            EntregaGuantes,
+            "EntregaGuantes",
+            OPCIONES_CUMPLIMIENTO,
+        )
+        entrega_monogafas = _normalizar_opcion(
+            EntregaMonogafas,
+            "EntregaMonogafas",
+            OPCIONES_CUMPLIMIENTO,
+        )
+        entrega_peto = _normalizar_opcion(
+            EntregaPeto,
+            "EntregaPeto",
+            OPCIONES_ENTREGA_GENERAL,
+        )
+        observaciones_entrega = _normalizar_texto_requerido(
+            ObservacionesEntrega,
+            "ObservacionesEntrega",
+        )
+
+        aplica_descuento = _normalizar_opcion(
+            AplicaDescuento,
+            "AplicaDescuento",
+            OPCIONES_SI_NO,
+        )
+        valor_descuento = _validar_valor_descuento(
+            aplica_descuento,
+            ValorDescuento,
+        )
+        novedades_nomina = _normalizar_texto_opcional(NovedadesNomina)
+
+        pendiente_entrega_uniforme = _normalizar_opcion(
+            PendienteEntregaUniforme,
+            "PendienteEntregaUniforme",
+            OPCIONES_SI_NO,
+        )
+        uniforme_patogeno = _normalizar_opcion(
+            UniformePatogeno,
+            "UniformePatogeno",
+            OPCIONES_SI_NO,
+        )
+        botas = _normalizar_opcion(Botas, "Botas", OPCIONES_SI_NO)
+        zapatos = _normalizar_opcion(Zapatos, "Zapatos", OPCIONES_SI_NO)
+        chaqueta = _normalizar_opcion(Chaqueta, "Chaqueta", OPCIONES_SI_NO)
+        carnet_alp_arl = _normalizar_opcion(
+            CarnetAlpArl,
+            "CarnetAlpArl",
+            OPCIONES_SI_NO,
+        )
+        pendiente_pago_vacunas = _normalizar_opcion(
+            PendientePagoVacunas,
+            "PendientePagoVacunas",
+            OPCIONES_SI_NO,
+        )
+
+        usuarios_claves_dispositivos = _normalizar_texto_opcional(
+            UsuariosClavesDispositivos
+        )
+        correo_supervisora = _normalizar_texto_opcional(CorreoSupervisora)
+        estado_paz_y_salvo = _normalizar_opcion(
+            EstadoPazYSalvo,
+            "EstadoPazYSalvo",
+            OPCIONES_ESTADO_PAZ_SALVO,
+        )
+
+        # ============================================================
+        # VALIDAR QUE LOS IDS CORRESPONDEN AL MISMO PROCESO PENDIENTE
+        # ============================================================
+        contexto = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    rl."IdCliente",
+                    rl."IdMotivoRetiro",
+                    rl."FechaEnvioOperaciones",
+                    rl."EstadoCasoRRLL",
+                    rl."Activo",
+                    rp."IdEstadoProceso",
+                    rp."NumeroIdentificacion",
+                    TRIM(
+                        COALESCE(rp."Nombres", '') || ' ' ||
+                        COALESCE(rp."Apellidos", '')
+                    ) AS "NombreCompleto",
+                    ps."IdPazYSalvo",
+                    psd."IdPazYSalvoDetalle",
+                    psd."EstadoPazYSalvo"
+                FROM public."RetiroLaboral" rl
+                INNER JOIN public."RegistroPersonal" rp
+                    ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+                INNER JOIN public."PazYSalvoOperaciones" ps
+                    ON ps."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                   AND ps."IdPazYSalvo" = :id_paz_y_salvo
+                INNER JOIN public."PazYSalvoOperacionesDetalle" psd
+                    ON psd."IdPazYSalvo" = ps."IdPazYSalvo"
+                   AND psd."IdPazYSalvoDetalle" = :id_paz_y_salvo_detalle
+                WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE(rl."Activo", true) = true
+                LIMIT 1
+                FOR UPDATE OF rl, ps, psd;
+            """),
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_paz_y_salvo": IdPazYSalvo,
+                "id_paz_y_salvo_detalle": IdPazYSalvoDetalle,
+            },
+        ).mappings().first()
+
+        if not contexto:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "No se encontró el retiro pendiente con el Paz y Salvo "
+                    "y detalle indicados. No se realizó ninguna actualización."
+                ),
+            )
+
+        estado_caso_rrll = str(
+            contexto["EstadoCasoRRLL"] or ""
+        ).strip().upper()
+
+        if estado_caso_rrll != "PENDIENTE_OPERACIONES":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El retiro ya no está pendiente en Operaciones y no puede "
+                    "modificarse desde esta vista."
+                ),
+            )
+
+        if contexto["FechaEnvioOperaciones"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El retiro ya registra fecha de envío desde Operaciones. "
+                    "No se permite modificar el Paz y Salvo pendiente."
+                ),
+            )
+
+        if int(contexto["IdEstadoProceso"] or 0) != ID_ESTADO_CONTRATADO:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El trabajador ya no se encuentra en estado CONTRATADO. "
+                    "No se modificó el proceso pendiente."
+                ),
+            )
+
+        cliente = _validar_cliente(
+            db=db,
+            id_cliente=IdCliente,
+        )
+        motivo = _validar_motivo_retiro(
+            db=db,
+            id_motivo_retiro=IdMotivoRetiro,
+        )
+
+        # Si existe RQ, debe ser el mismo RQ activo y aún no enviado.
+        rq_existente = db.execute(
+            text("""
+                SELECT
+                    "IdRQOperaciones",
+                    "IdPazYSalvo",
+                    "EnviadoRRLL",
+                    "EstadoRQ"
+                FROM public."RQOperaciones"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE("Activo", true) = true
+                ORDER BY "IdRQOperaciones" DESC
+                LIMIT 1
+                FOR UPDATE;
+            """),
+            {"id_retiro_laboral": id_retiro_laboral},
+        ).mappings().first()
+
+        if rq_existente:
+            if int(rq_existente["IdPazYSalvo"]) != int(IdPazYSalvo):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "El RQ activo no corresponde al Paz y Salvo que se "
+                        "está intentando actualizar."
+                    ),
+                )
+
+            if bool(rq_existente["EnviadoRRLL"]):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "El RQ ya fue enviado a Relaciones Laborales. "
+                        "No se permite modificar el Paz y Salvo."
+                    ),
+                )
+
+        # ============================================================
+        # VALIDAR PDF MANUAL Y NUEVAS EVIDENCIAS ANTES DE ACTUALIZAR
+        # ============================================================
+        if archivo is not None:
+            contenido_pdf = await archivo.read()
+            _validar_archivo_pdf(archivo, contenido_pdf)
+            nombre_original_pdf = Path(str(archivo.filename)).name
+
+        evidencias_recibidas: list[tuple[str, UploadFile, bytes]] = []
+
+        if novedadesNominaArchivo:
+            for archivo_evidencia in novedadesNominaArchivo:
+                contenido_evidencia = await archivo_evidencia.read()
+                _validar_evidencia(
+                    archivo_evidencia,
+                    contenido_evidencia,
+                    "NOVEDADES_NOMINA",
+                )
+                evidencias_recibidas.append((
+                    "NOVEDADES_NOMINA",
+                    archivo_evidencia,
+                    contenido_evidencia,
+                ))
+
+        evidencias_simples = [
+            ("FORMATO_DESCUENTO_VACUNAS", formatoDescuentoVacunasArchivo),
+            ("CARNET_ACCESO", fotoCarnetAccesoArchivo),
+            ("LISTADO_HERRAMIENTAS", fotoListadoHerramientasArchivo),
+            ("PLANILLA_NOMINA", fotoPlanillaNominaArchivo),
+        ]
+
+        for tipo_evidencia, archivo_evidencia in evidencias_simples:
+            if archivo_evidencia is None:
+                continue
+
+            contenido_evidencia = await archivo_evidencia.read()
+            _validar_evidencia(
+                archivo_evidencia,
+                contenido_evidencia,
+                tipo_evidencia,
+            )
+            evidencias_recibidas.append((
+                tipo_evidencia,
+                archivo_evidencia,
+                contenido_evidencia,
+            ))
+
+        # ============================================================
+        # ACTUALIZAR LOS MISMOS REGISTROS
+        # ============================================================
+        db.execute(
+            text("""
+                UPDATE public."RetiroLaboral"
+                SET
+                    "IdCliente" = :id_cliente,
+                    "IdMotivoRetiro" = :id_motivo_retiro,
+                    "FechaRetiro" = :fecha_retiro,
+                    "ObservacionGeneral" = :observacion_general,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND UPPER(TRIM(COALESCE("EstadoCasoRRLL", '')))
+                      = 'PENDIENTE_OPERACIONES'
+                  AND COALESCE("Activo", true) = true;
+            """),
+            {
+                "id_cliente": IdCliente,
+                "id_motivo_retiro": IdMotivoRetiro,
+                "fecha_retiro": FechaUltimoDiaLaborado,
+                "observacion_general": observacion,
+                "usuario": usuario,
+                "id_retiro_laboral": id_retiro_laboral,
+            },
+        )
+
+        db.execute(
+            text("""
+                UPDATE public."PazYSalvoOperaciones"
+                SET
+                    "FechaUltimoDiaLaborado" = :fecha_ultimo_dia_laborado,
+                    "Observacion" = :observacion
+                WHERE "IdPazYSalvo" = :id_paz_y_salvo
+                  AND "IdRetiroLaboral" = :id_retiro_laboral;
+            """),
+            {
+                "fecha_ultimo_dia_laborado": FechaUltimoDiaLaborado,
+                "observacion": observacion,
+                "id_paz_y_salvo": IdPazYSalvo,
+                "id_retiro_laboral": id_retiro_laboral,
+            },
+        )
+
+        resultado_detalle = db.execute(
+            text("""
+                UPDATE public."PazYSalvoOperacionesDetalle"
+                SET
+                    "FechaHoraInicioDiligenciamiento" =
+                        :fecha_hora_inicio_diligenciamiento,
+                    "ElaboradoPor" = :elaborado_por,
+                    "DescripcionMotivoRetiro" = :descripcion_motivo_retiro,
+                    "Locker" = :locker,
+                    "Llaves" = :llaves,
+                    "EntregaHerramientas" = :entrega_herramientas,
+                    "TarjetaControlAcceso" = :tarjeta_control_acceso,
+                    "EntregaGuantes" = :entrega_guantes,
+                    "EntregaMonogafas" = :entrega_monogafas,
+                    "EntregaPeto" = :entrega_peto,
+                    "ObservacionesEntrega" = :observaciones_entrega,
+                    "AplicaDescuento" = :aplica_descuento,
+                    "ValorDescuento" = :valor_descuento,
+                    "NovedadesNomina" = :novedades_nomina,
+                    "PendienteEntregaUniforme" = :pendiente_entrega_uniforme,
+                    "UniformePatogeno" = :uniforme_patogeno,
+                    "Botas" = :botas,
+                    "Zapatos" = :zapatos,
+                    "Chaqueta" = :chaqueta,
+                    "CarnetAlpArl" = :carnet_alp_arl,
+                    "PendientePagoVacunas" = :pendiente_pago_vacunas,
+                    "UsuariosClavesDispositivos" =
+                        :usuarios_claves_dispositivos,
+                    "CorreoSupervisora" = :correo_supervisora,
+                    "EstadoPazYSalvo" = :estado_paz_y_salvo,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+                WHERE "IdPazYSalvoDetalle" = :id_paz_y_salvo_detalle
+                  AND "IdPazYSalvo" = :id_paz_y_salvo;
+            """),
+            {
+                "fecha_hora_inicio_diligenciamiento": (
+                    FechaHoraInicioDiligenciamiento
+                ),
+                "elaborado_por": elaborado_por,
+                "descripcion_motivo_retiro": descripcion_motivo,
+                "locker": locker,
+                "llaves": llaves,
+                "entrega_herramientas": entrega_herramientas,
+                "tarjeta_control_acceso": tarjeta_control_acceso,
+                "entrega_guantes": entrega_guantes,
+                "entrega_monogafas": entrega_monogafas,
+                "entrega_peto": entrega_peto,
+                "observaciones_entrega": observaciones_entrega,
+                "aplica_descuento": aplica_descuento,
+                "valor_descuento": valor_descuento,
+                "novedades_nomina": novedades_nomina,
+                "pendiente_entrega_uniforme": pendiente_entrega_uniforme,
+                "uniforme_patogeno": uniforme_patogeno,
+                "botas": botas,
+                "zapatos": zapatos,
+                "chaqueta": chaqueta,
+                "carnet_alp_arl": carnet_alp_arl,
+                "pendiente_pago_vacunas": pendiente_pago_vacunas,
+                "usuarios_claves_dispositivos": (
+                    usuarios_claves_dispositivos
+                ),
+                "correo_supervisora": correo_supervisora,
+                "estado_paz_y_salvo": estado_paz_y_salvo,
+                "usuario": usuario,
+                "id_paz_y_salvo_detalle": IdPazYSalvoDetalle,
+                "id_paz_y_salvo": IdPazYSalvo,
+            },
+        )
+
+        if resultado_detalle.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "No fue posible actualizar exactamente un detalle del "
+                    "Paz y Salvo. La operación fue cancelada."
+                ),
+            )
+
+        # El RQ existente cambia únicamente de estado según el Paz y Salvo.
+        estado_rq = (
+            "LISTO_PARA_ENVIO"
+            if estado_paz_y_salvo == "CERRADO"
+            else "PENDIENTE_OPERACIONES"
+        )
+
+        id_rq_operaciones = None
+
+        if rq_existente:
+            id_rq_operaciones = int(rq_existente["IdRQOperaciones"])
+
+            db.execute(
+                text("""
+                    UPDATE public."RQOperaciones"
+                    SET
+                        "EstadoRQ" = :estado_rq,
+                        "UsuarioActualizacion" = :usuario,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP
+                    WHERE "IdRQOperaciones" = :id_rq_operaciones
+                      AND COALESCE("Activo", true) = true
+                      AND COALESCE("EnviadoRRLL", false) = false;
+                """),
+                {
+                    "estado_rq": estado_rq,
+                    "usuario": usuario,
+                    "id_rq_operaciones": id_rq_operaciones,
+                },
+            )
+
+        # ============================================================
+        # REGENERAR PDF OFICIAL DEL MISMO PAZ Y SALVO
+        # ============================================================
+        if contenido_pdf is None:
+            buffer_pdf = generar_paz_salvo_operaciones_pdf(
+                db=db,
+                id_paz_y_salvo=IdPazYSalvo,
+            )
+            contenido_pdf = buffer_pdf.getvalue()
+            buffer_pdf.close()
+            nombre_original_pdf = (
+                f"paz_salvo_operaciones_{id_retiro_laboral}.pdf"
+            )
+
+        if not contenido_pdf:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    "No fue posible generar la nueva versión del PDF oficial "
+                    "del Paz y Salvo."
+                ),
+            )
+
+        carpeta_retiro = STORAGE_BASE_DIR / str(id_retiro_laboral)
+        carpeta_retiro.mkdir(parents=True, exist_ok=True)
+
+        nombre_guardado_pdf = (
+            f"paz_salvo_operaciones_"
+            f"{id_retiro_laboral}_{uuid4().hex}.pdf"
+        )
+        ruta_pdf_nueva = carpeta_retiro / nombre_guardado_pdf
+        ruta_pdf_nueva.write_bytes(contenido_pdf)
+        ruta_archivo_bd = str(ruta_pdf_nueva).replace("\\", "/")
+
+        # La versión anterior queda inactiva; no se elimina físicamente.
+        db.execute(
+            text("""
+                UPDATE public."RetiroLaboralAdjunto"
+                SET
+                    "Activo" = false,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND "IdTipoDocumentoRetiro" = :id_tipo_documento_retiro
+                  AND COALESCE("Activo", true) = true
+                  AND COALESCE("Eliminado", false) = false;
+            """),
+            {
+                "usuario": usuario,
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_tipo_documento_retiro": ID_TIPO_DOCUMENTO_PAZ_Y_SALVO,
+            },
+        )
+
+        id_adjunto_nuevo = db.execute(
+            text("""
+                INSERT INTO public."RetiroLaboralAdjunto" (
+                    "IdRetiroLaboral",
+                    "IdTipoDocumentoRetiro",
+                    "NombreArchivo",
+                    "NombreArchivoOriginal",
+                    "RutaArchivo",
+                    "ExtensionArchivo",
+                    "PesoArchivo",
+                    "Observacion",
+                    "OrigenArchivo",
+                    "MimeType",
+                    "Activo",
+                    "Eliminado",
+                    "FechaCreacion",
+                    "FechaActualizacion",
+                    "CreadoPor",
+                    "UsuarioActualizacion"
+                )
+                VALUES (
+                    :id_retiro_laboral,
+                    :id_tipo_documento_retiro,
+                    :nombre_archivo,
+                    :nombre_archivo_original,
+                    :ruta_archivo,
+                    '.pdf',
+                    :peso_archivo,
+                    :observacion,
+                    'OPERACIONES',
+                    'application/pdf',
+                    true,
+                    false,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP,
+                    :creado_por,
+                    :usuario_actualizacion
+                )
+                RETURNING "IdRetiroLaboralAdjunto";
+            """),
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_tipo_documento_retiro": ID_TIPO_DOCUMENTO_PAZ_Y_SALVO,
+                "nombre_archivo": nombre_guardado_pdf,
+                "nombre_archivo_original": nombre_original_pdf,
+                "ruta_archivo": ruta_archivo_bd,
+                "peso_archivo": len(contenido_pdf),
+                "observacion": (
+                    observacion
+                    or (
+                        "Paz y salvo actualizado desde el módulo "
+                        "de Operaciones."
+                    )
+                ),
+                "creado_por": usuario,
+                "usuario_actualizacion": usuario,
+            },
+        ).scalar_one()
+
+        # ============================================================
+        # NUEVAS EVIDENCIAS OPCIONALES
+        # Las existentes permanecen activas.
+        # ============================================================
+        if evidencias_recibidas:
+            carpeta_evidencias = (
+                carpeta_retiro / "evidencias_operaciones"
+            )
+            carpeta_evidencias.mkdir(parents=True, exist_ok=True)
+
+            for (
+                tipo_evidencia,
+                archivo_evidencia,
+                contenido_evidencia,
+            ) in evidencias_recibidas:
+                id_evidencia, ruta_evidencia = _guardar_evidencia_paz_salvo(
+                    db=db,
+                    id_paz_y_salvo=IdPazYSalvo,
+                    id_retiro_laboral=id_retiro_laboral,
+                    tipo_evidencia=tipo_evidencia,
+                    archivo=archivo_evidencia,
+                    contenido=contenido_evidencia,
+                    usuario=usuario,
+                    carpeta_evidencias=carpeta_evidencias,
+                )
+                ids_evidencias_nuevas.append(id_evidencia)
+                rutas_evidencias_creadas.append(ruta_evidencia)
+
+        # IMPORTANTE:
+        # - NO se cambia RegistroPersonal.IdEstadoProceso.
+        # - NO se cambia RetiroLaboral.EstadoCasoRRLL.
+        # - NO se llena FechaEnvioOperaciones.
+        # El envío formal sigue siendo un paso separado.
+        db.commit()
+
+        return {
+            "success": True,
+            "message": (
+                "El Paz y Salvo existente fue actualizado correctamente. "
+                "El caso continúa pendiente en Operaciones."
+            ),
+            "data": {
+                "IdRetiroLaboral": int(id_retiro_laboral),
+                "IdPazYSalvo": int(IdPazYSalvo),
+                "IdPazYSalvoDetalle": int(IdPazYSalvoDetalle),
+                "IdRetiroLaboralAdjunto": int(id_adjunto_nuevo),
+                "IdRQOperaciones": id_rq_operaciones,
+                "IdRegistroPersonal": int(contexto["IdRegistroPersonal"]),
+                "NumeroIdentificacion": contexto["NumeroIdentificacion"],
+                "NombreCompleto": contexto["NombreCompleto"],
+                "IdCliente": int(IdCliente),
+                "NombreCliente": str(
+                    cliente["NombreCliente"] or ""
+                ).strip(),
+                "IdMotivoRetiro": int(IdMotivoRetiro),
+                "NombreMotivoRetiro": motivo["Nombre"],
+                "FechaUltimoDiaLaborado": FechaUltimoDiaLaborado,
+                "EstadoPazYSalvo": estado_paz_y_salvo,
+                "EstadoRQ": estado_rq if rq_existente else None,
+                "EstadoCasoRRLL": "PENDIENTE_OPERACIONES",
+                "IdEstadoProceso": int(contexto["IdEstadoProceso"]),
+                "FechaEnvioOperaciones": None,
+                "PendienteEnvioRRLL": True,
+                "CantidadEvidenciasNuevas": len(ids_evidencias_nuevas),
+                "IdsEvidenciasNuevas": ids_evidencias_nuevas,
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+
+        if ruta_pdf_nueva and ruta_pdf_nueva.exists():
+            ruta_pdf_nueva.unlink(missing_ok=True)
+
+        for ruta in rutas_evidencias_creadas:
+            if ruta.exists():
+                ruta.unlink(missing_ok=True)
+
+        raise
+
+    except Exception as error:
+        db.rollback()
+
+        if ruta_pdf_nueva and ruta_pdf_nueva.exists():
+            ruta_pdf_nueva.unlink(missing_ok=True)
+
+        for ruta in rutas_evidencias_creadas:
+            if ruta.exists():
+                ruta.unlink(missing_ok=True)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No fue posible actualizar el Paz y Salvo existente: "
+                f"{str(error)}"
+            ),
+        ) from error
+
+    finally:
+        for archivo_abierto in archivos_para_cerrar:
+            try:
+                await archivo_abierto.close()
+            except Exception:
+                pass
+
+
+@router.get("/rq/perfiles")
+def listar_perfiles_rq(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    rows = db.execute(
+        text("""
+            SELECT
+                "IdPerfilRQ",
+                "CodigoPerfil",
+                "DescripcionPerfil",
+                "Genero",
+                "NivelEscolaridad",
+                "Observaciones"
+            FROM public."PerfilRQ"
+            WHERE COALESCE("Activo", true) = true
+            ORDER BY "IdPerfilRQ" ASC;
+        """)
+    ).mappings().all()
+
+    return {
+        "success": True,
+        "data": [
+            {
+                "IdPerfilRQ": int(row["IdPerfilRQ"]),
+                "CodigoPerfil": row["CodigoPerfil"],
+                "DescripcionPerfil": row["DescripcionPerfil"],
+                "Genero": row["Genero"],
+                "NivelEscolaridad": row["NivelEscolaridad"],
+                "Observaciones": row["Observaciones"],
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/rq/retiro/{id_retiro_laboral}")
+def obtener_rq_por_retiro(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    row = db.execute(
+        text("""
+            SELECT
+                rq.*,
+                rp."NumeroIdentificacion",
+                TRIM(
+                    COALESCE(rp."Nombres", '') || ' ' ||
+                    COALESCE(rp."Apellidos", '')
+                ) AS "NombreCompleto",
+                c."Nombre" AS "NombreCliente",
+                acc."IdCargo" AS "IdCargoDerivado",
+                ca."NombreCargo",
+                u."NombreUsuario" AS "NombreLider",
+                prq."CodigoPerfil",
+                prq."DescripcionPerfil",
+                prq."Genero" AS "GeneroPerfil",
+                prq."NivelEscolaridad" AS "NivelEscolaridadPerfil",
+                prq."Observaciones" AS "ObservacionesPerfil"
+            FROM public."RQOperaciones" rq
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rq."IdRegistroPersonal"
+            INNER JOIN public."Cliente" c
+                ON c."IdCliente" = rq."IdCliente"
+            INNER JOIN public."Usuario" u
+                ON u."IdUsuario" = rq."IdUsuarioLider"
+            LEFT JOIN public."PerfilRQ" prq
+                ON prq."IdPerfilRQ" = rq."IdPerfilRQ"
+            LEFT JOIN LATERAL (
+                SELECT
+                    x."IdCargo"
+                FROM public."AsignacionCargoCliente" x
+                WHERE x."IdRegistroPersonal" = rq."IdRegistroPersonal"
+                  AND x."IdCargo" IS NOT NULL
+                ORDER BY
+                    x."FechaActualizacion" DESC NULLS LAST,
+                    x."FechaCreacion" DESC NULLS LAST,
+                    x."IdAsignacionCargoCliente" DESC
+                LIMIT 1
+            ) acc ON true
+            LEFT JOIN public."Cargo" ca
+                ON ca."IdCargo" = acc."IdCargo"
+            WHERE rq."IdRetiroLaboral" = :id_retiro_laboral
+              AND COALESCE(rq."Activo", true) = true
+            ORDER BY rq."IdRQOperaciones" DESC
+            LIMIT 1;
+        """),
+        {"id_retiro_laboral": id_retiro_laboral},
+    ).mappings().first()
+
+    if not row:
+        return {
+            "success": True,
+            "data": None,
+        }
+
+    adjuntos = db.execute(
+        text("""
+            SELECT
+                "IdRQOperacionesAdjunto",
+                "TipoDocumento",
+                "NombreArchivoOriginal",
+                "ExtensionArchivo",
+                "MimeType",
+                "PesoArchivo",
+                "FechaCreacion"
+            FROM public."RQOperacionesAdjunto"
+            WHERE "IdRQOperaciones" = :id_rq_operaciones
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false
+            ORDER BY "IdRQOperacionesAdjunto" ASC;
+        """),
+        {"id_rq_operaciones": row["IdRQOperaciones"]},
+    ).mappings().all()
+
+    data = _serializar_rq(row)
+    data["Adjuntos"] = [
+        {
+            "IdRQOperacionesAdjunto": int(
+                adjunto["IdRQOperacionesAdjunto"]
+            ),
+            "TipoDocumento": adjunto["TipoDocumento"],
+            "NombreArchivoOriginal": adjunto["NombreArchivoOriginal"],
+            "ExtensionArchivo": adjunto["ExtensionArchivo"],
+            "MimeType": adjunto["MimeType"],
+            "PesoArchivo": adjunto["PesoArchivo"],
+            "FechaCreacion": adjunto["FechaCreacion"],
+        }
+        for adjunto in adjuntos
+    ]
+
+    return {
+        "success": True,
+        "data": data,
+    }
+
+
+@router.post("/rq/guardar")
+async def guardar_rq_operaciones(
+    IdRetiroLaboral: int = Form(...),
+    IdPazYSalvo: int = Form(...),
+    TipoNotificacion: str = Form(...),
+    FechaRetiro: date | None = Form(None),
+    FechaUltimoDiaLaborado: date | None = Form(None),
+    Observacion: str | None = Form(None),
+    RequiereReemplazo: bool = Form(False),
+    IdPerfilRQ: int | None = Form(None),
+    Ciudad: str | None = Form(None),
+    Turno: str | None = Form(None),
+    MotivoVacante: str | None = Form(None),
+    ObservacionCliente: str | None = Form(None),
+    cartaRetiroArchivo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    ruta_adjunto_creada: Path | None = None
+
+    try:
+        identidad = _obtener_usuario_actual_rq(current)
+        usuario_auditoria = _normalizar_usuario(identidad["Usuario"])
+
+        contexto = _obtener_contexto_retiro_rq(
+            db=db,
+            id_retiro_laboral=IdRetiroLaboral,
+            id_paz_y_salvo=IdPazYSalvo,
+        )
+
+        estado_caso_rrll = str(
+            contexto["EstadoCasoRRLL"] or ""
+        ).strip().upper()
+
+        if estado_caso_rrll != "PENDIENTE_OPERACIONES":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El retiro ya no se encuentra pendiente en Operaciones "
+                    "y el RQ no puede ser modificado desde este módulo."
+                ),
+            )
+
+        datos = _validar_datos_rq(
+            tipo_notificacion=TipoNotificacion,
+            fecha_retiro=FechaRetiro,
+            fecha_ultimo_dia_laborado=FechaUltimoDiaLaborado,
+            requiere_reemplazo=RequiereReemplazo,
+            id_perfil_rq=IdPerfilRQ,
+            ciudad=Ciudad,
+            turno=Turno,
+            motivo_vacante=MotivoVacante,
+            observacion_cliente=ObservacionCliente,
+        )
+
+        perfil = None
+        if datos["IdPerfilRQ"] is not None:
+            perfil = _validar_perfil_rq(
+                db,
+                int(datos["IdPerfilRQ"]),
+            )
+
+        estado_paz_salvo = str(
+            contexto["EstadoPazYSalvo"] or ""
+        ).strip().upper()
+
+        estado_rq = (
+            "LISTO_PARA_ENVIO"
+            if estado_paz_salvo == "CERRADO"
+            else "PENDIENTE_OPERACIONES"
+        )
+
+        rq_existente = db.execute(
+            text("""
+                SELECT
+                    "IdRQOperaciones",
+                    "EnviadoRRLL"
+                FROM public."RQOperaciones"
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE("Activo", true) = true
+                ORDER BY "IdRQOperaciones" DESC
+                LIMIT 1;
+            """),
+            {"id_retiro_laboral": IdRetiroLaboral},
+        ).mappings().first()
+
+        if rq_existente and bool(rq_existente["EnviadoRRLL"]):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El RQ ya fue enviado a Relaciones Laborales y no puede "
+                    "ser modificado desde Operaciones."
+                ),
+            )
+
+        observacion = _normalizar_texto_opcional(Observacion)
+
+        parametros_rq = {
+            "id_paz_y_salvo": IdPazYSalvo,
+            "id_registro_personal": contexto["IdRegistroPersonal"],
+            "id_cliente": contexto["IdCliente"],
+            "id_usuario_lider": identidad["IdUsuario"],
+            "id_perfil_rq": datos["IdPerfilRQ"],
+            "tipo_notificacion": datos["TipoNotificacion"],
+            "fecha_retiro": datos["FechaRetiro"],
+            "fecha_ultimo_dia_laborado": datos["FechaUltimoDiaLaborado"],
+            "observacion": observacion,
+            "requiere_reemplazo": datos["RequiereReemplazo"],
+            "ciudad": datos["Ciudad"],
+            "turno": datos["Turno"],
+            "motivo_vacante": datos["MotivoVacante"],
+            "observacion_cliente": datos["ObservacionCliente"],
+            "estado_rq": estado_rq,
+            "tipo_rq": (
+                "REEMPLAZO"
+                if datos["RequiereReemplazo"]
+                else None
+            ),
+            "id_cargo": (
+                int(contexto["IdCargo"])
+                if datos["RequiereReemplazo"]
+                and contexto["IdCargo"] is not None
+                else None
+            ),
+            "cantidad_solicitada": 1,
+        }
+
+        if rq_existente:
+            id_rq_operaciones = int(
+                rq_existente["IdRQOperaciones"]
+            )
+
+            db.execute(
+                text("""
+                    UPDATE public."RQOperaciones"
+                    SET
+                        "IdPazYSalvo" = :id_paz_y_salvo,
+                        "IdRegistroPersonal" = :id_registro_personal,
+                        "IdCliente" = :id_cliente,
+                        "IdUsuarioLider" = :id_usuario_lider,
+                        "IdPerfilRQ" = :id_perfil_rq,
+                        "TipoNotificacion" = :tipo_notificacion,
+                        "FechaRetiro" = :fecha_retiro,
+                        "FechaUltimoDiaLaborado" = :fecha_ultimo_dia_laborado,
+                        "Observacion" = :observacion,
+                        "RequiereReemplazo" = :requiere_reemplazo,
+                        "Ciudad" = :ciudad,
+                        "Turno" = :turno,
+                        "MotivoVacante" = :motivo_vacante,
+                        "ObservacionCliente" = :observacion_cliente,
+                        "EstadoRQ" = :estado_rq,
+                        "TipoRQ" = :tipo_rq,
+                        "IdCargo" = :id_cargo,
+                        "CantidadSolicitada" = :cantidad_solicitada,
+                        "UsuarioActualizacion" = :usuario_actualizacion,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP
+                    WHERE "IdRQOperaciones" = :id_rq_operaciones;
+                """),
+                {
+                    **parametros_rq,
+                    "usuario_actualizacion": usuario_auditoria,
+                    "id_rq_operaciones": id_rq_operaciones,
+                },
+            )
+        else:
+            id_rq_operaciones = db.execute(
+                text("""
+                    INSERT INTO public."RQOperaciones" (
+                        "IdRetiroLaboral",
+                        "IdPazYSalvo",
+                        "IdRegistroPersonal",
+                        "IdCliente",
+                        "IdUsuarioLider",
+                        "IdPerfilRQ",
+                        "TipoNotificacion",
+                        "FechaRetiro",
+                        "FechaUltimoDiaLaborado",
+                        "Observacion",
+                        "RequiereReemplazo",
+                        "Ciudad",
+                        "Turno",
+                        "MotivoVacante",
+                        "ObservacionCliente",
+                        "FechaRegistro",
+                        "EstadoRQ",
+                        "TipoRQ",
+                        "IdCargo",
+                        "CantidadSolicitada",
+                        "EnviadoRRLL",
+                        "Activo",
+                        "UsuarioCreacion",
+                        "FechaCreacion"
+                    )
+                    VALUES (
+                        :id_retiro_laboral,
+                        :id_paz_y_salvo,
+                        :id_registro_personal,
+                        :id_cliente,
+                        :id_usuario_lider,
+                        :id_perfil_rq,
+                        :tipo_notificacion,
+                        :fecha_retiro,
+                        :fecha_ultimo_dia_laborado,
+                        :observacion,
+                        :requiere_reemplazo,
+                        :ciudad,
+                        :turno,
+                        :motivo_vacante,
+                        :observacion_cliente,
+                        CURRENT_DATE,
+                        :estado_rq,
+                        :tipo_rq,
+                        :id_cargo,
+                        :cantidad_solicitada,
+                        false,
+                        true,
+                        :usuario_creacion,
+                        CURRENT_TIMESTAMP
+                    )
+                    RETURNING "IdRQOperaciones";
+                """),
+                {
+                    **parametros_rq,
+                    "id_retiro_laboral": IdRetiroLaboral,
+                    "usuario_creacion": usuario_auditoria,
+                },
+            ).scalar_one()
+
+        carta_obligatoria = (
+            datos["TipoNotificacion"]
+            in TIPOS_NOTIFICACION_RQ_CON_CARTA
+        )
+
+        contenido_carta = None
+        if cartaRetiroArchivo is not None:
+            contenido_carta = await cartaRetiroArchivo.read()
+            _validar_adjunto_rq(
+                cartaRetiroArchivo,
+                contenido_carta,
+            )
+
+        if carta_obligatoria:
+            existe_carta = _existe_carta_retiro_rq(
+                db,
+                id_rq_operaciones,
+            )
+
+            if not existe_carta and contenido_carta is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "La carta de retiro es obligatoria para la "
+                        f"notificación {datos['TipoNotificacion']}."
+                    ),
+                )
+
+        id_adjunto = None
+        if (
+            cartaRetiroArchivo is not None
+            and contenido_carta is not None
+        ):
+            carpeta_rq = (
+                STORAGE_BASE_DIR
+                / str(IdRetiroLaboral)
+                / "rq"
+            )
+
+            id_adjunto, ruta_adjunto_creada = _guardar_adjunto_rq(
+                db=db,
+                id_rq_operaciones=id_rq_operaciones,
+                id_retiro_laboral=IdRetiroLaboral,
+                archivo=cartaRetiroArchivo,
+                contenido=contenido_carta,
+                usuario=usuario_auditoria,
+                carpeta_rq=carpeta_rq,
+            )
+
+        db.commit()
+
+        # Si Operaciones confirma que NO requiere reemplazo y el Paz y Salvo
+        # ya está CERRADO, no existe una vacante para Selección. El retiro
+        # debe continuar directamente hacia Relaciones Laborales.
+        enviado_rrll_automaticamente = False
+
+        if (
+            not datos["RequiereReemplazo"]
+            and estado_paz_salvo == "CERRADO"
+        ):
+            db.execute(
+                text("""
+                    UPDATE public."RQOperaciones"
+                    SET
+                        "EstadoRQ" = 'ENVIADO_RRLL',
+                        "EnviadoRRLL" = true,
+                        "FechaEnvioRRLL" = CURRENT_TIMESTAMP,
+                        "EnviadoSeleccion" = false,
+                        "FechaEnvioSeleccion" = NULL,
+                        "UsuarioActualizacion" = :usuario,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP
+                    WHERE "IdRQOperaciones" = :id_rq_operaciones
+                      AND COALESCE("Activo", true) = true;
+                """),
+                {
+                    "usuario": usuario_auditoria,
+                    "id_rq_operaciones": id_rq_operaciones,
+                },
+            )
+
+            db.execute(
+                text("""
+                    UPDATE public."RetiroLaboral"
+                    SET
+                        "EstadoCasoRRLL" = 'ABIERTO',
+                        "FechaEnvioOperaciones" = COALESCE(
+                            "FechaEnvioOperaciones",
+                            CURRENT_TIMESTAMP
+                        ),
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+                """),
+                {
+                    "usuario": usuario_auditoria,
+                    "id_retiro_laboral": IdRetiroLaboral,
+                },
+            )
+
+            db.execute(
+                text("""
+                    UPDATE public."RegistroPersonal"
+                    SET
+                        "IdEstadoProceso" = :id_estado_proceso,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRegistroPersonal" = :id_registro_personal;
+                """),
+                {
+                    "id_estado_proceso": ID_ESTADO_RETIRO_ABIERTO,
+                    "usuario": usuario_auditoria,
+                    "id_registro_personal": contexto["IdRegistroPersonal"],
+                },
+            )
+
+            db.commit()
+            enviado_rrll_automaticamente = True
+            estado_rq = "ENVIADO_RRLL"
+
+        return {
+            "success": True,
+            "message": (
+                "Se confirmó que el retiro no requiere reemplazo y fue "
+                "enviado correctamente a Relaciones Laborales."
+                if enviado_rrll_automaticamente
+                else "RQ guardado correctamente en Operaciones."
+            ),
+            "data": {
+                "IdRQOperaciones": int(id_rq_operaciones),
+                "IdRetiroLaboral": IdRetiroLaboral,
+                "IdPazYSalvo": IdPazYSalvo,
+                "IdRegistroPersonal": int(
+                    contexto["IdRegistroPersonal"]
+                ),
+                "NumeroIdentificacion": contexto[
+                    "NumeroIdentificacion"
+                ],
+                "NombreCompleto": contexto["NombreCompleto"],
+                "IdCliente": int(contexto["IdCliente"]),
+                "NombreCliente": contexto["NombreCliente"],
+                "IdCargo": (
+                    int(contexto["IdCargo"])
+                    if contexto["IdCargo"] is not None
+                    else None
+                ),
+                "NombreCargo": contexto["NombreCargo"],
+                "IdUsuarioLider": str(identidad["IdUsuario"]),
+                "NombreLider": identidad["NombreCompleto"],
+                "IdPerfilRQ": datos["IdPerfilRQ"],
+                "CodigoPerfil": (
+                    perfil["CodigoPerfil"]
+                    if perfil is not None
+                    else None
+                ),
+                "TipoNotificacion": datos["TipoNotificacion"],
+                "RequiereReemplazo": datos["RequiereReemplazo"],
+                "TipoRQ": parametros_rq["tipo_rq"],
+                "CantidadSolicitada": parametros_rq["cantidad_solicitada"],
+                "EstadoRQ": estado_rq,
+                "EnviadoRRLL": enviado_rrll_automaticamente,
+                "EnviadoSeleccion": False,
+                "EnvioAutomaticoRRLL": enviado_rrll_automaticamente,
+                "IdRQOperacionesAdjunto": id_adjunto,
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+
+        if ruta_adjunto_creada and ruta_adjunto_creada.exists():
+            ruta_adjunto_creada.unlink(missing_ok=True)
+
+        raise
+
+    except Exception as error:
+        db.rollback()
+
+        if ruta_adjunto_creada and ruta_adjunto_creada.exists():
+            ruta_adjunto_creada.unlink(missing_ok=True)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"No fue posible guardar el RQ: {str(error)}",
+        ) from error
+
+    finally:
+        if cartaRetiroArchivo is not None:
+            await cartaRetiroArchivo.close()
+
+
+
+@router.post("/rq/retiro/{id_retiro_laboral}/enviar-rrll")
+def enviar_rq_retiro_a_rrll(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Entrega formalmente a RRLL un retiro que ya fue preparado por Operaciones.
+
+    Reglas:
+    - RetiroLaboral debe seguir en PENDIENTE_OPERACIONES.
+    - Debe existir un RQ activo y no enviado.
+    - El RQ debe estar LISTO_PARA_ENVIO.
+    - El Paz y Salvo asociado debe estar CERRADO.
+    - Solo en este momento se registra FechaEnvioOperaciones.
+    - Solo en este momento RegistroPersonal pasa al estado global 30.
+    """
+    identidad = _obtener_usuario_actual_rq(current)
+    usuario = _normalizar_usuario(identidad["Usuario"])
+
+    try:
+        contexto = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    rl."EstadoCasoRRLL",
+                    rl."Activo",
+                    rq."IdRQOperaciones",
+                    rq."IdPazYSalvo",
+                    rq."EstadoRQ",
+                    rq."EnviadoRRLL",
+                    psd."EstadoPazYSalvo"
+                FROM public."RetiroLaboral" rl
+                INNER JOIN LATERAL (
+                    SELECT rq2.*
+                    FROM public."RQOperaciones" rq2
+                    WHERE rq2."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                      AND COALESCE(rq2."Activo", true) = true
+                    ORDER BY rq2."IdRQOperaciones" DESC
+                    LIMIT 1
+                ) rq ON true
+                LEFT JOIN LATERAL (
+                    SELECT d."EstadoPazYSalvo"
+                    FROM public."PazYSalvoOperacionesDetalle" d
+                    WHERE d."IdPazYSalvo" = rq."IdPazYSalvo"
+                    ORDER BY d."IdPazYSalvoDetalle" DESC
+                    LIMIT 1
+                ) psd ON true
+                WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+                LIMIT 1;
+            """),
+            {"id_retiro_laboral": id_retiro_laboral},
+        ).mappings().first()
+
+        if not contexto:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "No se encontró un retiro con RQ activo para realizar "
+                    "el envío a Relaciones Laborales."
+                ),
+            )
+
+        estado_caso_rrll = str(
+            contexto["EstadoCasoRRLL"] or ""
+        ).strip().upper()
+
+        if estado_caso_rrll != "PENDIENTE_OPERACIONES":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El retiro ya no está pendiente en Operaciones. "
+                    f"Estado actual: {estado_caso_rrll or 'SIN ESTADO'}."
+                ),
+            )
+
+        if not bool(contexto["Activo"]):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El retiro se encuentra inactivo y no puede enviarse a RRLL.",
+            )
+
+        if bool(contexto["EnviadoRRLL"]):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El RQ ya fue enviado a Relaciones Laborales.",
+            )
+
+        estado_rq = str(contexto["EstadoRQ"] or "").strip().upper()
+        if estado_rq != "LISTO_PARA_ENVIO":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El RQ todavía no está listo para envío. "
+                    "Debe guardar el RQ con el Paz y Salvo en estado CERRADO."
+                ),
+            )
+
+        estado_paz_salvo = str(
+            contexto["EstadoPazYSalvo"] or ""
+        ).strip().upper()
+
+        if estado_paz_salvo != "CERRADO":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "El Paz y Salvo debe estar CERRADO antes de enviar "
+                    "el caso a Relaciones Laborales."
+                ),
+            )
+
+        db.execute(
+            text("""
+                UPDATE public."RQOperaciones"
+                SET
+                    "EstadoRQ" = 'ENVIADO_RRLL',
+                    "EnviadoRRLL" = true,
+                    "FechaEnvioRRLL" = CURRENT_TIMESTAMP,
+                    "EnviadoSeleccion" = CASE
+                        WHEN "TipoRQ" = 'REEMPLAZO'
+                             AND COALESCE("RequiereReemplazo", false) = true
+                        THEN true
+                        ELSE "EnviadoSeleccion"
+                    END,
+                    "FechaEnvioSeleccion" = CASE
+                        WHEN "TipoRQ" = 'REEMPLAZO'
+                             AND COALESCE("RequiereReemplazo", false) = true
+                        THEN COALESCE("FechaEnvioSeleccion", CURRENT_TIMESTAMP)
+                        ELSE "FechaEnvioSeleccion"
+                    END,
+                    "UsuarioActualizacion" = :usuario,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP
+                WHERE "IdRQOperaciones" = :id_rq_operaciones
+                  AND COALESCE("Activo", true) = true;
+            """),
+            {
+                "usuario": usuario,
+                "id_rq_operaciones": contexto["IdRQOperaciones"],
+            },
+        )
+
+        db.execute(
+            text("""
+                UPDATE public."RetiroLaboral"
+                SET
+                    "EstadoCasoRRLL" = 'ABIERTO',
+                    "FechaEnvioOperaciones" = COALESCE(
+                        "FechaEnvioOperaciones",
+                        CURRENT_TIMESTAMP
+                    ),
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+                WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+            """),
+            {
+                "usuario": usuario,
+                "id_retiro_laboral": id_retiro_laboral,
+            },
+        )
+
+        db.execute(
+            text("""
+                UPDATE public."RegistroPersonal"
+                SET
+                    "IdEstadoProceso" = :id_estado_proceso,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+                WHERE "IdRegistroPersonal" = :id_registro_personal;
+            """),
+            {
+                "id_estado_proceso": ID_ESTADO_RETIRO_ABIERTO,
+                "usuario": usuario,
+                "id_registro_personal": contexto["IdRegistroPersonal"],
+            },
+        )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": (
+                "El RQ y el retiro fueron enviados correctamente "
+                "a Relaciones Laborales."
+            ),
+            "data": {
+                "IdRetiroLaboral": int(contexto["IdRetiroLaboral"]),
+                "IdRQOperaciones": int(contexto["IdRQOperaciones"]),
+                "IdPazYSalvo": int(contexto["IdPazYSalvo"]),
+                "IdRegistroPersonal": int(contexto["IdRegistroPersonal"]),
+                "EstadoRQ": "ENVIADO_RRLL",
+                "EnviadoRRLL": True,
+                "EstadoCasoRRLL": "ABIERTO",
+                "IdEstadoProceso": ID_ESTADO_RETIRO_ABIERTO,
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No fue posible enviar el retiro a Relaciones Laborales: "
+                f"{str(error)}"
+            ),
+        ) from error
+
+
+@router.get("/rq/adjuntos/{id_adjunto}/descargar")
+def descargar_adjunto_rq(
+    id_adjunto: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    row = db.execute(
+        text("""
+            SELECT
+                "NombreArchivoOriginal",
+                "RutaArchivo",
+                "MimeType"
+            FROM public."RQOperacionesAdjunto"
+            WHERE "IdRQOperacionesAdjunto" = :id_adjunto
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false
+            LIMIT 1;
+        """),
+        {"id_adjunto": id_adjunto},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No se encontró el adjunto RQ solicitado.",
+        )
+
+    ruta_archivo = Path(str(row["RutaArchivo"] or ""))
+
+    if not ruta_archivo.exists() or not ruta_archivo.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="El archivo físico del adjunto RQ no está disponible.",
+        )
+
+    return FileResponse(
+        path=str(ruta_archivo),
+        media_type=(
+            str(row["MimeType"] or "").strip()
+            or "application/octet-stream"
+        ),
+        filename=str(
+            row["NombreArchivoOriginal"] or ruta_archivo.name
+        ),
+    )
+
+
+@router.post("/guardar")
 @router.post("/enviar")
-async def enviar_retiro_a_relaciones_laborales(
-    # Datos del retiro que ya utiliza RRLL.
+async def guardar_retiro_operaciones(
+    # Datos base del retiro que posteriormente utilizará RRLL.
     IdRegistroPersonal: int = Form(...),
+    IdCliente: int | None = Form(None),
     IdMotivoRetiro: int = Form(...),
     FechaUltimoDiaLaborado: date = Form(...),
     UsuarioActualizacion: str = Form("operaciones"),
@@ -397,13 +3426,20 @@ async def enviar_retiro_a_relaciones_laborales(
     PendientePagoVacunas: str = Form(...),
 
     UsuariosClavesDispositivos: str | None = Form(None),
-    CorreoSupervisora: str = Form(...),
+    CorreoSupervisora: str | None = Form(None),
     EstadoPazYSalvo: str = Form(...),
 
     # Compatibilidad con el flujo anterior.
     # El flujo actual genera automáticamente el PDF oficial cuando
     # no se recibe un archivo manual.
     archivo: UploadFile | None = File(None),
+
+    # Evidencias de Operaciones asociadas al Paz y Salvo.
+    novedadesNominaArchivo: list[UploadFile] | None = File(None),
+    formatoDescuentoVacunasArchivo: UploadFile | None = File(None),
+    fotoCarnetAccesoArchivo: UploadFile | None = File(None),
+    fotoListadoHerramientasArchivo: UploadFile | None = File(None),
+    fotoPlanillaNominaArchivo: UploadFile | None = File(None),
 
     db: Session = Depends(get_db),
     current=Depends(require_operaciones_retiros),
@@ -422,8 +3458,9 @@ async def enviar_retiro_a_relaciones_laborales(
       lo envía.
     - Actualización del trabajador a estado de retiro abierto.
 
-    Las evidencias adicionales del formulario se integrarán en la fase
-    documental utilizando RetiroLaboralAdjunto.
+    Las evidencias adicionales del formulario se guardan en
+    PazYSalvoOperacionesEvidencia. RRLL podrá consultarlas junto al Paz
+    y Salvo, mientras Nómina conservará únicamente el PDF oficial.
     """
 
     ruta_fisica: Path | None = None
@@ -431,6 +3468,8 @@ async def enviar_retiro_a_relaciones_laborales(
     nombre_original: str | None = None
     ruta_archivo_bd: str | None = None
     id_adjunto: int | None = None
+    rutas_evidencias_creadas: list[Path] = []
+    ids_evidencias: list[int] = []
 
     try:
         usuario = _normalizar_usuario(UsuarioActualizacion)
@@ -536,7 +3575,7 @@ async def enviar_retiro_a_relaciones_laborales(
         usuarios_claves_dispositivos = _normalizar_texto_opcional(
             UsuariosClavesDispositivos
         )
-        correo_supervisora = _validar_correo(CorreoSupervisora)
+        correo_supervisora = _normalizar_texto_opcional(CorreoSupervisora)
         estado_paz_y_salvo = _normalizar_opcion(
             EstadoPazYSalvo,
             "EstadoPazYSalvo",
@@ -546,6 +3585,45 @@ async def enviar_retiro_a_relaciones_laborales(
         if archivo is not None:
             contenido = await archivo.read()
             _validar_archivo_pdf(archivo, contenido)
+
+        evidencias_recibidas: list[tuple[str, UploadFile, bytes]] = []
+
+        if novedadesNominaArchivo:
+            for archivo_evidencia in novedadesNominaArchivo:
+                contenido_evidencia = await archivo_evidencia.read()
+                _validar_evidencia(
+                    archivo_evidencia,
+                    contenido_evidencia,
+                    "NOVEDADES_NOMINA",
+                )
+                evidencias_recibidas.append((
+                    "NOVEDADES_NOMINA",
+                    archivo_evidencia,
+                    contenido_evidencia,
+                ))
+
+        evidencias_simples = [
+            ("FORMATO_DESCUENTO_VACUNAS", formatoDescuentoVacunasArchivo),
+            ("CARNET_ACCESO", fotoCarnetAccesoArchivo),
+            ("LISTADO_HERRAMIENTAS", fotoListadoHerramientasArchivo),
+            ("PLANILLA_NOMINA", fotoPlanillaNominaArchivo),
+        ]
+
+        for tipo_evidencia, archivo_evidencia in evidencias_simples:
+            if archivo_evidencia is None:
+                continue
+
+            contenido_evidencia = await archivo_evidencia.read()
+            _validar_evidencia(
+                archivo_evidencia,
+                contenido_evidencia,
+                tipo_evidencia,
+            )
+            evidencias_recibidas.append((
+                tipo_evidencia,
+                archivo_evidencia,
+                contenido_evidencia,
+            ))
 
         trabajador = _obtener_trabajador_contratado(
             db=db,
@@ -562,19 +3640,31 @@ async def enviar_retiro_a_relaciones_laborales(
             id_registro_personal=IdRegistroPersonal,
         )
 
-        id_cliente = _obtener_cliente_actual(
-            db=db,
-            id_registro_personal=IdRegistroPersonal,
-        )
+        # El front puede enviar el cliente validado/corregido por Operaciones.
+        # Se mantiene compatibilidad con el flujo anterior: si no llega
+        # IdCliente, se utiliza la última asignación registrada del trabajador.
+        id_cliente = IdCliente
+
+        if id_cliente is None:
+            id_cliente = _obtener_cliente_actual(
+                db=db,
+                id_registro_personal=IdRegistroPersonal,
+            )
 
         if id_cliente is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "No fue posible determinar el cliente/sede actual del "
-                    "trabajador. Valida su asignación antes de enviar el retiro."
+                    "No fue posible determinar el cliente actual del trabajador. "
+                    "Valida y selecciona un cliente antes de enviar el retiro."
                 ),
             )
+
+        cliente = _validar_cliente(
+            db=db,
+            id_cliente=int(id_cliente),
+        )
+        id_cliente = int(cliente["IdCliente"])
 
         query_insert_retiro = text("""
             INSERT INTO public."RetiroLaboral" (
@@ -597,9 +3687,9 @@ async def enviar_retiro_a_relaciones_laborales(
                 :id_motivo_retiro,
                 CURRENT_DATE,
                 :fecha_retiro,
-                CURRENT_TIMESTAMP,
+                NULL,
                 :observacion_general,
-                'ABIERTO',
+                'PENDIENTE_OPERACIONES',
                 true,
                 CURRENT_TIMESTAMP,
                 CURRENT_TIMESTAMP,
@@ -862,31 +3952,34 @@ async def enviar_retiro_a_relaciones_laborales(
             },
         ).scalar_one()
 
-        query_update_registro_personal = text("""
-            UPDATE public."RegistroPersonal"
-            SET
-                "IdEstadoProceso" = :id_estado_proceso,
-                "FechaActualizacion" = CURRENT_TIMESTAMP,
-                "UsuarioActualizacion" = :usuario_actualizacion
-            WHERE "IdRegistroPersonal" = :id_registro_personal;
-        """)
+        carpeta_evidencias = carpeta_retiro / "evidencias_operaciones"
+        carpeta_evidencias.mkdir(parents=True, exist_ok=True)
 
-        db.execute(
-            query_update_registro_personal,
-            {
-                "id_estado_proceso": ID_ESTADO_RETIRO_ABIERTO,
-                "usuario_actualizacion": usuario,
-                "id_registro_personal": IdRegistroPersonal,
-            },
-        )
+        for tipo_evidencia, archivo_evidencia, contenido_evidencia in evidencias_recibidas:
+            id_evidencia, ruta_evidencia = _guardar_evidencia_paz_salvo(
+                db=db,
+                id_paz_y_salvo=id_paz_y_salvo,
+                id_retiro_laboral=id_retiro_laboral,
+                tipo_evidencia=tipo_evidencia,
+                archivo=archivo_evidencia,
+                contenido=contenido_evidencia,
+                usuario=usuario,
+                carpeta_evidencias=carpeta_evidencias,
+            )
+            ids_evidencias.append(id_evidencia)
+            rutas_evidencias_creadas.append(ruta_evidencia)
 
+        # Mientras el caso siga en PENDIENTE_OPERACIONES no se cambia
+        # RegistroPersonal.IdEstadoProceso. El estado global 30 se asignará
+        # únicamente cuando Operaciones haga el envío formal a RRLL.
         db.commit()
 
         return {
             "success": True,
             "message": (
-                "El retiro, el detalle y el PDF oficial del paz y salvo "
-                "fueron enviados correctamente a Relaciones Laborales."
+                "El retiro, el detalle y el PDF oficial del Paz y Salvo "
+                "fueron guardados correctamente en Operaciones. "
+                "El caso aún no ha sido enviado a Relaciones Laborales."
             ),
             "data": {
                 "IdRetiroLaboral": id_retiro_laboral,
@@ -897,6 +3990,7 @@ async def enviar_retiro_a_relaciones_laborales(
                 "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
                 "NombreCompleto": trabajador["NombreCompleto"],
                 "IdCliente": id_cliente,
+                "NombreCliente": str(cliente["NombreCliente"] or "").strip(),
                 "IdMotivoRetiro": IdMotivoRetiro,
                 "NombreMotivoRetiro": motivo["Nombre"],
                 "FechaUltimoDiaLaborado": FechaUltimoDiaLaborado,
@@ -904,10 +3998,13 @@ async def enviar_retiro_a_relaciones_laborales(
                     FechaHoraInicioDiligenciamiento
                 ),
                 "EstadoPazYSalvo": estado_paz_y_salvo,
-                "EstadoCasoRRLL": "ABIERTO",
-                "IdEstadoProceso": ID_ESTADO_RETIRO_ABIERTO,
+                "EstadoCasoRRLL": "PENDIENTE_OPERACIONES",
+                "IdEstadoProceso": int(trabajador["IdEstadoProceso"]),
+                "PendienteEnvioRRLL": True,
                 "NombreArchivoOriginal": nombre_original,
                 "RutaArchivo": ruta_archivo_bd,
+                "CantidadEvidenciasOperaciones": len(ids_evidencias),
+                "IdsEvidenciasOperaciones": ids_evidencias,
             },
         }
 
@@ -917,6 +4014,10 @@ async def enviar_retiro_a_relaciones_laborales(
         if ruta_fisica and ruta_fisica.exists():
             ruta_fisica.unlink(missing_ok=True)
 
+        for ruta_evidencia in rutas_evidencias_creadas:
+            if ruta_evidencia.exists():
+                ruta_evidencia.unlink(missing_ok=True)
+
         raise
 
     except Exception as error:
@@ -925,10 +4026,14 @@ async def enviar_retiro_a_relaciones_laborales(
         if ruta_fisica and ruta_fisica.exists():
             ruta_fisica.unlink(missing_ok=True)
 
+        for ruta_evidencia in rutas_evidencias_creadas:
+            if ruta_evidencia.exists():
+                ruta_evidencia.unlink(missing_ok=True)
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
-                "No fue posible enviar el retiro a Relaciones Laborales: "
+                "No fue posible guardar el retiro en Operaciones: "
                 f"{str(error)}"
             ),
         ) from error
@@ -936,3 +4041,20 @@ async def enviar_retiro_a_relaciones_laborales(
     finally:
         if archivo is not None:
             await archivo.close()
+
+        archivos_evidencia_cierre: list[UploadFile] = []
+
+        if novedadesNominaArchivo:
+            archivos_evidencia_cierre.extend(novedadesNominaArchivo)
+
+        for archivo_evidencia in (
+            formatoDescuentoVacunasArchivo,
+            fotoCarnetAccesoArchivo,
+            fotoListadoHerramientasArchivo,
+            fotoPlanillaNominaArchivo,
+        ):
+            if archivo_evidencia is not None:
+                archivos_evidencia_cierre.append(archivo_evidencia)
+
+        for archivo_evidencia in archivos_evidencia_cierre:
+            await archivo_evidencia.close()

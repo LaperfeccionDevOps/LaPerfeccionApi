@@ -731,6 +731,125 @@ def dashboard_indicadores_rrll(
             detail=f"Error consultando indicadores RRLL: {str(e)}"
         )
 
+@router.get("/bandeja-rrll")
+def listar_bandeja_retiros_rrll(db: Session = Depends(get_db)):
+    """
+    Bandeja de retiros para Relaciones Laborales.
+
+    - ABIERTOS_OPERACIONES: proceso iniciado por Operaciones y aún pendiente allí.
+    - CERRADOS_OPERACIONES: Operaciones ya cerró/envió el caso a RRLL y puede gestionarse.
+
+    Endpoint de solo consulta: no inserta, no actualiza y no elimina información.
+    """
+    try:
+        query = text("""
+            SELECT
+                rl."IdRetiroLaboral",
+                rl."IdRegistroPersonal",
+                rl."IdCliente",
+                rp."NumeroIdentificacion",
+                rp."Nombres",
+                rp."Apellidos",
+                CONCAT_WS(
+                    ' ',
+                    NULLIF(TRIM(COALESCE(rp."Nombres", '')), ''),
+                    NULLIF(TRIM(COALESCE(rp."Apellidos", '')), '')
+                ) AS "NombreCompleto",
+                c."Nombre" AS "NombreCliente",
+                mr."Nombre" AS "NombreMotivoRetiro",
+                rl."FechaProceso",
+                rl."FechaRetiro",
+                rl."FechaEnvioOperaciones",
+                rl."EstadoCasoRRLL",
+                ps."IdPazYSalvo",
+                psd."EstadoPazYSalvo",
+                CASE
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) =
+                         'PENDIENTE_OPERACIONES'
+                        THEN 'ABIERTOS_OPERACIONES'
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN
+                         ('ABIERTO', 'DEVUELTO_NOMINA')
+                         AND rl."FechaEnvioOperaciones" IS NOT NULL
+                        THEN 'CERRADOS_OPERACIONES'
+                    ELSE NULL
+                END AS "GrupoBandeja"
+            FROM public."RetiroLaboral" rl
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            LEFT JOIN public."Cliente" c
+                ON c."IdCliente" = rl."IdCliente"
+            LEFT JOIN public."MotivoRetiro" mr
+                ON mr."IdMotivoRetiro" = rl."IdMotivoRetiro"
+            LEFT JOIN LATERAL (
+                SELECT
+                    p."IdPazYSalvo"
+                FROM public."PazYSalvoOperaciones" p
+                WHERE p."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                ORDER BY p."IdPazYSalvo" DESC
+                LIMIT 1
+            ) ps ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    d."EstadoPazYSalvo"
+                FROM public."PazYSalvoOperacionesDetalle" d
+                WHERE d."IdPazYSalvo" = ps."IdPazYSalvo"
+                ORDER BY d."IdPazYSalvoDetalle" DESC
+                LIMIT 1
+            ) psd ON true
+            WHERE (
+                (
+                    UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) =
+                        'PENDIENTE_OPERACIONES'
+                    AND COALESCE(rl."Activo", true) = true
+                    AND rl."FechaEnvioOperaciones" IS NULL
+                )
+                OR (
+                    UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) IN
+                        ('ABIERTO', 'DEVUELTO_NOMINA')
+                    AND rl."FechaEnvioOperaciones" IS NOT NULL
+                )
+            )
+            ORDER BY
+                CASE
+                    WHEN UPPER(TRIM(COALESCE(rl."EstadoCasoRRLL", ''))) =
+                         'PENDIENTE_OPERACIONES' THEN 0
+                    ELSE 1
+                END,
+                COALESCE(
+                    rl."FechaEnvioOperaciones",
+                    rl."FechaProceso",
+                    rl."FechaCreacion"
+                ) DESC NULLS LAST,
+                rl."IdRetiroLaboral" DESC;
+        """)
+
+        rows = [dict(row) for row in db.execute(query).mappings().all()]
+
+        abiertos_operaciones = [
+            row for row in rows
+            if row.get("GrupoBandeja") == "ABIERTOS_OPERACIONES"
+        ]
+        cerrados_operaciones = [
+            row for row in rows
+            if row.get("GrupoBandeja") == "CERRADOS_OPERACIONES"
+        ]
+
+        return {
+            "success": True,
+            "message": "Bandeja de retiros RRLL consultada correctamente.",
+            "data": {
+                "abiertos_operaciones": abiertos_operaciones,
+                "cerrados_operaciones": cerrados_operaciones,
+            },
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar la bandeja de retiros RRLL: {str(e)}",
+        )
+
+
 @router.get("/devueltos-nomina")
 def listar_retiros_devueltos_nomina(db: Session = Depends(get_db)):
     """
@@ -840,6 +959,172 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar retiro laboral: {str(e)}")
 
+
+
+@router.get("/{id_retiro_laboral}/evidencias-operaciones")
+def listar_evidencias_operaciones_retiro(
+    id_retiro_laboral: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna las evidencias cargadas por Operaciones para el Paz y Salvo
+    asociado al retiro laboral.
+
+    Estas evidencias son visibles para RRLL y permanecen separadas del
+    documento oficial de Paz y Salvo registrado en RetiroLaboralAdjunto.
+    """
+    try:
+        retiro = db.execute(
+            text("""
+                SELECT
+                    rl."IdRetiroLaboral",
+                    rl."IdRegistroPersonal",
+                    pso."IdPazYSalvo"
+                FROM public."RetiroLaboral" rl
+                LEFT JOIN LATERAL (
+                    SELECT p."IdPazYSalvo"
+                    FROM public."PazYSalvoOperaciones" p
+                    WHERE p."IdRetiroLaboral" = rl."IdRetiroLaboral"
+                    ORDER BY p."IdPazYSalvo" DESC
+                    LIMIT 1
+                ) pso ON true
+                WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
+            """),
+            {"id_retiro_laboral": id_retiro_laboral}
+        ).mappings().first()
+
+        if not retiro:
+            raise HTTPException(
+                status_code=404,
+                detail="Retiro laboral no encontrado."
+            )
+
+        rows = db.execute(
+            text("""
+                SELECT
+                    e."IdPazYSalvoEvidencia",
+                    e."IdPazYSalvo",
+                    e."IdRetiroLaboral",
+                    e."TipoEvidencia",
+                    e."NombreArchivo",
+                    e."NombreArchivoOriginal",
+                    e."RutaArchivo",
+                    e."ExtensionArchivo",
+                    e."MimeType",
+                    e."PesoArchivo",
+                    e."Observacion",
+                    e."Activo",
+                    e."Eliminado",
+                    e."FechaCreacion",
+                    e."FechaActualizacion",
+                    e."CreadoPor",
+                    e."UsuarioActualizacion"
+                FROM public."PazYSalvoOperacionesEvidencia" e
+                WHERE e."IdRetiroLaboral" = :id_retiro_laboral
+                  AND (
+                        :id_paz_y_salvo IS NULL
+                        OR e."IdPazYSalvo" = :id_paz_y_salvo
+                      )
+                  AND COALESCE(e."Activo", true) = true
+                  AND COALESCE(e."Eliminado", false) = false
+                ORDER BY
+                    e."FechaCreacion" ASC,
+                    e."IdPazYSalvoEvidencia" ASC;
+            """),
+            {
+                "id_retiro_laboral": id_retiro_laboral,
+                "id_paz_y_salvo": retiro["IdPazYSalvo"],
+            }
+        ).mappings().all()
+
+        return {
+            "success": True,
+            "message": "Evidencias de Operaciones consultadas correctamente.",
+            "data": [dict(row) for row in rows],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al consultar evidencias de Operaciones: {str(e)}"
+        )
+
+
+@router.get(
+    "/{id_retiro_laboral}/evidencias-operaciones/{id_evidencia}/descargar"
+)
+def descargar_evidencia_operaciones_retiro(
+    id_retiro_laboral: int,
+    id_evidencia: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Descarga una evidencia de Operaciones asociada al retiro laboral.
+
+    El filtro por IdRetiroLaboral + IdPazYSalvoEvidencia evita que una
+    evidencia de otro retiro pueda consultarse desde este endpoint.
+    """
+    try:
+        row = db.execute(
+            text("""
+                SELECT
+                    e."IdPazYSalvoEvidencia",
+                    e."IdRetiroLaboral",
+                    e."NombreArchivo",
+                    e."NombreArchivoOriginal",
+                    e."RutaArchivo",
+                    e."ExtensionArchivo",
+                    e."MimeType"
+                FROM public."PazYSalvoOperacionesEvidencia" e
+                WHERE e."IdPazYSalvoEvidencia" = :id_evidencia
+                  AND e."IdRetiroLaboral" = :id_retiro_laboral
+                  AND COALESCE(e."Activo", true) = true
+                  AND COALESCE(e."Eliminado", false) = false
+                LIMIT 1;
+            """),
+            {
+                "id_evidencia": id_evidencia,
+                "id_retiro_laboral": id_retiro_laboral,
+            }
+        ).mappings().first()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Evidencia de Operaciones no encontrada."
+            )
+
+        ruta_archivo = Path(row["RutaArchivo"])
+
+        if not ruta_archivo.exists() or not ruta_archivo.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="El archivo de evidencia no existe en el servidor."
+            )
+
+        nombre_descarga = (
+            row["NombreArchivoOriginal"]
+            or row["NombreArchivo"]
+            or f"evidencia_operaciones_{id_evidencia}"
+        )
+
+        media_type = row["MimeType"] or "application/octet-stream"
+
+        return FileResponse(
+            path=str(ruta_archivo),
+            media_type=media_type,
+            filename=nombre_descarga,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al descargar evidencia de Operaciones: {str(e)}"
+        )
 
 @router.put("/{id_retiro_laboral}/estado")
 def actualizar_estado_retiro_laboral(
