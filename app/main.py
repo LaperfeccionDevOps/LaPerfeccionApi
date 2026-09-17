@@ -28,6 +28,9 @@ from api.routers.asistente_descargo_proceso_disciplinario_router import (
 )
 from api.routers.aspirante_routers import router as aspirante_router
 from api.routers.auth import router as auth_router
+from api.routers.trabajador_incapacidades_routers import (
+    router as trabajador_incapacidades_router,
+)
 from api.routers.autorizacion_agenda_disciplinaria_router import (
     router as autorizacion_agenda_disciplinaria_router,
 )
@@ -96,6 +99,9 @@ from api.routers.indicadores_proceso_disciplinario_router import (
 from api.routers.motivo_cierre_routers import router as motivo_cierre_router
 from api.routers.nomina_actualizacion_datos_routers import (
     router as nomina_actualizacion_datos_router,
+)
+from api.routers.nomina_incapacidades_routers import (
+    router as nomina_incapacidades_router,
 )
 from api.routers.nomina_retiros_routers import router as nomina_retiros_router
 from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
@@ -179,6 +185,10 @@ app.add_middleware(
 # Routers
 # ─────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(
+    trabajador_incapacidades_router,
+    prefix="/api",
+)
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
 app.include_router(consultar_combos_router, prefix="/api", tags=["combos"])
 app.include_router(cita_router, prefix="/api", tags=["citas"])
@@ -248,6 +258,7 @@ app.include_router(autorizacion_agenda_disciplinaria_router)
 app.include_router(solicitud_autorizacion_agenda_disciplinaria_router)
 app.include_router(asistente_descargo_proceso_disciplinario_router)
 app.include_router(nomina_retiros_router)
+app.include_router(nomina_incapacidades_router)
 app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(nomina_actualizacion_datos_router)
 app.include_router(panel_gerencial_rrll_router)
