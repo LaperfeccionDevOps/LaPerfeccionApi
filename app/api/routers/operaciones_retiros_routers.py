@@ -70,7 +70,6 @@ TIPOS_NOTIFICACION_RQ_CON_ULTIMO_DIA = {
 }
 
 TURNOS_RQ = {"ROTATIVO", "DIURNO"}
-MOTIVOS_VACANTE_RQ = {"RENUNCIA", "ABANDONO", "NUNCA INGRESO"}
 TIPO_DOCUMENTO_RQ_CARTA_RETIRO = "CARTA_RETIRO"
 
 
@@ -616,12 +615,6 @@ def _validar_datos_rq(
             TURNOS_RQ,
         )
 
-        motivo_vacante_normalizado = _normalizar_opcion(
-            motivo_vacante_normalizado,
-            "MotivoVacante",
-            MOTIVOS_VACANTE_RQ,
-        )
-
         observacion_cliente_normalizada = _normalizar_texto_requerido(
             observacion_cliente_normalizada,
             "ObservacionCliente",
@@ -1014,6 +1007,36 @@ def _obtener_cargo_actual(
     return {
         "IdCargo": int(row["IdCargo"]),
         "NombreCargo": str(row["NombreCargo"] or "").strip(),
+    }
+
+
+def _obtener_ciudad_trabajador(
+    db: Session,
+    id_registro_personal: int,
+):
+    """Obtiene la ciudad registrada en DatosAdicionales para el trabajador."""
+    row = db.execute(
+        text("""
+            SELECT
+                da."IdCiudad",
+                c."Nombre" AS "NombreCiudad"
+            FROM public."DatosAdicionales" da
+            INNER JOIN public."Ciudad" c
+                ON c."IdCiudad" = da."IdCiudad"
+            WHERE da."IdRegistroPersonal" = :id_registro_personal
+              AND COALESCE(c."Estado", true) = true
+            ORDER BY da."IdDatosAdicionales" DESC
+            LIMIT 1;
+        """),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().first()
+
+    if not row:
+        return None
+
+    return {
+        "IdCiudad": int(row["IdCiudad"]),
+        "NombreCiudad": str(row["NombreCiudad"] or "").strip(),
     }
 
 
@@ -1986,7 +2009,14 @@ async def actualizar_paz_salvo_proceso_pendiente(
             aplica_descuento,
             ValorDescuento,
         )
-        novedades_nomina = _normalizar_texto_opcional(NovedadesNomina)
+        novedades_nomina = (
+            _normalizar_texto_requerido(
+                NovedadesNomina,
+                "NovedadesNomina",
+            )
+            if aplica_descuento == "SI"
+            else _normalizar_texto_opcional(NovedadesNomina)
+        )
 
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
@@ -2571,6 +2601,29 @@ async def actualizar_paz_salvo_proceso_pendiente(
                 pass
 
 
+@router.get("/rq/ciudad/trabajador/{id_registro_personal}")
+def obtener_ciudad_rq_trabajador(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    ciudad = _obtener_ciudad_trabajador(
+        db=db,
+        id_registro_personal=id_registro_personal,
+    )
+
+    if ciudad is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "El trabajador no tiene una ciudad registrada en "
+                "DatosAdicionales."
+            ),
+        )
+
+    return {"success": True, "data": ciudad}
+
+
 @router.get("/rq/perfiles")
 def listar_perfiles_rq(
     db: Session = Depends(get_db),
@@ -2752,13 +2805,24 @@ async def guardar_rq_operaciones(
                 ),
             )
 
+        ciudad_trabajador = _obtener_ciudad_trabajador(
+            db=db,
+            id_registro_personal=int(contexto["IdRegistroPersonal"]),
+        )
+
+        ciudad_rq = (
+            ciudad_trabajador["NombreCiudad"]
+            if ciudad_trabajador is not None
+            else None
+        )
+
         datos = _validar_datos_rq(
             tipo_notificacion=TipoNotificacion,
             fecha_retiro=FechaRetiro,
             fecha_ultimo_dia_laborado=FechaUltimoDiaLaborado,
             requiere_reemplazo=RequiereReemplazo,
             id_perfil_rq=IdPerfilRQ,
-            ciudad=Ciudad,
+            ciudad=ciudad_rq,
             turno=Turno,
             motivo_vacante=MotivoVacante,
             observacion_cliente=ObservacionCliente,
@@ -2857,7 +2921,10 @@ async def guardar_rq_operaciones(
                         "RequiereReemplazo" = :requiere_reemplazo,
                         "Ciudad" = :ciudad,
                         "Turno" = :turno,
-                        "MotivoVacante" = :motivo_vacante,
+                        "MotivoVacante" = COALESCE(
+                            :motivo_vacante,
+                            "MotivoVacante"
+                        ),
                         "ObservacionCliente" = :observacion_cliente,
                         "EstadoRQ" = :estado_rq,
                         "TipoRQ" = :tipo_rq,
@@ -3534,7 +3601,14 @@ async def guardar_retiro_operaciones(
             aplica_descuento,
             ValorDescuento,
         )
-        novedades_nomina = _normalizar_texto_opcional(NovedadesNomina)
+        novedades_nomina = (
+            _normalizar_texto_requerido(
+                NovedadesNomina,
+                "NovedadesNomina",
+            )
+            if aplica_descuento == "SI"
+            else _normalizar_texto_opcional(NovedadesNomina)
+        )
 
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
