@@ -69,7 +69,21 @@ TIPOS_NOTIFICACION_RQ_CON_ULTIMO_DIA = {
     "TERMINACION DE CONTRATO",
 }
 
-TURNOS_RQ = {"ROTATIVO", "DIURNO"}
+TURNOS_RQ = {
+    "DIURNO",
+    "DIURNO - MAÑANA Y TARDE",
+    "NOCTURNO",
+    "ROTATIVO",
+}
+
+IDS_CIUDADES_RQ_PERSONAL_NUEVO = {
+    10,   # Bogotá D.C.
+    14,   # Cajica
+    29,   # Facatativa
+    33,   # Funza
+    62,   # Mosquera
+    103,  # Tocancipa
+}
 TIPO_DOCUMENTO_RQ_CARTA_RETIRO = "CARTA_RETIRO"
 
 
@@ -2599,6 +2613,563 @@ async def actualizar_paz_salvo_proceso_pendiente(
                 await archivo_abierto.close()
             except Exception:
                 pass
+
+
+# ============================================================
+# RQ PERSONAL NUEVO - CATÁLOGOS Y CREACIÓN
+# ============================================================
+def _validar_cargo_rq_personal_nuevo(db: Session, id_cargo: int):
+    row = db.execute(
+        text("""
+            SELECT
+                c."IdCargo",
+                c."NombreCargo"
+            FROM public."Cargo" c
+            WHERE c."IdCargo" = :id_cargo
+              AND COALESCE(c."Activo", true) = true
+            LIMIT 1;
+        """),
+        {"id_cargo": id_cargo},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El cargo seleccionado no existe o está inactivo.",
+        )
+
+    return row
+
+
+def _validar_ciudad_rq_personal_nuevo(db: Session, id_ciudad: int):
+    row = db.execute(
+        text("""
+            SELECT
+                c."IdCiudad",
+                c."Nombre" AS "NombreCiudad"
+            FROM public."Ciudad" c
+            WHERE c."IdCiudad" = :id_ciudad
+              AND COALESCE(c."Estado", true) = true
+            LIMIT 1;
+        """),
+        {"id_ciudad": id_ciudad},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La ciudad seleccionada no existe o está inactiva.",
+        )
+
+    if int(row["IdCiudad"]) not in IDS_CIUDADES_RQ_PERSONAL_NUEVO:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "La ciudad seleccionada no está habilitada para RQ de personal nuevo. "
+                "Seleccione una ciudad disponible o utilice la opción OTRO."
+            ),
+        )
+
+    return row
+
+
+def _validar_tipo_contrato_rq_personal_nuevo(
+    db: Session,
+    id_tipo_contrato: int,
+):
+    row = db.execute(
+        text("""
+            SELECT
+                tc."IdTipoContrato",
+                tc."Descripcion"
+            FROM public."TipoContrato" tc
+            WHERE tc."IdTipoContrato" = :id_tipo_contrato
+              AND COALESCE(tc."Estado", B'1') = B'1'
+            LIMIT 1;
+        """),
+        {"id_tipo_contrato": id_tipo_contrato},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El tipo de contrato seleccionado no existe o está inactivo.",
+        )
+
+    return row
+
+
+def _validar_motivo_vacante_rq_personal_nuevo(
+    db: Session,
+    id_motivo_vacante_rq: int,
+):
+    # to_jsonb permite leer el texto descriptivo sin acoplar el endpoint a un
+    # nombre alternativo de columna; el identificador sí es el FK oficial.
+    row = db.execute(
+        text("""
+            SELECT
+                mv."IdMotivoVacanteRQ",
+                COALESCE(
+                    to_jsonb(mv) ->> 'Nombre',
+                    to_jsonb(mv) ->> 'Descripcion',
+                    to_jsonb(mv) ->> 'MotivoVacante',
+                    to_jsonb(mv) ->> 'NombreMotivoVacante'
+                ) AS "NombreMotivoVacante",
+                COALESCE(
+                    NULLIF(to_jsonb(mv) ->> 'Activo', '')::boolean,
+                    NULLIF(to_jsonb(mv) ->> 'Estado', '')::boolean,
+                    true
+                ) AS "ActivoCatalogo"
+            FROM public."MotivoVacanteRQ" mv
+            WHERE mv."IdMotivoVacanteRQ" = :id_motivo_vacante_rq
+            LIMIT 1;
+        """),
+        {"id_motivo_vacante_rq": id_motivo_vacante_rq},
+    ).mappings().first()
+
+    if not row or not bool(row["ActivoCatalogo"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El motivo de vacante seleccionado no existe o está inactivo.",
+        )
+
+    return row
+
+
+@router.get("/rq/personal-nuevo/catalogos")
+def obtener_catalogos_rq_personal_nuevo(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Catálogos necesarios para diligenciar un RQ de PERSONAL_NUEVO."""
+    clientes = db.execute(
+        text("""
+            SELECT
+                c."IdCliente",
+                c."Nombre" AS "NombreCliente"
+            FROM public."Cliente" c
+            WHERE TRIM(COALESCE(c."Nombre", '')) <> ''
+              AND COALESCE(c."Activo", true) = true
+            ORDER BY c."Nombre" ASC;
+        """)
+    ).mappings().all()
+
+    cargos = db.execute(
+        text("""
+            SELECT
+                c."IdCargo",
+                c."NombreCargo"
+            FROM public."Cargo" c
+            WHERE COALESCE(c."Activo", true) = true
+              AND TRIM(COALESCE(c."NombreCargo", '')) <> ''
+            ORDER BY c."NombreCargo" ASC;
+        """)
+    ).mappings().all()
+
+    perfiles = db.execute(
+        text("""
+            SELECT
+                p."IdPerfilRQ",
+                p."CodigoPerfil",
+                p."DescripcionPerfil",
+                p."Genero",
+                p."NivelEscolaridad",
+                p."Observaciones"
+            FROM public."PerfilRQ" p
+            WHERE COALESCE(p."Activo", true) = true
+            ORDER BY p."IdPerfilRQ" ASC;
+        """)
+    ).mappings().all()
+
+    ciudades = db.execute(
+        text("""
+            SELECT
+                c."IdCiudad",
+                c."Nombre" AS "NombreCiudad"
+            FROM public."Ciudad" c
+            WHERE COALESCE(c."Estado", true) = true
+              AND TRIM(COALESCE(c."Nombre", '')) <> ''
+              AND c."IdCiudad" IN (10, 14, 29, 33, 62, 103)
+            ORDER BY c."Nombre" ASC;
+        """)
+    ).mappings().all()
+
+    tipos_contrato = db.execute(
+        text("""
+            SELECT
+                tc."IdTipoContrato",
+                tc."Descripcion"
+            FROM public."TipoContrato" tc
+            WHERE COALESCE(tc."Estado", B'1') = B'1'
+            ORDER BY tc."IdTipoContrato" ASC;
+        """)
+    ).mappings().all()
+
+    motivos = db.execute(
+        text("""
+            SELECT
+                mv."IdMotivoVacanteRQ",
+                COALESCE(
+                    to_jsonb(mv) ->> 'Nombre',
+                    to_jsonb(mv) ->> 'Descripcion',
+                    to_jsonb(mv) ->> 'MotivoVacante',
+                    to_jsonb(mv) ->> 'NombreMotivoVacante'
+                ) AS "NombreMotivoVacante",
+                COALESCE(
+                    NULLIF(to_jsonb(mv) ->> 'Activo', '')::boolean,
+                    NULLIF(to_jsonb(mv) ->> 'Estado', '')::boolean,
+                    true
+                ) AS "ActivoCatalogo"
+            FROM public."MotivoVacanteRQ" mv
+            ORDER BY mv."IdMotivoVacanteRQ" ASC;
+        """)
+    ).mappings().all()
+
+    return {
+        "success": True,
+        "data": {
+            "Clientes": [dict(row) for row in clientes],
+            "Cargos": [dict(row) for row in cargos],
+            "Perfiles": [dict(row) for row in perfiles],
+            "Ciudades": [dict(row) for row in ciudades],
+            "TiposContrato": [dict(row) for row in tipos_contrato],
+            "MotivosVacante": [
+                {
+                    "IdMotivoVacanteRQ": int(row["IdMotivoVacanteRQ"]),
+                    "NombreMotivoVacante": row["NombreMotivoVacante"],
+                }
+                for row in motivos
+                if bool(row["ActivoCatalogo"])
+            ],
+            "Turnos": sorted(TURNOS_RQ),
+        },
+    }
+
+
+@router.post("/rq/personal-nuevo")
+def crear_rq_personal_nuevo(
+    IdCliente: int = Form(...),
+    IdCargo: int = Form(...),
+    IdPerfilRQ: int = Form(...),
+    CargoAprobadoPlanta: bool = Form(...),
+    IdCiudad: str | None = Form(None),
+    CiudadOtra: str | None = Form(None),
+    IdTipoContrato: int = Form(...),
+    Turno: str = Form(...),
+    IdMotivoVacanteRQ: int = Form(...),
+    CantidadSolicitada: int = Form(...),
+    ObservacionCliente: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """
+    Crea y envía a Selección una RQ independiente de PERSONAL_NUEVO.
+
+    No crea RetiroLaboral, Paz y Salvo ni RegistroPersonal. El solicitante se
+    toma exclusivamente de la sesión autenticada.
+    """
+    identidad = _obtener_usuario_actual_rq(current)
+    usuario = _normalizar_usuario(identidad["Usuario"])
+
+    try:
+        if CantidadSolicitada <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La cantidad solicitada debe ser mayor que cero.",
+            )
+
+        turno = _normalizar_opcion(Turno, "Turno", TURNOS_RQ)
+        observacion_cliente = _normalizar_texto_opcional(ObservacionCliente)
+
+        cliente = _validar_cliente(db, IdCliente)
+        cargo = _validar_cargo_rq_personal_nuevo(db, IdCargo)
+        perfil = _validar_perfil_rq(db, IdPerfilRQ)
+
+        # IdCiudad llega desde application/x-www-form-urlencoded.
+        # Swagger y el frontend pueden enviar el campo opcional como cadena
+        # vacía (""). Primero se normaliza y solo después se convierte a int.
+        id_ciudad_texto = _normalizar_texto_opcional(IdCiudad)
+        ciudad_otra = _normalizar_texto_opcional(CiudadOtra)
+
+        id_ciudad_normalizado = None
+        if id_ciudad_texto is not None:
+            try:
+                id_ciudad_normalizado = int(id_ciudad_texto)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El identificador de ciudad no es válido.",
+                )
+
+            if id_ciudad_normalizado <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El identificador de ciudad no es válido.",
+                )
+
+        if id_ciudad_normalizado is not None and ciudad_otra is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Seleccione una ciudad del catálogo o escriba otra ciudad, "
+                    "pero no ambas opciones."
+                ),
+            )
+
+        if id_ciudad_normalizado is None and ciudad_otra is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Debe seleccionar una ciudad o especificar otra ciudad.",
+            )
+
+        if id_ciudad_normalizado is not None:
+            ciudad = _validar_ciudad_rq_personal_nuevo(
+                db,
+                id_ciudad_normalizado,
+            )
+            id_ciudad_guardar = int(ciudad["IdCiudad"])
+            nombre_ciudad_guardar = str(ciudad["NombreCiudad"] or "").strip()
+        else:
+            ciudad = None
+            id_ciudad_guardar = None
+            nombre_ciudad_guardar = ciudad_otra
+
+        tipo_contrato = _validar_tipo_contrato_rq_personal_nuevo(
+            db,
+            IdTipoContrato,
+        )
+        motivo = _validar_motivo_vacante_rq_personal_nuevo(
+            db,
+            IdMotivoVacanteRQ,
+        )
+
+        id_rq_operaciones = db.execute(
+            text("""
+                INSERT INTO public."RQOperaciones" (
+                    "IdRetiroLaboral",
+                    "IdPazYSalvo",
+                    "IdRegistroPersonal",
+                    "IdCliente",
+                    "IdUsuarioLider",
+                    "IdPerfilRQ",
+                    "TipoNotificacion",
+                    "FechaRetiro",
+                    "FechaUltimoDiaLaborado",
+                    "Observacion",
+                    "RequiereReemplazo",
+                    "Ciudad",
+                    "Turno",
+                    "MotivoVacante",
+                    "ObservacionCliente",
+                    "FechaRegistro",
+                    "EstadoRQ",
+                    "EnviadoRRLL",
+                    "FechaEnvioRRLL",
+                    "Activo",
+                    "UsuarioCreacion",
+                    "FechaCreacion",
+                    "TipoRQ",
+                    "IdCargo",
+                    "CantidadSolicitada",
+                    "EnviadoSeleccion",
+                    "FechaEnvioSeleccion",
+                    "IdCiudad",
+                    "IdTipoContrato",
+                    "CargoAprobadoPlanta",
+                    "IdMotivoVacanteRQ"
+                )
+                VALUES (
+                    NULL,
+                    NULL,
+                    NULL,
+                    :id_cliente,
+                    :id_usuario_lider,
+                    :id_perfil_rq,
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    false,
+                    :nombre_ciudad,
+                    :turno,
+                    NULL,
+                    :observacion_cliente,
+                    CURRENT_DATE,
+                    'ENVIADO_SELECCION',
+                    false,
+                    NULL,
+                    true,
+                    :usuario_creacion,
+                    CURRENT_TIMESTAMP,
+                    'PERSONAL_NUEVO',
+                    :id_cargo,
+                    :cantidad_solicitada,
+                    true,
+                    CURRENT_TIMESTAMP,
+                    :id_ciudad,
+                    :id_tipo_contrato,
+                    :cargo_aprobado_planta,
+                    :id_motivo_vacante_rq
+                )
+                RETURNING "IdRQOperaciones";
+            """),
+            {
+                "id_cliente": IdCliente,
+                "id_usuario_lider": identidad["IdUsuario"],
+                "id_perfil_rq": IdPerfilRQ,
+                "nombre_ciudad": nombre_ciudad_guardar,
+                "turno": turno,
+                "observacion_cliente": observacion_cliente,
+                "usuario_creacion": usuario,
+                "id_cargo": IdCargo,
+                "cantidad_solicitada": CantidadSolicitada,
+                "id_ciudad": id_ciudad_guardar,
+                "id_tipo_contrato": IdTipoContrato,
+                "cargo_aprobado_planta": CargoAprobadoPlanta,
+                "id_motivo_vacante_rq": IdMotivoVacanteRQ,
+            },
+        ).scalar_one()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "La requisición de personal fue enviada correctamente a Selección.",
+            "data": {
+                "IdRQOperaciones": int(id_rq_operaciones),
+                "TipoRQ": "PERSONAL_NUEVO",
+                "IdCliente": int(IdCliente),
+                "NombreCliente": str(cliente["NombreCliente"] or "").strip(),
+                "IdCargo": int(IdCargo),
+                "NombreCargo": str(cargo["NombreCargo"] or "").strip(),
+                "IdPerfilRQ": int(IdPerfilRQ),
+                "CodigoPerfil": perfil["CodigoPerfil"],
+                "IdCiudad": id_ciudad_guardar,
+                "NombreCiudad": nombre_ciudad_guardar,
+                "IdTipoContrato": int(IdTipoContrato),
+                "TipoContrato": tipo_contrato["Descripcion"],
+                "CargoAprobadoPlanta": bool(CargoAprobadoPlanta),
+                "Turno": turno,
+                "IdMotivoVacanteRQ": int(IdMotivoVacanteRQ),
+                "MotivoVacante": motivo["NombreMotivoVacante"],
+                "CantidadSolicitada": int(CantidadSolicitada),
+                "ObservacionCliente": observacion_cliente,
+                "IdUsuarioLider": str(identidad["IdUsuario"]),
+                "NombreLider": identidad["NombreCompleto"],
+                "EstadoRQ": "ENVIADO_SELECCION",
+                "EnviadoRRLL": False,
+                "EnviadoSeleccion": True,
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "No fue posible crear la requisición de personal nuevo: "
+                f"{str(error)}"
+            ),
+        ) from error
+
+
+@router.get("/rq/personal-nuevo")
+def listar_rq_personal_nuevo_operaciones(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Lista las RQ PERSONAL_NUEVO creadas desde Operaciones."""
+    rows = db.execute(
+        text("""
+            SELECT
+                rq."IdRQOperaciones",
+                rq."IdCliente",
+                c."Nombre" AS "NombreCliente",
+                rq."IdCargo",
+                ca."NombreCargo",
+                rq."IdPerfilRQ",
+                prq."CodigoPerfil",
+                prq."DescripcionPerfil",
+                rq."IdCiudad",
+                COALESCE(
+                    NULLIF(TRIM(ci."Nombre"), ''),
+                    NULLIF(TRIM(rq."Ciudad"), '')
+                ) AS "NombreCiudad",
+                rq."IdTipoContrato",
+                tc."Descripcion" AS "TipoContrato",
+                rq."CargoAprobadoPlanta",
+                rq."Turno",
+                rq."IdMotivoVacanteRQ",
+                COALESCE(
+                    to_jsonb(mv) ->> 'Nombre',
+                    to_jsonb(mv) ->> 'Descripcion',
+                    to_jsonb(mv) ->> 'MotivoVacante',
+                    to_jsonb(mv) ->> 'NombreMotivoVacante'
+                ) AS "NombreMotivoVacante",
+                rq."CantidadSolicitada",
+                rq."ObservacionCliente",
+                rq."EstadoRQ",
+                rq."EnviadoSeleccion",
+                rq."FechaEnvioSeleccion",
+                rq."IdUsuarioLider",
+                u."NombreUsuario" AS "NombreLider",
+                rq."FechaRegistro",
+                rq."FechaCreacion",
+                (
+                    SELECT COUNT(*)
+                    FROM public."RQCandidato" rc
+                    INNER JOIN public."RegistroPersonal" rp
+                        ON rp."IdRegistroPersonal" = rc."IdRegistroPersonal"
+                    WHERE rc."IdRQOperaciones" = rq."IdRQOperaciones"
+                      AND COALESCE(rc."Activo", true) = true
+                      AND rp."IdEstadoProceso" = :id_estado_contratado
+                ) AS "CantidadCubierta"
+            FROM public."RQOperaciones" rq
+            INNER JOIN public."Cliente" c
+                ON c."IdCliente" = rq."IdCliente"
+            LEFT JOIN public."Cargo" ca
+                ON ca."IdCargo" = rq."IdCargo"
+            LEFT JOIN public."PerfilRQ" prq
+                ON prq."IdPerfilRQ" = rq."IdPerfilRQ"
+            LEFT JOIN public."Ciudad" ci
+                ON ci."IdCiudad" = rq."IdCiudad"
+            LEFT JOIN public."TipoContrato" tc
+                ON tc."IdTipoContrato" = rq."IdTipoContrato"
+            LEFT JOIN public."MotivoVacanteRQ" mv
+                ON mv."IdMotivoVacanteRQ" = rq."IdMotivoVacanteRQ"
+            INNER JOIN public."Usuario" u
+                ON u."IdUsuario" = rq."IdUsuarioLider"
+            WHERE rq."TipoRQ" = 'PERSONAL_NUEVO'
+              AND COALESCE(rq."Activo", true) = true
+            ORDER BY rq."IdRQOperaciones" DESC;
+        """),
+        {"id_estado_contratado": ID_ESTADO_CONTRATADO},
+    ).mappings().all()
+
+    data = []
+    for row in rows:
+        solicitada = int(row["CantidadSolicitada"] or 1)
+        cubierta = int(row["CantidadCubierta"] or 0)
+        data.append({
+            **dict(row),
+            "IdRQOperaciones": int(row["IdRQOperaciones"]),
+            "CantidadSolicitada": solicitada,
+            "CantidadCubierta": cubierta,
+            "CantidadPendiente": max(solicitada - cubierta, 0),
+            "EnviadoSeleccion": bool(row["EnviadoSeleccion"]),
+            "CargoAprobadoPlanta": (
+                bool(row["CargoAprobadoPlanta"])
+                if row["CargoAprobadoPlanta"] is not None
+                else None
+            ),
+            "IdUsuarioLider": str(row["IdUsuarioLider"]),
+        })
+
+    return {"success": True, "total": len(data), "data": data}
 
 
 @router.get("/rq/ciudad/trabajador/{id_registro_personal}")
