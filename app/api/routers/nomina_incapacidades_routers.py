@@ -2231,7 +2231,11 @@ def radicar_incapacidad_nomina(
         """
         UPDATE public."IncapacidadTrabajador"
         SET
-            "Estado" = 'RADICADO',
+            "Estado" = CASE
+                WHEN COALESCE("DiasIncapacidad", 0) IN (1, 2)
+                    THEN 'SIN RECOBRO'
+                ELSE 'RADICADO'
+            END,
             "NumeroRadicado" = :numero_radicado,
             "FechaRadicacion" = :fecha_radicacion,
             "FechaActualizacion" = CURRENT_TIMESTAMP
@@ -2297,7 +2301,11 @@ def radicar_incapacidad_nomina(
 
     return {
         "success": True,
-        "message": "Incapacidad radicada correctamente.",
+        "message": (
+            "Incapacidad enviada a SIN RECOBRO correctamente."
+            if str(fila["Estado"] or "").strip().upper() == "SIN RECOBRO"
+            else "Incapacidad radicada correctamente."
+        ),
         "data": {
             "id_incapacidad": fila["IdIncapacidadTrabajador"],
             "estado": fila["Estado"],
