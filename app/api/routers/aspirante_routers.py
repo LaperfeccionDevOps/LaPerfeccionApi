@@ -482,12 +482,13 @@ def actualizar_estado_aspirante(
     """
     Actualiza el estado general del aspirante.
 
-    Cuando el aspirante entra por primera vez al estado 24
-    (Avanza a Contratación), registra el movimiento en
+    Cuando el aspirante entra realmente al estado 24
+    (Avanza a Contratación) o al estado 27
+    (Desiste del Proceso), registra el movimiento en
     HistorialEstadoContratacion dentro de la misma transacción.
 
     No altera los demás cambios de estado ni registra duplicados
-    cuando el registro ya se encuentra en estado 24.
+    cuando el registro ya se encuentra en el mismo estado.
     """
 
     usuario_movimiento = (usuario or "sistema").strip() or "sistema"
@@ -532,10 +533,13 @@ def actualizar_estado_aspirante(
 
         historial_registrado = False
 
-        # Registra únicamente el ingreso real al estado 24.
-        # Si ya estaba en 24 y vuelven a guardar el mismo estado,
+        # Registra únicamente transiciones reales hacia:
+        # 24 = Avanza a Contratación
+        # 27 = Desiste del Proceso
+        #
+        # Si ya se encuentra en el mismo estado y vuelven a guardar,
         # no genera una fila duplicada.
-        if nuevo_estado == 24 and estado_anterior != 24:
+        if nuevo_estado in (24, 27) and estado_anterior != nuevo_estado:
             db.execute(
                 text("""
                     INSERT INTO public."HistorialEstadoContratacion"
