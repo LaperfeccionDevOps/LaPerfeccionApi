@@ -702,7 +702,53 @@ def listar_rq_recibidas_seleccion(
         )
     ).mappings().all()
 
-    data = [_serializar_rq_seleccion(db, row) for row in rows]
+    data = []
+
+    # Mantiene sincronizado el EstadoRQ técnico con la cobertura real también
+    # durante la consulta general. Así, cuando Contratación cambia un candidato
+    # a CONTRATADO (25), la RQ no queda visualmente CERRADA mientras en BD
+    # permanece EN_PROCESO.
+    usuario = _usuario_actual(current)
+    cambios_estado = False
+
+    for row in rows:
+        item = _serializar_rq_seleccion(db, row)
+
+        if item["CoberturaCompleta"]:
+            estado_esperado = "CUBIERTA"
+        elif any(c["ActivoVinculacion"] for c in item["Candidatos"]):
+            estado_esperado = "EN_PROCESO"
+        else:
+            estado_esperado = (
+                "ENVIADO_RRLL"
+                if str(row["TipoRQ"] or "").upper() == "REEMPLAZO"
+                else "ENVIADO_SELECCION"
+            )
+
+        if str(row["EstadoRQ"] or "") != estado_esperado:
+            db.execute(
+                text(
+                    """
+                    UPDATE public."RQOperaciones"
+                    SET "EstadoRQ" = :estado,
+                        "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRQOperaciones" = :id_rq;
+                    """
+                ),
+                {
+                    "estado": estado_esperado,
+                    "usuario": usuario,
+                    "id_rq": int(row["IdRQOperaciones"]),
+                },
+            )
+            cambios_estado = True
+            item["EstadoRQ"] = estado_esperado
+
+        data.append(item)
+
+    if cambios_estado:
+        db.commit()
 
     return {
         "success": True,
