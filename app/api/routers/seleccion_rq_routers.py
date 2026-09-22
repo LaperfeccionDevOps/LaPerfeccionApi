@@ -424,6 +424,7 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 rc."Activo" AS "ActivoVinculacion",
                 rc."FechaVinculacion",
                 rc."UsuarioVinculacion",
+                rc."Salario",
                 rp."NumeroIdentificacion",
                 NULLIF(TRIM(COALESCE(rp."Nombres", '') || ' ' || COALESCE(rp."Apellidos", '')), '') AS "NombreCompleto",
                 rp."IdEstadoProceso",
@@ -524,6 +525,7 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
             "ActivoVinculacion": activo_vinculacion,
             "FechaVinculacion": row["FechaVinculacion"],
             "UsuarioVinculacion": row["UsuarioVinculacion"],
+            "Salario": float(row["Salario"]) if row["Salario"] is not None else None,
             "NumeroIdentificacion": row["NumeroIdentificacion"],
             "NombreCompleto": row["NombreCompleto"],
             "IdEstadoProceso": estado_id,
@@ -778,11 +780,15 @@ def actualizar_tipificacion_rq(
 def vincular_candidato_rq(
     id_rq_operaciones: int,
     id_registro_personal: int = Form(...),
+    salario: float = Form(...),
     db: Session = Depends(get_db),
     current=Depends(require_seleccion_rq),
 ):
     row_rq = _validar_rq(db, id_rq_operaciones)
     cantidad_solicitada = int(row_rq["CantidadSolicitada"] or 1)
+
+    if salario <= 0:
+        raise HTTPException(status_code=400, detail="El salario debe ser mayor a cero.")
 
     persona = db.execute(
         text(
@@ -928,24 +934,56 @@ def vincular_candidato_rq(
                 """
                 UPDATE public."RQCandidato"
                 SET "Activo" = true,
+                    "Salario" = :salario,
                     "FechaActualizacion" = CURRENT_TIMESTAMP,
                     "UsuarioActualizacion" = :usuario
                 WHERE "IdRQCandidato" = :id;
                 """
             ),
-            {"usuario": usuario, "id": int(ya_vinculado["IdRQCandidato"])},
+            {"salario": salario, "usuario": usuario, "id": int(ya_vinculado["IdRQCandidato"])},
         )
     else:
         db.execute(
             text(
                 """
                 INSERT INTO public."RQCandidato"
-                    ("IdRQOperaciones", "IdRegistroPersonal", "Activo", "UsuarioVinculacion")
+                    ("IdRQOperaciones", "IdRegistroPersonal", "Activo", "UsuarioVinculacion", "Salario")
                 VALUES
-                    (:id_rq, :id_persona, true, :usuario);
+                    (:id_rq, :id_persona, true, :usuario, :salario);
                 """
             ),
-            {"id_rq": id_rq_operaciones, "id_persona": id_registro_personal, "usuario": usuario},
+            {"id_rq": id_rq_operaciones, "id_persona": id_registro_personal, "usuario": usuario, "salario": salario},
+        )
+
+    # Guardar el candidato seleccionado lo entrega formalmente a Contratación.
+    # Solo registramos historial cuando existe una transición real hacia estado 24.
+    if estado_actual_candidato != 24:
+        db.execute(
+            text(
+                """
+                UPDATE public."RegistroPersonal"
+                SET "IdEstadoProceso" = 24
+                WHERE "IdRegistroPersonal" = :id_persona;
+                """
+            ),
+            {"id_persona": id_registro_personal},
+        )
+
+        db.execute(
+            text(
+                """
+                INSERT INTO public."HistorialEstadoContratacion"
+                    ("IdRegistroPersonal", "EstadoAnterior", "EstadoNuevo",
+                     "FechaMovimiento", "UsuarioMovimiento")
+                VALUES
+                    (:id_persona, :estado_anterior, 24, CURRENT_TIMESTAMP, :usuario);
+                """
+            ),
+            {
+                "id_persona": id_registro_personal,
+                "estado_anterior": estado_actual_candidato,
+                "usuario": usuario,
+            },
         )
 
     # Al existir gestión real, la RQ pasa a EN_PROCESO salvo que ya esté cubierta.
@@ -969,7 +1007,7 @@ def vincular_candidato_rq(
     row = _validar_rq(db, id_rq_operaciones)
     return {
         "success": True,
-        "message": "Candidato vinculado correctamente a la RQ.",
+        "message": "Candidato guardado en la RQ y enviado a Contratación correctamente.",
         "data": _serializar_rq_seleccion(db, row),
     }
 
