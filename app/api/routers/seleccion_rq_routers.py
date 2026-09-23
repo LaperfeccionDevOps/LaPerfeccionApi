@@ -1290,12 +1290,19 @@ def exportar_excel_rq_seleccion(
     # ------------------------------------------------------------
     # PALETA CORPORATIVA / ESTILOS BASE
     # ------------------------------------------------------------
-    verde_oscuro = "006B4F"
+    verde_oscuro = "005C45"
     verde_principal = "008F68"
-    verde_claro = "E8F5F0"
-    verde_muy_claro = "F4FBF8"
-    azul_suave = "EAF2F8"
-    gris_fondo = "F7FAFC"
+    verde_medio = "21A67A"
+    verde_claro = "DDF4EC"
+    verde_muy_claro = "F3FBF8"
+    azul_oscuro = "1E4E79"
+    azul_claro = "EAF4FF"
+    celeste_claro = "E8F7FA"
+    amarillo_claro = "FFF4CC"
+    naranja_claro = "FFE8CC"
+    rojo_claro = "FDE2E2"
+    morado_claro = "F1E8FF"
+    gris_fondo = "F7F9FC"
     gris_texto = "475569"
     gris_borde = "D7E0E7"
     blanco = "FFFFFF"
@@ -1327,6 +1334,8 @@ def exportar_excel_rq_seleccion(
 
     # ------------------------------------------------------------
     # ENCABEZADOS A:U
+    # Se usan bloques de color por tipo de información para facilitar
+    # la lectura sin alterar ninguna regla funcional del reporte.
     # ------------------------------------------------------------
     headers = [
         "CONSECUTIVO",
@@ -1352,11 +1361,22 @@ def exportar_excel_rq_seleccion(
         "OBSERVACIONES",
     ]
 
+    # A:E solicitud / F:H origen / I:L seguimiento / M:N candidato /
+    # O:R operación y clasificación / S:U resultado.
+    colores_header = [
+        verde_principal, verde_principal, verde_principal, verde_principal, verde_principal,
+        azul_oscuro, azul_oscuro, azul_oscuro,
+        "C07A00", "C07A00", "C07A00", "C07A00",
+        "6B4FA3", "6B4FA3",
+        "287A8A", "287A8A", "287A8A", "287A8A",
+        verde_oscuro, verde_oscuro, verde_oscuro,
+    ]
+
     header_row = 4
     for i, h in enumerate(headers, 1):
         c = ws.cell(header_row, i, h)
         c.font = Font(bold=True, size=10, color=blanco)
-        c.fill = PatternFill("solid", fgColor=verde_principal)
+        c.fill = PatternFill("solid", fgColor=colores_header[i - 1])
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         c.border = border
 
@@ -1390,48 +1410,66 @@ def exportar_excel_rq_seleccion(
                 if col in (1, 3, 7, 9, 10, 11, 12, 14, 17, 19, 20):
                     c.alignment = Alignment(
                         horizontal="center",
-                        vertical="top",
+                        vertical="center",
                         wrap_text=True,
                     )
 
-            # Fondo alternado de filas, sin pisar el KPI.
+            # Bandeado muy suave para conservar legibilidad en reportes largos.
             if r % 2 == 0:
                 for col in range(1, 22):
-                    if col != 19:
-                        ws.cell(r, col).fill = PatternFill("solid", fgColor=gris_fondo)
+                    ws.cell(r, col).fill = PatternFill("solid", fgColor=gris_fondo)
 
-            # Resalta consecutivo.
+            # Consecutivo: referencia visual principal de cada RQ.
+            ws.cell(r, 1).fill = PatternFill("solid", fgColor=verde_claro)
             ws.cell(r, 1).font = Font(bold=True, color=verde_oscuro)
 
-            # Resalta días de gestión.
-            ws.cell(r, 10).font = Font(bold=True, color="334155")
+            # Fechas clave con fondo suave.
+            for col in (9, 12, 16, 20):
+                if ws.cell(r, col).value not in (None, ""):
+                    ws.cell(r, col).fill = PatternFill("solid", fgColor=azul_claro)
+
+            # Días de gestión: amarillo para lectura rápida.
+            if ws.cell(r, 10).value not in (None, ""):
+                ws.cell(r, 10).fill = PatternFill("solid", fgColor=amarillo_claro)
+                ws.cell(r, 10).font = Font(bold=True, color="8A5A00")
+
+            # Tipificación.
+            if ws.cell(r, 18).value not in (None, ""):
+                ws.cell(r, 18).fill = PatternFill("solid", fgColor=morado_claro)
+                ws.cell(r, 18).font = Font(bold=True, color="5B3A87")
 
             # ESTADO (columna K).
             estado = _excel_texto(ws.cell(r, 11).value).upper()
             if estado in ("CONTRATADO", "CERRADO"):
-                ws.cell(r, 11).fill = PatternFill("solid", fgColor="DCFCE7")
-                ws.cell(r, 11).font = Font(bold=True, color="166534")
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor="D7F3E3")
+                ws.cell(r, 11).font = Font(bold=True, color="12633E")
             elif estado in ("DESISTE DEL PROCESO", "RECHAZADO", "CANCELADO"):
-                ws.cell(r, 11).fill = PatternFill("solid", fgColor="FEE2E2")
-                ws.cell(r, 11).font = Font(bold=True, color="991B1B")
-            elif estado in ("ABIERTO", "EN PROCESO", "EN_PROCESO"):
-                ws.cell(r, 11).fill = PatternFill("solid", fgColor=azul_suave)
-                ws.cell(r, 11).font = Font(bold=True, color="1D4ED8")
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor=rojo_claro)
+                ws.cell(r, 11).font = Font(bold=True, color="9B1C1C")
+            elif estado in ("ABIERTO",):
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor=azul_claro)
+                ws.cell(r, 11).font = Font(bold=True, color="1E4E79")
+            elif estado in ("EN PROCESO", "EN_PROCESO", "AVANZA A CONTRATACIÓN", "AVANZA A CONTRATACION"):
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor=naranja_claro)
+                ws.cell(r, 11).font = Font(bold=True, color="9A4D00")
+            elif estado:
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor=celeste_claro)
+                ws.cell(r, 11).font = Font(bold=True, color="246A75")
 
-            # KPI (columna S).
+            # KPI (columna S): semáforo ejecutivo.
             kpi = _excel_texto(ws.cell(r, 19).value).upper()
             if kpi == "CUMPLE":
-                ws.cell(r, 19).fill = PatternFill("solid", fgColor="DCFCE7")
-                ws.cell(r, 19).font = Font(bold=True, color="166534")
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="C6EFCE")
+                ws.cell(r, 19).font = Font(bold=True, color="006100")
             elif kpi == "NO CUMPLE":
-                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FEE2E2")
-                ws.cell(r, 19).font = Font(bold=True, color="991B1B")
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FFC7CE")
+                ws.cell(r, 19).font = Font(bold=True, color="9C0006")
             elif kpi == "CANCELADA":
                 ws.cell(r, 19).fill = PatternFill("solid", fgColor="E5E7EB")
                 ws.cell(r, 19).font = Font(bold=True, color="374151")
             elif kpi == "EN TIEMPO":
-                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FEF3C7")
-                ws.cell(r, 19).font = Font(bold=True, color="92400E")
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FFEB9C")
+                ws.cell(r, 19).font = Font(bold=True, color="9C6500")
 
             r += 1
 
@@ -1446,7 +1484,7 @@ def exportar_excel_rq_seleccion(
             name="TableStyleMedium4",
             showFirstColumn=False,
             showLastColumn=False,
-            showRowStripes=False,   # ya controlamos el bandeado para conservar KPI/Estado
+            showRowStripes=False,
             showColumnStripes=False,
         )
         tabla.tableStyleInfo = estilo_tabla
@@ -1464,6 +1502,7 @@ def exportar_excel_rq_seleccion(
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
 
+    # Filas compactas: aspecto de Excel operativo, sin perder legibilidad.
     for rownum in range(5, last_row + 1):
         ws.row_dimensions[rownum].height = 30
 
