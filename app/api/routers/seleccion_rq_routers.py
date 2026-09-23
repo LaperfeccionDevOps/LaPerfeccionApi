@@ -3,10 +3,16 @@
 from datetime import date, datetime, time, timedelta
 from typing import Optional
 from datetime import timezone
+from io import BytesIO
 
 from fastapi import APIRouter, Depends, Form, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from infrastructure.db.deps import get_db
 from infrastructure.security.role_guard import require_roles_ids
@@ -430,6 +436,7 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 rp."IdEstadoProceso",
                 ep."Nombre" AS "EstadoProceso",
                 cb."FechaIngreso",
+                hent."FechaEntregaContratacion",
                 hc."FechaContratado",
                 hcan."FechaCancelacion",
                 ore."ObservacionesRechazo",
@@ -446,6 +453,14 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 ORDER BY cb1."IdContratacionBasica" DESC
                 LIMIT 1
             ) cb ON true
+            LEFT JOIN LATERAL (
+                SELECT (h."FechaMovimiento" AT TIME ZONE 'America/Bogota')::date AS "FechaEntregaContratacion"
+                FROM public."HistorialEstadoContratacion" h
+                WHERE h."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND h."EstadoNuevo" = 24
+                ORDER BY h."FechaMovimiento" DESC, h."IdHistorialEstadoContratacion" DESC
+                LIMIT 1
+            ) hent ON true
             LEFT JOIN LATERAL (
                 SELECT (h."FechaMovimiento" AT TIME ZONE 'America/Bogota')::date AS "FechaContratado"
                 FROM public."HistorialEstadoContratacion" h
@@ -530,7 +545,11 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
             "NombreCompleto": row["NombreCompleto"],
             "IdEstadoProceso": estado_id,
             "EstadoProceso": row["EstadoProceso"],
-            "FechaIngreso": row["FechaIngreso"],
+            # Columna L: fecha en que Selección avanza el candidato a Contratación (estado 24).
+            "FechaEntregaContratacion": _a_fecha(row["FechaEntregaContratacion"]),
+            # Columna T: fecha de ingreso registrada en ContratacionBasica.
+            "FechaIngreso": _a_fecha(row["FechaIngreso"]),
+            # Se conserva para cobertura/KPI: transición real a CONTRATADO (estado 25).
             "FechaContratado": fecha_contratado,
             "ObservacionContratacion": row["ObservacionesRechazo"],
             "FechaRechazo": row["FechaRechazo"],
@@ -1169,6 +1188,315 @@ def sincronizar_estado_rq(
         "message": "Estado de la RQ sincronizado con su cobertura real.",
         "data": _serializar_rq_seleccion(db, row),
     }
+
+
+# ============================================================
+# EXPORTAR EXCEL CONSOLIDADO RQ - SELECCION
+# ============================================================
+
+def _excel_texto(valor):
+    return "" if valor is None else str(valor).strip()
+
+
+def _excel_fecha(valor):
+    if valor is None:
+        return None
+    if isinstance(valor, datetime) and valor.tzinfo is not None:
+        return valor.astimezone(TZ_COLOMBIA).replace(tzinfo=None)
+    return valor
+
+
+def _filas_excel_rq(item: dict) -> list[list]:
+    candidatos = item.get("Candidatos") or [None]
+    es_reemplazo = str(item.get("TipoRQ") or "").upper() == "REEMPLAZO"
+    perfil = _excel_texto(item.get("CodigoPerfil") or item.get("DescripcionPerfil"))
+    codigo = _excel_texto(item.get("CodigoRQ")) or f'RQ #{item.get("IdRQOperaciones")}'
+    filas = []
+
+    for candidato in candidatos:
+        c = candidato or {}
+        estado = _excel_texto(c.get("EstadoProceso"))
+        if not estado:
+            estado = {
+                "ABIERTO": "Abierto",
+                "EN_PROCESO": "En proceso",
+                "CERRADO": "Cerrado",
+            }.get(
+                _excel_texto(item.get("EstadoBandeja")),
+                _excel_texto(item.get("EstadoBandeja")),
+            )
+
+        filas.append([
+            codigo,                                                     # A
+            _excel_texto(item.get("NombreCargo")),                     # B
+            perfil,                                                     # C
+            _excel_texto(item.get("NombreCliente")),                   # D
+            _excel_texto(item.get("MotivoVacante")),                   # E
+            _excel_texto(item.get("NombreCompleto")) if es_reemplazo else "",  # F
+            _excel_texto(item.get("NumeroIdentificacion")) if es_reemplazo else "",  # G
+            _excel_texto(item.get("NombreLider")),                     # H
+            _excel_fecha(item.get("FechaRecibidoSeleccion")),          # I
+            c.get("DiasGestion") if c.get("DiasGestion") is not None else item.get("DiasGestionRQ"),  # J
+            estado,                                                     # K
+            _excel_fecha(c.get("FechaEntregaContratacion")),           # L: transición a estado 24
+            _excel_texto(c.get("NombreCompleto")),                     # M
+            _excel_texto(c.get("NumeroIdentificacion")),               # N
+            _excel_texto(item.get("ObservacionCliente") or item.get("Observacion")),  # O
+            _excel_fecha(item.get("FechaEnvioSeleccion")),             # P
+            _excel_texto(item.get("Ciudad")),                          # Q
+            _excel_texto(item.get("TipificacionSeleccion")),           # R
+            _excel_texto(c.get("KPI")),                                # S
+            _excel_fecha(c.get("FechaIngreso")),                       # T: ContratacionBasica.FechaIngreso
+            _excel_texto(c.get("ObservacionContratacion")),            # U
+        ])
+
+    return filas
+
+
+@router.get("/exportar/excel")
+def exportar_excel_rq_seleccion(
+    db: Session = Depends(get_db),
+    current=Depends(require_seleccion_rq),
+):
+    """
+    Exporta todas las RQ recibidas por Selección: abiertas, en proceso y cerradas.
+
+    El archivo conserva la estructura operativa A:U utilizada por Selección,
+    incluyendo trazabilidad de candidatos históricos. Los colores del reporte
+    son únicamente de presentación; no modifican la lógica de cobertura/KPI.
+    """
+    rows = db.execute(
+        text(
+            CONSULTA_BASE_RQ_SELECCION
+            + """
+            WHERE COALESCE(rq."Activo", true) = true
+              AND COALESCE(rq."EnviadoSeleccion", false) = true
+              AND rq."FechaEnvioSeleccion" IS NOT NULL
+              AND NULLIF(TRIM(COALESCE(rq."TipoRQ", '')), '') IS NOT NULL
+            ORDER BY rq."FechaEnvioSeleccion" DESC NULLS LAST,
+                     rq."FechaRegistro" DESC,
+                     rq."IdRQOperaciones" DESC;
+            """
+        )
+    ).mappings().all()
+
+    items = [_serializar_rq_seleccion(db, row) for row in rows]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "RQ Selección"
+    ws.sheet_view.showGridLines = False
+
+    # ------------------------------------------------------------
+    # PALETA CORPORATIVA / ESTILOS BASE
+    # ------------------------------------------------------------
+    verde_oscuro = "006B4F"
+    verde_principal = "008F68"
+    verde_claro = "E8F5F0"
+    verde_muy_claro = "F4FBF8"
+    azul_suave = "EAF2F8"
+    gris_fondo = "F7FAFC"
+    gris_texto = "475569"
+    gris_borde = "D7E0E7"
+    blanco = "FFFFFF"
+
+    thin = Side(style="thin", color=gris_borde)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ------------------------------------------------------------
+    # TÍTULO Y SUBTÍTULO
+    # ------------------------------------------------------------
+    ws.merge_cells("A1:U1")
+    titulo = ws["A1"]
+    titulo.value = "LA PERFECCIÓN  |  REPORTE DE REQUISICIONES - SELECCIÓN"
+    titulo.font = Font(bold=True, size=18, color=blanco)
+    titulo.fill = PatternFill("solid", fgColor=verde_oscuro)
+    titulo.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 34
+
+    ws.merge_cells("A2:U2")
+    subtitulo = ws["A2"]
+    subtitulo.value = (
+        "Consolidado de RQ recibidas por Selección · "
+        f"Generado: {datetime.now(TZ_COLOMBIA).strftime('%d/%m/%Y %I:%M %p')}"
+    )
+    subtitulo.font = Font(italic=True, size=10, color=gris_texto)
+    subtitulo.fill = PatternFill("solid", fgColor=verde_claro)
+    subtitulo.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[2].height = 23
+
+    # ------------------------------------------------------------
+    # ENCABEZADOS A:U
+    # ------------------------------------------------------------
+    headers = [
+        "CONSECUTIVO",
+        "CARGO",
+        "PERFIL",
+        "SEDE",
+        "MOTIVO DE SOLICITUD",
+        "PERSONA A QUIEN SE REEMPLAZA",
+        "N° DOC ID DE QUIEN SE REEMPLAZA",
+        "SOLICITANTE",
+        "F. RECIBIDO SELECCIÓN",
+        "DÍAS DE GESTIÓN",
+        "ESTADO",
+        "F ENT A CONTR",
+        "NOMBRE PERSONA CONTRATADA",
+        "CEDULA",
+        "OBSERVACIÓN OPERACIONES",
+        "FECHA CARGUE OPERACIONES",
+        "CIUDAD",
+        "TIPIFICACIÓN DE CARGOS",
+        "KPI",
+        "F. DE INGRESO",
+        "OBSERVACIONES",
+    ]
+
+    header_row = 4
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(header_row, i, h)
+        c.font = Font(bold=True, size=10, color=blanco)
+        c.fill = PatternFill("solid", fgColor=verde_principal)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+
+    ws.row_dimensions[header_row].height = 48
+
+    # ------------------------------------------------------------
+    # DATOS
+    # ------------------------------------------------------------
+    r = 5
+    for item in items:
+        for values in _filas_excel_rq(item):
+            for col, value in enumerate(values, 1):
+                c = ws.cell(r, col, value)
+                c.border = border
+                c.font = Font(size=10, color="1F2937")
+                c.alignment = Alignment(vertical="top", wrap_text=True)
+
+                # Fechas sin hora.
+                if col in (9, 12, 20) and isinstance(value, (date, datetime)):
+                    c.number_format = "dd/mm/yyyy"
+
+                # Fecha/hora de cargue desde Operaciones.
+                if col == 16 and isinstance(value, datetime):
+                    c.number_format = "dd/mm/yyyy hh:mm"
+
+                # Documentos siempre como texto para no perder ceros ni notación.
+                if col in (7, 14) and value not in (None, ""):
+                    c.number_format = "@"
+
+                # Centrado de columnas operativas cortas.
+                if col in (1, 3, 7, 9, 10, 11, 12, 14, 17, 19, 20):
+                    c.alignment = Alignment(
+                        horizontal="center",
+                        vertical="top",
+                        wrap_text=True,
+                    )
+
+            # Fondo alternado de filas, sin pisar el KPI.
+            if r % 2 == 0:
+                for col in range(1, 22):
+                    if col != 19:
+                        ws.cell(r, col).fill = PatternFill("solid", fgColor=gris_fondo)
+
+            # Resalta consecutivo.
+            ws.cell(r, 1).font = Font(bold=True, color=verde_oscuro)
+
+            # Resalta días de gestión.
+            ws.cell(r, 10).font = Font(bold=True, color="334155")
+
+            # ESTADO (columna K).
+            estado = _excel_texto(ws.cell(r, 11).value).upper()
+            if estado in ("CONTRATADO", "CERRADO"):
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor="DCFCE7")
+                ws.cell(r, 11).font = Font(bold=True, color="166534")
+            elif estado in ("DESISTE DEL PROCESO", "RECHAZADO", "CANCELADO"):
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor="FEE2E2")
+                ws.cell(r, 11).font = Font(bold=True, color="991B1B")
+            elif estado in ("ABIERTO", "EN PROCESO", "EN_PROCESO"):
+                ws.cell(r, 11).fill = PatternFill("solid", fgColor=azul_suave)
+                ws.cell(r, 11).font = Font(bold=True, color="1D4ED8")
+
+            # KPI (columna S).
+            kpi = _excel_texto(ws.cell(r, 19).value).upper()
+            if kpi == "CUMPLE":
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="DCFCE7")
+                ws.cell(r, 19).font = Font(bold=True, color="166534")
+            elif kpi == "NO CUMPLE":
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FEE2E2")
+                ws.cell(r, 19).font = Font(bold=True, color="991B1B")
+            elif kpi == "CANCELADA":
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="E5E7EB")
+                ws.cell(r, 19).font = Font(bold=True, color="374151")
+            elif kpi == "EN TIEMPO":
+                ws.cell(r, 19).fill = PatternFill("solid", fgColor="FEF3C7")
+                ws.cell(r, 19).font = Font(bold=True, color="92400E")
+
+            r += 1
+
+    last_row = max(r - 1, header_row)
+
+    # ------------------------------------------------------------
+    # TABLA, FILTROS, INMOVILIZACIÓN Y DIMENSIONES
+    # ------------------------------------------------------------
+    if last_row >= 5:
+        tabla = Table(displayName="TablaRQSeleccion", ref=f"A{header_row}:U{last_row}")
+        estilo_tabla = TableStyleInfo(
+            name="TableStyleMedium4",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=False,   # ya controlamos el bandeado para conservar KPI/Estado
+            showColumnStripes=False,
+        )
+        tabla.tableStyleInfo = estilo_tabla
+        ws.add_table(tabla)
+    else:
+        ws.auto_filter.ref = f"A{header_row}:U{header_row}"
+
+    ws.freeze_panes = "A5"
+
+    widths = [
+        17, 28, 18, 44, 32, 34, 23,
+        23, 21, 17, 25, 19, 35, 19,
+        66, 25, 19, 34, 17, 19, 56,
+    ]
+    for i, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width
+
+    for rownum in range(5, last_row + 1):
+        ws.row_dimensions[rownum].height = 30
+
+    # Fila separadora visual.
+    ws.row_dimensions[3].height = 8
+    for col in range(1, 22):
+        ws.cell(3, col).fill = PatternFill("solid", fgColor=blanco)
+
+    # Impresión más limpia.
+    ws.print_title_rows = "1:4"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.page_margins.left = 0.25
+    ws.page_margins.right = 0.25
+    ws.page_margins.top = 0.5
+    ws.page_margins.bottom = 0.5
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"RQ_Seleccion_{datetime.now(TZ_COLOMBIA).strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ============================================================
