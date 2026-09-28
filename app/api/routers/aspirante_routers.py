@@ -514,6 +514,35 @@ def actualizar_estado_aspirante(
 
         estado_anterior = registro_actual.get("IdEstadoProceso")
 
+        # Protección exclusiva para usuarios que operan únicamente con rol de Selección.
+        # No interfiere con los cambios realizados por Contratación o Talento Humano.
+        roles_ids = {
+            int(rol_id)
+            for rol_id in (current.get("roles_ids") or [])
+            if str(rol_id).isdigit()
+        }
+        es_solo_seleccion = (
+            ROL_SELECCION in roles_ids
+            and ROL_CONTRATACION not in roles_ids
+            and ROL_TALENTO_HUMANO not in roles_ids
+        )
+
+        estados_protegidos = {24, 25, 30, 31, 32, 33, 35}
+        estados_seleccion = {18, 19, 20, 21, 22, 26, 27, 28, 34}
+
+        if (
+            es_solo_seleccion
+            and estado_anterior in estados_protegidos
+            and nuevo_estado in estados_seleccion
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"El registro se encuentra en un estado protegido "
+                    f"({estado_anterior}) y no puede regresar al flujo de Selección."
+                ),
+            )
+
         db.execute(
             text("""
                 UPDATE "RegistroPersonal"
