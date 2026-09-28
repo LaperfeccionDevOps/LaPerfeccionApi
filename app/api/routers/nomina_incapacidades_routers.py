@@ -3,6 +3,7 @@ from decimal import Decimal
 from io import BytesIO
 import hashlib
 import secrets
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -78,6 +79,10 @@ class NegarIncapacidadRequest(BaseModel):
 
 class PagarIncapacidadRequest(BaseModel):
     valor_pagado: Decimal = Field(..., gt=0, max_digits=14, decimal_places=2)
+
+
+class ConfirmarCargueSinergyRequest(BaseModel):
+    confirmar: bool = True
 
 
 
@@ -183,6 +188,51 @@ def _obtener_usuario_gestion(usuario_actual) -> str:
         return str(valor).strip()[:150]
 
     return "usuario_nomina"
+
+
+def _obtener_id_usuario_uuid(usuario_actual) -> UUID:
+    candidatos = []
+
+    if isinstance(usuario_actual, dict):
+        usuario_obj = usuario_actual.get("usuario")
+        payload = usuario_actual.get("payload")
+
+        if usuario_obj is not None:
+            for nombre in ("IdUsuario", "id_usuario", "id", "Id"):
+                valor = getattr(usuario_obj, nombre, None)
+                if valor:
+                    candidatos.append(valor)
+
+        for nombre in ("IdUsuario", "id_usuario", "user_id", "id", "sub"):
+            valor = usuario_actual.get(nombre)
+            if valor:
+                candidatos.append(valor)
+
+        if isinstance(payload, dict):
+            for nombre in ("IdUsuario", "id_usuario", "user_id", "id", "sub"):
+                valor = payload.get(nombre)
+                if valor:
+                    candidatos.append(valor)
+    else:
+        for nombre in ("IdUsuario", "id_usuario", "user_id", "id", "Id"):
+            valor = getattr(usuario_actual, nombre, None)
+            if valor:
+                candidatos.append(valor)
+
+    for valor in candidatos:
+        try:
+            return UUID(str(valor).strip())
+        except (ValueError, TypeError, AttributeError):
+            continue
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=(
+            "No fue posible identificar el usuario que descarga el Excel "
+            "para registrar el corte de Sinergy."
+        ),
+    )
+
 
 
 def _validar_acceso_nomina(usuario_actual) -> None:
@@ -1147,6 +1197,161 @@ def _configurar_excel_incapacidades_aprobadas(ws, filas):
 
 
 
+
+@router.get("/cortes-sinergy")
+def listar_cortes_sinergy(
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    filas = db.execute(
+        text(
+            """
+            SELECT
+                c."IdCorteSinergyIncapacidad",
+                c."FechaInicio",
+                c."FechaFin",
+                c."Estado",
+                c."CantidadIncapacidades",
+                c."IdUsuarioDescarga",
+                c."FechaDescarga",
+                c."IdUsuarioConfirmacion",
+                c."FechaConfirmacion",
+                c."Activo"
+            FROM public."CorteSinergyIncapacidad" c
+            WHERE c."Activo" = TRUE
+            ORDER BY c."FechaDescarga" DESC, c."IdCorteSinergyIncapacidad" DESC
+            """
+        )
+    ).mappings().all()
+
+    data = [
+        {
+            "id_corte": fila["IdCorteSinergyIncapacidad"],
+            "fecha_inicio": fila["FechaInicio"],
+            "fecha_fin": fila["FechaFin"],
+            "estado": fila["Estado"],
+            "cantidad_incapacidades": fila["CantidadIncapacidades"],
+            "id_usuario_descarga": fila["IdUsuarioDescarga"],
+            "fecha_descarga": fila["FechaDescarga"],
+            "id_usuario_confirmacion": fila["IdUsuarioConfirmacion"],
+            "fecha_confirmacion": fila["FechaConfirmacion"],
+            "activo": fila["Activo"],
+        }
+        for fila in filas
+    ]
+
+    return {"success": True, "total": len(data), "data": data}
+
+
+@router.put("/cortes-sinergy/{id_corte}/confirmar-cargue")
+def confirmar_cargue_corte_sinergy(
+    id_corte: int,
+    payload: ConfirmarCargueSinergyRequest,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
+
+    if payload.confirmar is not True:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe confirmar expresamente el cargue del archivo a Sinergy.",
+        )
+
+    id_usuario_confirmacion = _obtener_id_usuario_uuid(usuario_actual)
+
+    try:
+        corte = db.execute(
+            text(
+                """
+                SELECT "IdCorteSinergyIncapacidad", "Estado", "Activo"
+                FROM public."CorteSinergyIncapacidad"
+                WHERE "IdCorteSinergyIncapacidad" = :id_corte
+                FOR UPDATE
+                """
+            ),
+            {"id_corte": id_corte},
+        ).mappings().first()
+
+        if not corte or corte["Activo"] is not True:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="El corte de Sinergy no existe o no está disponible.",
+            )
+
+        estado_actual = str(corte["Estado"] or "").strip().upper()
+
+        if estado_actual == "CARGADO_SINERGY":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Este corte ya fue confirmado como cargado en Sinergy.",
+            )
+
+        if estado_actual != "PENDIENTE_CARGUE":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"El corte no se encuentra pendiente de cargue. Estado actual: {estado_actual or 'SIN ESTADO'}.",
+            )
+
+        actualizado = db.execute(
+            text(
+                """
+                UPDATE public."CorteSinergyIncapacidad"
+                SET
+                    "Estado" = 'CARGADO_SINERGY',
+                    "IdUsuarioConfirmacion" = :id_usuario_confirmacion,
+                    "FechaConfirmacion" = CURRENT_TIMESTAMP
+                WHERE "IdCorteSinergyIncapacidad" = :id_corte
+                  AND "Activo" = TRUE
+                  AND "Estado" = 'PENDIENTE_CARGUE'
+                RETURNING
+                    "IdCorteSinergyIncapacidad", "FechaInicio", "FechaFin",
+                    "Estado", "CantidadIncapacidades", "IdUsuarioDescarga",
+                    "FechaDescarga", "IdUsuarioConfirmacion",
+                    "FechaConfirmacion", "Activo"
+                """
+            ),
+            {"id_corte": id_corte, "id_usuario_confirmacion": id_usuario_confirmacion},
+        ).mappings().first()
+
+        if not actualizado:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El corte cambió de estado y no pudo confirmarse.",
+            )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Cargue a Sinergy confirmado correctamente.",
+            "data": {
+                "id_corte": actualizado["IdCorteSinergyIncapacidad"],
+                "fecha_inicio": actualizado["FechaInicio"],
+                "fecha_fin": actualizado["FechaFin"],
+                "estado": actualizado["Estado"],
+                "cantidad_incapacidades": actualizado["CantidadIncapacidades"],
+                "id_usuario_descarga": actualizado["IdUsuarioDescarga"],
+                "fecha_descarga": actualizado["FechaDescarga"],
+                "id_usuario_confirmacion": actualizado["IdUsuarioConfirmacion"],
+                "fecha_confirmacion": actualizado["FechaConfirmacion"],
+                "activo": actualizado["Activo"],
+            },
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No fue posible confirmar el cargue del corte a Sinergy.",
+        ) from exc
+
+
 @router.get("/reporte-excel-aprobadas")
 def descargar_excel_incapacidades_aprobadas(
     fecha_inicio: date | None = Query(default=None),
@@ -1168,16 +1373,28 @@ def descargar_excel_incapacidades_aprobadas(
 
     condiciones = [
         'i."Activo" = TRUE',
-        "UPPER(COALESCE(i.\"Estado\", '')) IN ('APROBADA', 'PENDIENTE RADICACION')",
+        (
+            "UPPER(COALESCE(i.\"Estado\", '')) IN "
+            "('APROBADA', 'PENDIENTE RADICACION', 'RADICADO', "
+            "'EN PROCESO DE PAGO', 'PAGADO', 'NEGADO', 'SIN RECOBRO')"
+        ),
+        (
+            'NOT EXISTS ('
+            'SELECT 1 '
+            'FROM public."CorteSinergyIncapacidadDetalle" csd '
+            'WHERE csd."IdIncapacidadTrabajador" = i."IdIncapacidadTrabajador" '
+            'AND csd."Activo" = TRUE'
+            ')'
+        ),
     ]
     parametros = {}
 
     if fecha_inicio is not None:
-        condiciones.append('i."FechaInicio" >= :fecha_inicio')
+        condiciones.append('i."FechaGestionNomina"::date >= :fecha_inicio')
         parametros["fecha_inicio"] = fecha_inicio
 
     if fecha_fin is not None:
-        condiciones.append('i."FechaInicio" <= :fecha_fin')
+        condiciones.append('i."FechaGestionNomina"::date <= :fecha_fin')
         parametros["fecha_fin"] = fecha_fin
 
     consulta_sql = f"""
@@ -1193,6 +1410,7 @@ def descargar_excel_incapacidades_aprobadas(
             i."Diagnostico",
             i."ConceptoSinergy",
             i."Estado",
+            i."FechaGestionNomina",
             diag."IdDiagnostico" AS "IdDiagnosticoSinergy",
             diag."CoincidenciasDiagnostico"
         FROM public."IncapacidadTrabajador" i
@@ -1239,7 +1457,7 @@ def descargar_excel_incapacidades_aprobadas(
         ) diag ON TRUE
         WHERE {" AND ".join(condiciones)}
         ORDER BY
-            i."FechaInicio" ASC,
+            i."FechaGestionNomina" ASC,
             rp."NumeroIdentificacion" ASC,
             i."IdIncapacidadTrabajador" ASC
     """
@@ -1250,11 +1468,56 @@ def descargar_excel_incapacidades_aprobadas(
     ).mappings().all()
 
     if not filas:
+        ultimo_corte = db.execute(
+            text(
+                """
+                SELECT
+                    c."IdCorteSinergyIncapacidad",
+                    c."FechaInicio",
+                    c."FechaFin",
+                    c."Estado",
+                    c."FechaDescarga",
+                    c."FechaConfirmacion"
+                FROM public."CorteSinergyIncapacidad" c
+                WHERE c."Activo" = TRUE
+                ORDER BY
+                    COALESCE(c."FechaConfirmacion", c."FechaDescarga") DESC,
+                    c."IdCorteSinergyIncapacidad" DESC
+                LIMIT 1
+                """
+            )
+        ).mappings().first()
+
+        if ultimo_corte:
+            fecha_hasta = ultimo_corte["FechaFin"]
+            fecha_sugerida = fecha_hasta + timedelta(days=1)
+            estado_corte = str(ultimo_corte["Estado"] or "").strip().upper()
+
+            if estado_corte == "PENDIENTE_CARGUE":
+                mensaje = (
+                    f"Este período ya fue consultado y el corte #{ultimo_corte['IdCorteSinergyIncapacidad']} "
+                    "todavía está pendiente de confirmar en Sinergy. "
+                    "Confirme primero el cargue del archivo antes de generar un nuevo corte."
+                )
+            else:
+                mensaje = (
+                    "Este período ya fue consultado y no tiene incapacidades nuevas pendientes "
+                    "por exportar a Sinergy. "
+                    f"El último corte registrado llega hasta el {fecha_hasta.strftime('%d/%m/%Y')}. "
+                    f"Para continuar, consulte desde el {fecha_sugerida.strftime('%d/%m/%Y')} "
+                    "o seleccione un rango que contenga nuevas aprobaciones."
+                )
+
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=mensaje,
+            )
+
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "No hay incapacidades aprobadas para el rango "
-                "de fechas seleccionado."
+                "No hay incapacidades aprobadas pendientes de exportar a Sinergy "
+                "para el rango de fechas seleccionado."
             ),
         )
 
@@ -1347,6 +1610,113 @@ def descargar_excel_incapacidades_aprobadas(
     wb.save(salida)
     salida.seek(0)
 
+    # Registrar el corte de Sinergy únicamente cuando el Excel quedó
+    # construido correctamente y existen incapacidades válidas para exportar.
+    id_usuario_descarga = _obtener_id_usuario_uuid(usuario_actual)
+
+    fechas_aprobacion = [
+        fila["FechaGestionNomina"].date()
+        for fila in filas_validas
+        if fila["FechaGestionNomina"] is not None
+    ]
+
+    if not fechas_aprobacion:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Las incapacidades seleccionadas no tienen fecha de aprobación "
+                "de Nómina y no es posible registrar el corte de Sinergy."
+            ),
+        )
+
+    fecha_inicio_corte = fecha_inicio or min(fechas_aprobacion)
+    fecha_fin_corte = fecha_fin or max(fechas_aprobacion)
+
+    try:
+        corte = db.execute(
+            text(
+                """
+                INSERT INTO public."CorteSinergyIncapacidad"
+                (
+                    "FechaInicio",
+                    "FechaFin",
+                    "Estado",
+                    "CantidadIncapacidades",
+                    "IdUsuarioDescarga",
+                    "FechaDescarga",
+                    "Activo",
+                    "FechaCreacion"
+                )
+                VALUES
+                (
+                    :fecha_inicio,
+                    :fecha_fin,
+                    'PENDIENTE_CARGUE',
+                    :cantidad,
+                    :id_usuario_descarga,
+                    CURRENT_TIMESTAMP,
+                    TRUE,
+                    CURRENT_TIMESTAMP
+                )
+                RETURNING "IdCorteSinergyIncapacidad"
+                """
+            ),
+            {
+                "fecha_inicio": fecha_inicio_corte,
+                "fecha_fin": fecha_fin_corte,
+                "cantidad": len(filas_validas),
+                "id_usuario_descarga": id_usuario_descarga,
+            },
+        ).mappings().first()
+
+        if not corte:
+            raise RuntimeError("No fue posible crear el corte de Sinergy.")
+
+        id_corte = corte["IdCorteSinergyIncapacidad"]
+
+        db.execute(
+            text(
+                """
+                INSERT INTO public."CorteSinergyIncapacidadDetalle"
+                (
+                    "IdCorteSinergyIncapacidad",
+                    "IdIncapacidadTrabajador",
+                    "Activo",
+                    "FechaCreacion"
+                )
+                VALUES
+                (
+                    :id_corte,
+                    :id_incapacidad,
+                    TRUE,
+                    CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            [
+                {
+                    "id_corte": id_corte,
+                    "id_incapacidad": fila["IdIncapacidadTrabajador"],
+                }
+                for fila in filas_validas
+            ],
+        )
+
+        db.commit()
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "El Excel fue preparado, pero no fue posible registrar "
+                "el corte de Sinergy. No se realizó la descarga."
+            ),
+        ) from exc
+
     sufijo_inicio = (
         fecha_inicio.strftime("%Y%m%d")
         if fecha_inicio
@@ -1375,6 +1745,7 @@ def descargar_excel_incapacidades_aprobadas(
             ),
             "X-Registros-Exportados": str(len(filas_validas)),
             "X-Registros-Omitidos": str(len(filas_omitidas)),
+            "X-Id-Corte-Sinergy": str(id_corte),
         },
     )
 
@@ -2001,7 +2372,6 @@ def aprobar_incapacidad_nomina(
         },
     }
 
-
 @router.put("/{id_incapacidad}/rechazar")
 def rechazar_incapacidad_nomina(
     id_incapacidad: int,
@@ -2233,6 +2603,7 @@ def radicar_incapacidad_nomina(
         SET
             "Estado" = CASE
                 WHEN COALESCE("DiasIncapacidad", 0) IN (1, 2)
+                     AND COALESCE("EsProrroga", FALSE) = FALSE
                     THEN 'SIN RECOBRO'
                 ELSE 'RADICADO'
             END,

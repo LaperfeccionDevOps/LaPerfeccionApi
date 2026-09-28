@@ -466,7 +466,16 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 FROM public."HistorialEstadoContratacion" h
                 WHERE h."IdRegistroPersonal" = rp."IdRegistroPersonal"
                   AND h."EstadoNuevo" = 25
-                ORDER BY h."FechaMovimiento" DESC
+                  AND h."FechaMovimiento" >= rc."FechaVinculacion"
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public."RQCandidato" rc_posterior
+                      WHERE rc_posterior."IdRegistroPersonal" = rc."IdRegistroPersonal"
+                        AND rc_posterior."IdRQOperaciones" <> rc."IdRQOperaciones"
+                        AND rc_posterior."FechaVinculacion" > rc."FechaVinculacion"
+                        AND rc_posterior."FechaVinculacion" <= h."FechaMovimiento"
+                  )
+                ORDER BY h."FechaMovimiento" DESC, h."IdHistorialEstadoContratacion" DESC
                 LIMIT 1
             ) hc ON true
             LEFT JOIN LATERAL (
@@ -513,13 +522,17 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
         else:
             fecha_fin_kpi = hoy
 
-        # Una contratación anterior al recibido efectivo de Selección no puede
-        # cubrir esta RQ ni producir artificialmente "0 días / CUMPLE".
+        # La contratación pertenece a esta RQ únicamente si el lateral hc encontró
+        # una transición real a CONTRATADO (25) posterior a FechaVinculacion.
+        # No se compara contra FechaRecibidoSeleccion: una RQ enviada después de
+        # las 12:00 puede tener fecha efectiva del siguiente día hábil, aunque
+        # Selección haya vinculado y Contratación haya contratado al candidato
+        # el mismo día del envío. La protección contra contrataciones históricas
+        # ya está garantizada por h.FechaMovimiento >= rc.FechaVinculacion y por
+        # la exclusión de vínculos posteriores a otra RQ dentro del lateral hc.
         contratacion_temporalmente_valida = bool(
             estado_id == ESTADO_CONTRATADO
             and fecha_contratado is not None
-            and fecha_recibido is not None
-            and fecha_contratado >= fecha_recibido
         )
 
         if estado_id == ESTADO_CONTRATADO and not contratacion_temporalmente_valida:
@@ -938,6 +951,47 @@ def vincular_candidato_rq(
     if ya_vinculado and bool(ya_vinculado["Activo"]):
         raise HTTPException(status_code=409, detail="El candidato ya está vinculado a esta RQ.")
 
+    # Una persona no puede quedar vinculada activamente a dos RQ al mismo tiempo,
+    # incluso si la RQ anterior ya quedó CUBIERTA. La cobertura cerrada conserva su
+    # trazabilidad, pero para reutilizar a la persona en una RQ futura primero debe
+    # inactivarse/liberarse expresamente la vinculación anterior. Así una nueva
+    # contratación nunca nace con dos vínculos activos de RQ para la misma persona.
+    otra_rq_activa = db.execute(
+        text(
+            """
+            SELECT
+                rc."IdRQOperaciones",
+                rq."ConsecutivoRQ",
+                rq."EstadoRQ"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            WHERE rc."IdRegistroPersonal" = :id_persona
+              AND rc."IdRQOperaciones" <> :id_rq
+              AND COALESCE(rc."Activo", true) = true
+              AND COALESCE(rq."Activo", true) = true
+            ORDER BY rc."FechaVinculacion" DESC, rc."IdRQCandidato" DESC
+            LIMIT 1;
+            """
+        ),
+        {"id_persona": id_registro_personal, "id_rq": id_rq_operaciones},
+    ).mappings().first()
+
+    if otra_rq_activa:
+        consecutivo_otra = otra_rq_activa["ConsecutivoRQ"]
+        codigo_otra = (
+            f"RQ-GTH-{int(consecutivo_otra)}"
+            if consecutivo_otra is not None
+            else f"RQ #{int(otra_rq_activa['IdRQOperaciones'])}"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"El candidato ya se encuentra vinculado activamente a {codigo_otra}. "
+                "Para asignarlo a esta requisición, primero debe desvincularlo de la RQ actual."
+            ),
+        )
+
     # Los candidatos históricos/inactivos se conservan para trazabilidad y no
     # consumen cupo. La cantidad solicitada limita únicamente las vinculaciones
     # activas simultáneas de la RQ.
@@ -973,16 +1027,24 @@ def vincular_candidato_rq(
                 FROM public."HistorialEstadoContratacion" h
                 WHERE h."IdRegistroPersonal" = rp."IdRegistroPersonal"
                   AND h."EstadoNuevo" = 25
-                ORDER BY h."FechaMovimiento" DESC
+                  AND h."FechaMovimiento" >= rc."FechaVinculacion"
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public."RQCandidato" rc_posterior
+                      WHERE rc_posterior."IdRegistroPersonal" = rc."IdRegistroPersonal"
+                        AND rc_posterior."IdRQOperaciones" <> rc."IdRQOperaciones"
+                        AND rc_posterior."FechaVinculacion" > rc."FechaVinculacion"
+                        AND rc_posterior."FechaVinculacion" <= h."FechaMovimiento"
+                  )
+                ORDER BY h."FechaMovimiento" DESC, h."IdHistorialEstadoContratacion" DESC
                 LIMIT 1
             ) hc ON true
             WHERE rc."IdRQOperaciones" = :id_rq
               AND COALESCE(rc."Activo", true) = true
-              AND rp."IdEstadoProceso" = 25
-              AND hc."FechaContratado" >= :fecha_recibido;
+              AND rp."IdEstadoProceso" = 25;
             """
         ),
-        {"id_rq": id_rq_operaciones, "fecha_recibido": fecha_recibido_rq},
+        {"id_rq": id_rq_operaciones},
     ).scalar() or 0
 
     if int(contratados) >= cantidad_solicitada:
