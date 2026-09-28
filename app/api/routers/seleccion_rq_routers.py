@@ -588,7 +588,32 @@ def _serializar_rq_seleccion(db: Session, row, incluir_candidatos: bool = True) 
     estado_bandeja = _estado_bandeja_por_cobertura(cantidad_solicitada, candidatos)
 
     hoy = datetime.now(TZ_COLOMBIA).date()
-    dias_gestion_rq = _dias_habiles_inclusivos(db, fecha_recibido, hoy)
+
+    # Días en proceso de la RQ:
+    # - ABIERTO / EN_PROCESO: cuenta desde el recibido efectivo en Selección hasta hoy.
+    # - CERRADO: se congela en la fecha en que se completó la cobertura real.
+    #   Si la RQ requiere varios cupos, corresponde a la contratación del último
+    #   candidato que completa la cantidad solicitada.
+    fechas_cobertura = sorted(
+        [
+            _a_fecha(c.get("FechaContratado"))
+            for c in candidatos
+            if c.get("CuentaComoCubierto") and c.get("FechaContratado") is not None
+        ]
+    )
+
+    if estado_bandeja == "CERRADO" and len(fechas_cobertura) >= cantidad_solicitada:
+        fecha_cierre_cobertura = fechas_cobertura[cantidad_solicitada - 1]
+        fecha_fin_gestion_rq = fecha_cierre_cobertura
+    else:
+        fecha_cierre_cobertura = None
+        fecha_fin_gestion_rq = hoy
+
+    dias_gestion_rq = _dias_habiles_inclusivos(
+        db,
+        fecha_recibido,
+        fecha_fin_gestion_rq,
+    )
 
     return {
         "IdRQOperaciones": id_rq,
@@ -605,6 +630,7 @@ def _serializar_rq_seleccion(db: Session, row, incluir_candidatos: bool = True) 
         "FechaEnvioSeleccion": row["FechaEnvioSeleccion"],
         "FechaRecibidoSeleccion": fecha_recibido,
         "DiasGestionRQ": dias_gestion_rq,
+        "FechaCierreCobertura": fecha_cierre_cobertura,
 
         "IdTipificacionRQSeleccion": (
             int(row["IdTipificacionRQSeleccion"])
@@ -1313,6 +1339,166 @@ def _filas_excel_rq(item: dict) -> list[list]:
         ])
 
     return filas
+
+
+@router.get("/exportar/contratados")
+def exportar_excel_contratados_rq_seleccion(
+    fecha_inicio: date,
+    fecha_fin: date,
+    db: Session = Depends(get_db),
+    current=Depends(require_seleccion_rq),
+):
+    """Exporta únicamente personas contratadas por RQ dentro del rango indicado."""
+    if fecha_fin < fecha_inicio:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La fecha final no puede ser anterior a la fecha inicial.",
+        )
+
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                rp."NumeroIdentificacion" AS "Documento",
+                NULLIF(TRIM(COALESCE(rp."Nombres", '') || ' ' || COALESCE(rp."Apellidos", '')), '') AS "NombreCompleto",
+                ca."NombreCargo" AS "Cargo",
+                c."Nombre" AS "Sede",
+                rp."Celular" AS "Telefono",
+                rp."Email" AS "Correo",
+                CASE
+                    WHEN UPPER(COALESCE(rq."TipoRQ", '')) = 'REEMPLAZO'
+                    THEN NULLIF(TRIM(COALESCE(rep."Nombres", '') || ' ' || COALESCE(rep."Apellidos", '')), '')
+                    ELSE NULL
+                END AS "PersonaAReemplazar",
+                hc."FechaContratacion"
+            FROM public."RQOperaciones" rq
+            INNER JOIN public."RQCandidato" rc
+                ON rc."IdRQOperaciones" = rq."IdRQOperaciones"
+               AND COALESCE(rc."Activo", true) = true
+            INNER JOIN public."RegistroPersonal" rp
+                ON rp."IdRegistroPersonal" = rc."IdRegistroPersonal"
+            LEFT JOIN public."Cargo" ca ON ca."IdCargo" = rq."IdCargo"
+            LEFT JOIN public."Cliente" c ON c."IdCliente" = rq."IdCliente"
+            LEFT JOIN public."RegistroPersonal" rep
+                ON rep."IdRegistroPersonal" = rq."IdRegistroPersonal"
+            INNER JOIN LATERAL (
+                SELECT h."FechaMovimiento" AS "FechaContratacion"
+                FROM public."HistorialEstadoContratacion" h
+                WHERE h."IdRegistroPersonal" = rc."IdRegistroPersonal"
+                  AND h."EstadoNuevo" = 25
+                  AND h."FechaMovimiento" >= rc."FechaVinculacion"
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public."RQCandidato" rc_posterior
+                      WHERE rc_posterior."IdRegistroPersonal" = rc."IdRegistroPersonal"
+                        AND rc_posterior."IdRQOperaciones" <> rc."IdRQOperaciones"
+                        AND rc_posterior."FechaVinculacion" > rc."FechaVinculacion"
+                        AND rc_posterior."FechaVinculacion" <= h."FechaMovimiento"
+                  )
+                ORDER BY h."FechaMovimiento" DESC, h."IdHistorialEstadoContratacion" DESC
+                LIMIT 1
+            ) hc ON true
+            WHERE COALESCE(rq."Activo", true) = true
+              AND rp."IdEstadoProceso" = 25
+              AND hc."FechaContratacion" >= :fecha_inicio
+              AND hc."FechaContratacion" < (:fecha_fin + INTERVAL '1 day')
+            ORDER BY hc."FechaContratacion", rp."Apellidos", rp."Nombres";
+            """
+        ),
+        {"fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin},
+    ).mappings().all()
+
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No se encontraron personas contratadas por RQ entre "
+                f"{fecha_inicio.strftime('%d/%m/%Y')} y {fecha_fin.strftime('%d/%m/%Y')}."
+            ),
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Contratados RQ"
+    ws.sheet_view.showGridLines = False
+
+    verde_oscuro, verde_principal = "005C45", "008F68"
+    verde_claro, verde_muy_claro = "DDF4EC", "F3FBF8"
+    gris_texto, gris_borde, blanco = "475569", "D7E0E7", "FFFFFF"
+    thin = Side(style="thin", color=gris_borde)
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells("A1:G1")
+    ws["A1"] = "LA PERFECCIÓN  |  PERSONAL CONTRATADO POR RQ"
+    ws["A1"].font = Font(bold=True, size=18, color=blanco)
+    ws["A1"].fill = PatternFill("solid", fgColor=verde_oscuro)
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[1].height = 34
+
+    ws.merge_cells("A2:G2")
+    ws["A2"] = (
+        f"Periodo de contratación: {fecha_inicio.strftime('%d/%m/%Y')} al "
+        f"{fecha_fin.strftime('%d/%m/%Y')}  |  Total contratados: {len(rows)}"
+    )
+    ws["A2"].font = Font(bold=True, size=10, color=gris_texto)
+    ws["A2"].fill = PatternFill("solid", fgColor=verde_claro)
+    ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
+
+    headers = [
+        "NÚMERO DE DOCUMENTO", "NOMBRE COMPLETO", "CARGO", "SEDE",
+        "TELÉFONO", "CORREO", "PERSONA A REEMPLAZAR",
+    ]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(4, col, h)
+        cell.font = Font(bold=True, color=blanco, size=10)
+        cell.fill = PatternFill("solid", fgColor=verde_principal)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for rnum, row in enumerate(rows, 5):
+        vals = [
+            _excel_texto(row["Documento"]), _excel_texto(row["NombreCompleto"]),
+            _excel_texto(row["Cargo"]), _excel_texto(row["Sede"]),
+            _excel_texto(row["Telefono"]), _excel_texto(row["Correo"]),
+            _excel_texto(row["PersonaAReemplazar"]),
+        ]
+        for col, value in enumerate(vals, 1):
+            cell = ws.cell(rnum, col, value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if rnum % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=verde_muy_claro)
+        ws.cell(rnum, 1).number_format = "@"
+        ws.cell(rnum, 5).number_format = "@"
+        ws.row_dimensions[rnum].height = 30
+
+    last = 4 + len(rows)
+    ref = f"A4:G{last}"
+    table = Table(displayName="TablaContratadosRQ", ref=ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium4", showFirstColumn=False, showLastColumn=False,
+        showRowStripes=True, showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+    for col, width in {"A":22, "B":34, "C":30, "D":48, "E":20, "F":36, "G":36}.items():
+        ws.column_dimensions[col].width = width
+
+    ws.freeze_panes = "A5"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+    salida = BytesIO()
+    wb.save(salida)
+    salida.seek(0)
+    nombre = f"contratados_rq_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}.xlsx"
+
+    return StreamingResponse(
+        salida,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
+    )
 
 
 @router.get("/exportar/excel")
