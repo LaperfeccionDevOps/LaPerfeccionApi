@@ -56,6 +56,9 @@ def _consultar_retiros_nomina(db: Session):
             rp."Nombres",
             rp."Apellidos",
             COALESCE(c."Nombre", 'SIN CLIENTE') AS "NombreCliente",
+            rl."IdVinculacionLaboral",
+            ec."Codigo" AS "EmpresaCodigo",
+            ec."Nombre" AS "EmpresaNombre",
             rl."FechaProceso",
             rl."FechaRetiro",
             rl."FechaCierre",
@@ -80,6 +83,10 @@ def _consultar_retiros_nomina(db: Session):
         FROM public."RetiroLaboral" rl
         INNER JOIN public."RegistroPersonal" rp
             ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+        LEFT JOIN public."VinculacionLaboral" vl_empresa
+            ON vl_empresa."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl_empresa."IdEmpresaContratante"
         LEFT JOIN public."Cliente" c
             ON c."IdCliente" = rl."IdCliente"
         LEFT JOIN public."EstadoProceso" ep
@@ -261,6 +268,9 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
                 rp."Nombres",
                 rp."Apellidos",
                 COALESCE(c."Nombre", 'SIN CLIENTE') AS "NombreCliente",
+            rl."IdVinculacionLaboral",
+            ec."Codigo" AS "EmpresaCodigo",
+            ec."Nombre" AS "EmpresaNombre",
                 rl."FechaProceso",
                 rl."FechaRetiro",
                 pso."FechaCreacion" AS "FechaPazYSalvo",
@@ -337,6 +347,10 @@ def listar_retiros_nomina(db: Session = Depends(get_db)):
 
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+        LEFT JOIN public."VinculacionLaboral" vl_empresa
+            ON vl_empresa."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl_empresa."IdEmpresaContratante"
 
             -- Se toma un solo Paz y Salvo por retiro.
             -- Esto evita que el mismo retiro aparezca repetido cuando
@@ -1204,6 +1218,9 @@ def listar_retiros_abiertos_operaciones(db: Session = Depends(get_db)):
                 rp."Nombres",
                 rp."Apellidos",
                 COALESCE(c."Nombre", 'SIN CLIENTE') AS "NombreCliente",
+            rl."IdVinculacionLaboral",
+            ec."Codigo" AS "EmpresaCodigo",
+            ec."Nombre" AS "EmpresaNombre",
                 rl."FechaProceso",
                 rl."FechaRetiro",
                 rl."FechaCreacion",
@@ -1218,6 +1235,10 @@ def listar_retiros_abiertos_operaciones(db: Session = Depends(get_db)):
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+        LEFT JOIN public."VinculacionLaboral" vl_empresa
+            ON vl_empresa."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl_empresa."IdEmpresaContratante"
             LEFT JOIN public."Cliente" c
                 ON c."IdCliente" = rl."IdCliente"
             LEFT JOIN public."EstadoProceso" ep

@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
 LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA_NIT.png"
+LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
@@ -204,9 +205,45 @@ LOGO_EMPRESA_LIMPIO = limpiar_fondo_imagen(
 FIRMA_LIMPIA = FIRMA
 
 
+def seleccionar_logo_empresa(datos):
+    """Selecciona el logo únicamente de la empresa confirmada del retiro."""
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    id_empresa = str(datos.get("IdEmpresaContratante") or "").strip()
+    if not datos.get("IdVinculacionLaboral") or not id_empresa:
+        raise ValueError("El retiro no tiene ciclo laboral y empresa contratante confirmados.")
+    empresas = {"ALP": ("1", LOGO_EMPRESA_LIMPIO), "MI": ("2", LOGO_MANTENER)}
+    if codigo not in empresas or id_empresa != empresas[codigo][0]:
+        raise ValueError("La empresa contratante no coincide con la vinculación laboral del retiro.")
+    logo = empresas[codigo][1]
+    if not logo.is_file():
+        raise FileNotFoundError(f"No se encontró el logotipo autorizado para {codigo}: {logo}")
+    return logo
+
+
+
+def validar_empresa_certificado(datos):
+    """Evita emitir un certificado con la papelería ALP para otra empresa.
+
+    La identidad de la empresa debe proceder del ciclo laboral asociado
+    al retiro, no del registro personal ni de una vinculación posterior.
+    """
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    if not datos.get("IdVinculacionLaboral") or not datos.get("IdEmpresaContratante"):
+        raise ValueError(
+            "El retiro no tiene un ciclo laboral y una empresa contratante confirmados. "
+            "No se puede emitir el certificado laboral."
+        )
+    if codigo not in ("ALP", "MI"):
+        raise ValueError("Empresa contratante no reconocida para este documento.")
+    # Verificar identidad, correspondencia ID/código y disponibilidad del logo.
+    seleccionar_logo_empresa(datos)
+
+
 class CertificadoLaboralPDF:
     def __init__(self, datos):
+        validar_empresa_certificado(datos)
         self.datos = datos
+        self.logo_empresa = seleccionar_logo_empresa(datos)
         self.width, self.height = letter
         self.fecha = datetime.now()
 
@@ -246,9 +283,9 @@ class CertificadoLaboralPDF:
         return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
 
     def encabezado(self):
-        if LOGO_EMPRESA_LIMPIO.exists():
+        if self.logo_empresa.exists():
             self.pdf.drawImage(
-                ImageReader(str(LOGO_EMPRESA_LIMPIO)),
+                ImageReader(str(self.logo_empresa)),
                 45,
                 self.height - 95,
                 width=160,

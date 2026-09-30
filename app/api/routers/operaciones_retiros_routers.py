@@ -618,10 +618,10 @@ def _validar_datos_rq(
                 detail="El perfil es obligatorio cuando requiere reemplazo.",
             )
 
-        ciudad_normalizada = _normalizar_texto_requerido(
-            ciudad_normalizada,
-            "Ciudad",
-        )
+        # Ciudad se consulta automáticamente desde DatosAdicionales.
+        # No exigir digitación si el trabajador no tiene ciudad registrada.
+        # Se conserva None en lugar de inventar una ciudad.
+        ciudad_normalizada = _normalizar_texto_opcional(ciudad_normalizada)
 
         turno_normalizado = _normalizar_opcion(
             turno_normalizado,
@@ -899,6 +899,48 @@ def _obtener_trabajador_contratado(
         )
 
     return trabajador
+
+
+def _obtener_vinculacion_para_retiro(
+    db: Session,
+    id_registro_personal: int,
+    fecha_ultimo_dia_laborado: date,
+) -> int:
+    """Asocia exclusivamente el ciclo laboral ACTIVO del trabajador.
+
+    Nunca deduce la empresa a partir del cliente ni reutiliza un ciclo histórico.
+    Si hay cero o varios ciclos elegibles, exige corregir el dato de origen.
+    """
+    vinculaciones = db.execute(
+        text("""
+            SELECT vl."IdVinculacionLaboral"
+            FROM public."VinculacionLaboral" vl
+            INNER JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+            WHERE vl."IdRegistroPersonal" = :id_registro_personal
+              AND UPPER(TRIM(COALESCE(vl."EstadoVinculacion", ''))) = 'ACTIVO'
+              AND vl."FechaIngreso" IS NOT NULL
+              AND vl."FechaIngreso" <= :fecha_ultimo_dia_laborado
+            ORDER BY vl."IdVinculacionLaboral"
+            LIMIT 2;
+        """),
+        {
+            "id_registro_personal": id_registro_personal,
+            "fecha_ultimo_dia_laborado": fecha_ultimo_dia_laborado,
+        },
+    ).mappings().all()
+
+    if len(vinculaciones) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "No fue posible identificar una única vinculación laboral ACTIVA "
+                "con empresa contratante y fecha de ingreso válida para este retiro. "
+                "Revisa la vinculación del trabajador en Contratación antes de continuar."
+            ),
+        )
+
+    return int(vinculaciones[0]["IdVinculacionLaboral"])
 
 
 def _validar_motivo_retiro(
@@ -4311,8 +4353,16 @@ async def guardar_retiro_operaciones(
         )
         id_cliente = int(cliente["IdCliente"])
 
+        # Vincular el retiro al contrato exacto antes de crear cualquier registro.
+        id_vinculacion_laboral = _obtener_vinculacion_para_retiro(
+            db=db,
+            id_registro_personal=IdRegistroPersonal,
+            fecha_ultimo_dia_laborado=FechaUltimoDiaLaborado,
+        )
+
         query_insert_retiro = text("""
             INSERT INTO public."RetiroLaboral" (
+                "IdVinculacionLaboral",
                 "IdRegistroPersonal",
                 "IdCliente",
                 "IdMotivoRetiro",
@@ -4327,6 +4377,7 @@ async def guardar_retiro_operaciones(
                 "UsuarioActualizacion"
             )
             VALUES (
+                :id_vinculacion_laboral,
                 :id_registro_personal,
                 :id_cliente,
                 :id_motivo_retiro,
@@ -4347,6 +4398,7 @@ async def guardar_retiro_operaciones(
             query_insert_retiro,
             {
                 "id_registro_personal": IdRegistroPersonal,
+                "id_vinculacion_laboral": id_vinculacion_laboral,
                 "id_cliente": id_cliente,
                 "id_motivo_retiro": IdMotivoRetiro,
                 "fecha_retiro": FechaUltimoDiaLaborado,
