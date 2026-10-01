@@ -28,6 +28,9 @@ from api.routers.asistente_descargo_proceso_disciplinario_router import (
 )
 from api.routers.aspirante_routers import router as aspirante_router
 from api.routers.auth import router as auth_router
+from api.routers.trabajador_incapacidades_routers import (
+    router as trabajador_incapacidades_router,
+)
 from api.routers.autorizacion_agenda_disciplinaria_router import (
     router as autorizacion_agenda_disciplinaria_router,
 )
@@ -97,6 +100,9 @@ from api.routers.motivo_cierre_routers import router as motivo_cierre_router
 from api.routers.nomina_actualizacion_datos_routers import (
     router as nomina_actualizacion_datos_router,
 )
+from api.routers.nomina_incapacidades_routers import (
+    router as nomina_incapacidades_router,
+)
 from api.routers.nomina_retiros_routers import router as nomina_retiros_router
 from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
 from api.routers.observaciones_experiencia_laboral_routers import (
@@ -127,6 +133,7 @@ from api.routers.retiro_laboral_adjunto_routers import (
 )
 from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
 from api.routers.rrll_excel_routers import router as rrll_excel_router
+from api.routers.seleccion_rq_routers import router as seleccion_rq_router
 from api.routers.solicitud_autorizacion_agenda_disciplinaria_router import (
     router as solicitud_autorizacion_agenda_disciplinaria_router,
 )
@@ -179,6 +186,10 @@ app.add_middleware(
 # Routers
 # ─────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(
+    trabajador_incapacidades_router,
+    prefix="/api",
+)
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
 app.include_router(consultar_combos_router, prefix="/api", tags=["combos"])
 app.include_router(cita_router, prefix="/api", tags=["citas"])
@@ -235,6 +246,7 @@ app.include_router(retiro_laboral_adjunto_router)
 app.include_router(operaciones_retiros_router)
 app.include_router(entrevista_retiro_router)
 app.include_router(rrll_excel_router)
+app.include_router(seleccion_rq_router)
 app.include_router(documentos_activos_routers.router)
 app.include_router(proceso_disciplinario_router)
 app.include_router(indicadores_proceso_disciplinario_router)
@@ -248,6 +260,7 @@ app.include_router(autorizacion_agenda_disciplinaria_router)
 app.include_router(solicitud_autorizacion_agenda_disciplinaria_router)
 app.include_router(asistente_descargo_proceso_disciplinario_router)
 app.include_router(nomina_retiros_router)
+app.include_router(nomina_incapacidades_router)
 app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(nomina_actualizacion_datos_router)
 app.include_router(panel_gerencial_rrll_router)

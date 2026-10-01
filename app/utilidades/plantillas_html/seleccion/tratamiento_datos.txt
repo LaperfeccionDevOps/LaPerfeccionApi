@@ -110,10 +110,16 @@
         }
     </style>
 </head>
+
 <body>
+
     <div class="header">
         <div class="header-left">
-            <img class="img-logo-left" src="@LOGO" alt="Logo Aseos La Perfección">
+            <img
+                class="img-logo-left"
+                src="@LOGO"
+                alt="@EMPRESA_NOMBRE"
+            >
         </div>
     </div>
 
@@ -121,55 +127,83 @@
 
     <p>
         Yo, <span class="resaltado">@NOMBRES</span>, identificado(a) con
-        <span class="resaltado">@TIPO_IDENTIFICACION</span> N.° <span class="resaltado">@NUMERO_IDENTIFICACION</span>,
-        en mi calidad de titular de los datos personales, manifiesto que de manera libre, previa,
-        expresa e informada autorizo a <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>,
-        identificada con NIT N.° 800.068.462-4 (en adelante, la Empresa), para que recolecte,
-        almacene, use, circule, suprima, consulte, actualice, procese y, en general, trate mis
-        datos personales, de conformidad con lo dispuesto en la Ley 1581 de 2012, el Decreto 1377
-        de 2013, el Decreto 1074 de 2015 y las demás normas que regulen la materia en Colombia.
+        <span class="resaltado">@TIPO_IDENTIFICACION</span> N.°
+        <span class="resaltado">@NUMERO_IDENTIFICACION</span>,
+        en mi calidad de titular de los datos personales, manifiesto que de manera libre,
+        previa, expresa e informada autorizo a
+        <span class="resaltado">@EMPRESA_RAZON_SOCIAL</span>@EMPRESA_IDENTIFICACION
+        (en adelante, la Empresa), para que recolecte, almacene, use, circule,
+        suprima, consulte, actualice, procese y, en general, trate mis datos
+        personales, de conformidad con lo dispuesto en la Ley 1581 de 2012,
+        el Decreto 1377 de 2013, el Decreto 1074 de 2015 y las demás normas
+        que regulen la materia en Colombia.
     </p>
 
     <p>
-        La presente autorización se otorga para las siguientes finalidades, entre otras legalmente permitidas:
+        La presente autorización se otorga para las siguientes finalidades,
+        entre otras legalmente permitidas:
     </p>
 
     <ul class="lista">
-        <li>Adelantar y gestionar procesos de reclutamiento, selección y evaluación de personal.</li>
-        <li>Verificar la información suministrada en la hoja de vida y documentos de soporte.</li>
-        <li>Contactarme para fines relacionados con el proceso de selección.</li>
         <li>
-            En caso de ser vinculado(a), administrar la relación laboral o contractual, incluyendo
-            afiliaciones al sistema de seguridad social, nómina, bienestar, seguridad y salud en el
-            trabajo, control disciplinario, cumplimiento de obligaciones legales y contractuales, y
-            demás actividades propias de la gestión del talento humano.
+            Adelantar y gestionar procesos de reclutamiento, selección y
+            evaluación de personal.
         </li>
-        <li>Dar cumplimiento a obligaciones legales, contractuales, contables, administrativas y judiciales.</li>
+
         <li>
-            Conservar la información durante la vigencia de la relación laboral o contractual y con
-            posterioridad a su terminación, por el tiempo necesario para atender obligaciones legales,
-            contractuales o requerimientos de autoridades competentes.
+            Verificar la información suministrada en la hoja de vida y
+            documentos de soporte.
+        </li>
+
+        <li>
+            Contactarme para fines relacionados con el proceso de selección.
+        </li>
+
+        <li>
+            En caso de ser vinculado(a), administrar la relación laboral o
+            contractual, incluyendo afiliaciones al sistema de seguridad social,
+            nómina, bienestar, seguridad y salud en el trabajo, control
+            disciplinario, cumplimiento de obligaciones legales y contractuales,
+            y demás actividades propias de la gestión del talento humano.
+        </li>
+
+        <li>
+            Dar cumplimiento a obligaciones legales, contractuales, contables,
+            administrativas y judiciales.
+        </li>
+
+        <li>
+            Conservar la información durante la vigencia de la relación laboral
+            o contractual y con posterioridad a su terminación, por el tiempo
+            necesario para atender obligaciones legales, contractuales o
+            requerimientos de autoridades competentes.
         </li>
     </ul>
 
     <p>
-        En caso de no ser seleccionado(a), autorizo a la Empresa para conservar mis datos personales
-        por el término legal o razonable que resulte necesario para futuros procesos de selección,
-        salvo que solicite expresamente su supresión, siempre que no exista un deber legal o contractual
-        que lo impida.
+        En caso de no ser seleccionado(a), autorizo a la Empresa para conservar
+        mis datos personales por el término legal o razonable que resulte
+        necesario para futuros procesos de selección, salvo que solicite
+        expresamente su supresión, siempre que no exista un deber legal o
+        contractual que lo impida.
     </p>
 
     <p>
-        Declaro que he sido informado(a) de mis derechos como titular de la información, en especial
-        a conocer, actualizar, rectificar, solicitar la supresión de mis datos y revocar la autorización,
-        en los términos previstos por la ley, así como de los canales dispuestos por la Empresa para ejercerlos.
+        Declaro que he sido informado(a) de mis derechos como titular de la
+        información, en especial a conocer, actualizar, rectificar, solicitar
+        la supresión de mis datos y revocar la autorización, en los términos
+        previstos por la ley, así como de los canales dispuestos por la Empresa
+        para ejercerlos.
     </p>
 
     <p>
-        Así mismo, manifiesto que conozco y acepto la Política de Tratamiento de Datos Personales de
-        <span class="resaltado">ASEOS LA PERFECCIÓN S.A.S.</span>, disponible en
-        <span class="resaltado">https://aseoslaperfeccion.com/</span>, y que para el ejercicio de mis
-        derechos puedo dirigirme a la Gerencia de Talento Humano a través de los siguientes canales:
+        Así mismo, manifiesto que conozco y acepto la Política de Tratamiento
+        de Datos Personales de
+        <span class="resaltado">@EMPRESA_RAZON_SOCIAL</span>,
+        disponible en
+        <span class="resaltado">https://aseoslaperfeccion.com/</span>,
+        y que para el ejercicio de mis derechos puedo dirigirme a la Gerencia
+        de Talento Humano a través de los siguientes canales:
     </p>
 
     <div class="contacto">
@@ -179,19 +213,24 @@
     </div>
 
     <p class="footer">
-        La presente autorización se entiende otorgada desde el momento en que suministro voluntariamente
-        mi información y/o suscribo el presente documento.
+        La presente autorización se entiende otorgada desde el momento en que
+        suministro voluntariamente mi información y/o suscribo el presente
+        documento.
     </p>
 
     <div class="firma">
         <p class="firma-label">Firma:</p>
+
         <img src="@FIRMA" alt="Firma">
+
         <div class="linea-firma"></div>
+
         <p class="firma-datos">
             <span class="resaltado">@NOMBRES</span><br>
             Fecha: <span class="resaltado">@FECHA_FIRMA</span><br>
             E-mail: <span class="resaltado">@EMAIL</span>
         </p>
     </div>
+
 </body>
 </html>

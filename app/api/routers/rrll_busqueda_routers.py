@@ -66,6 +66,13 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     FechaInicio: str | None = None
     FechaUltimoDiaLaborado: str | None = None
 
+    # Empresa contratante del ciclo laboral actual
+    IdVinculacionLaboral: int | None = None
+    IdEmpresaContratante: int | None = None
+    CodigoEmpresa: str | None = None
+    NombreEmpresa: str | None = None
+    LogoEmpresa: str | None = None
+
 
 class RetiroLaboralCreate(BaseModel):
     IdRegistroPersonal: int
@@ -102,7 +109,7 @@ class RetiroLaboralUpdate(BaseModel):
     Activo: Optional[bool] = None
     UsuarioActualizacion: Optional[str] = None
 
-    # Estado del caso RRLL (ABIERTO | ENVIADO_NOMINA | DEVUELTO_NOMINA | CERRADO)
+    # Estado del caso RRLL (PENDIENTE_OPERACIONES | ABIERTO | ENVIADO_NOMINA | DEVUELTO_NOMINA | CERRADO)
     EstadoCasoRRLL: Optional[str] = None
 
 
@@ -181,6 +188,7 @@ def _actualizar_estado_global_trabajador(db: Session, id_registro_personal: int,
 def _validar_estado_caso(valor: str) -> str:
     v = (valor or "").strip().upper()
     estados_validos = (
+        "PENDIENTE_OPERACIONES",
         "ABIERTO",
         "ENVIADO_NOMINA",
         "DEVUELTO_NOMINA",
@@ -191,8 +199,8 @@ def _validar_estado_caso(valor: str) -> str:
         raise HTTPException(
             status_code=400,
             detail=(
-                "EstadoCasoRRLL inválido. Usa ABIERTO, ENVIADO_NOMINA, "
-                "DEVUELTO_NOMINA o CERRADO."
+                "EstadoCasoRRLL inválido. Usa PENDIENTE_OPERACIONES, ABIERTO, "
+                "ENVIADO_NOMINA, DEVUELTO_NOMINA o CERRADO."
             ),
         )
 
@@ -550,7 +558,13 @@ def buscar_trabajador_detalle_por_documento(
           COALESCE(
                 cb."FechaIngreso",
                 rp."FechaIngresoHistorica"
-        )::text                                    AS "FechaInicio"
+        )::text                                    AS "FechaInicio",
+
+          vl_actual."IdVinculacionLaboral"          AS "IdVinculacionLaboral",
+          vl_actual."IdEmpresaContratante"         AS "IdEmpresaContratante",
+          vl_actual."CodigoEmpresa"                AS "CodigoEmpresa",
+          vl_actual."NombreEmpresa"                AS "NombreEmpresa",
+          vl_actual."LogoEmpresa"                  AS "LogoEmpresa"
 
         FROM public."RegistroPersonal" rp
 
@@ -585,6 +599,7 @@ def buscar_trabajador_detalle_por_documento(
               rl."Activo"
             FROM public."RetiroLaboral" rl
             WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+              AND UPPER(COALESCE(rl."EstadoCasoRRLL", '')) <> 'PENDIENTE_OPERACIONES'
             ORDER BY rl."IdRetiroLaboral" DESC
             LIMIT 1
         ) rrll ON true
@@ -616,6 +631,32 @@ def buscar_trabajador_detalle_por_documento(
             ORDER BY cb2."IdContratacionBasica" DESC
             LIMIT 1
         ) cb ON true
+
+        LEFT JOIN LATERAL (
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresa",
+                ec."Nombre" AS "NombreEmpresa",
+                ec."Logo" AS "LogoEmpresa"
+            FROM public."VinculacionLaboral" vl
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+            WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+              AND UPPER(COALESCE(vl."EstadoVinculacion", '')) IN (
+                  'ACTIVO',
+                  'EN_PROCESO'
+              )
+            ORDER BY
+                CASE
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'ACTIVO'
+                    THEN 0
+                    ELSE 1
+                END,
+                vl."NumeroCiclo" DESC NULLS LAST,
+                vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+        ) vl_actual ON true
 
         WHERE rp."IdTipoIdentificacion" = :id_tipo
           AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero
@@ -657,7 +698,14 @@ def validar_retiro_activo(
             "FechaCierre"
         FROM public."RetiroLaboral"
         WHERE "IdRegistroPersonal" = :id_registro_personal
-          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN ('ABIERTO', 'ENVIADO_NOMINA', 'DEVUELTO_NOMINA', 'CERRADO')
+          -- PENDIENTE_OPERACIONES se excluye de forma intencional:
+          -- el retiro existe, pero todavía no ha sido enviado a RRLL.
+          AND UPPER(COALESCE("EstadoCasoRRLL", '')) IN (
+              'ABIERTO',
+              'ENVIADO_NOMINA',
+              'DEVUELTO_NOMINA',
+              'CERRADO'
+          )
         ORDER BY "IdRetiroLaboral" DESC
         LIMIT 1;
     """)
@@ -714,6 +762,8 @@ def crear_retiro_laboral(
             detail=f"Ya existe un retiro ACTIVO para este trabajador (IdRetiroLaboral={active['IdRetiroLaboral']})."
         )
 
+    # PENDIENTE_OPERACIONES debe existir como retiro activo para que
+    # Operaciones pueda asociar Paz y Salvo + RQ, aunque RRLL todavía no lo vea.
     activo_inicial = True
     if estado_caso in ("CERRADO", "ENVIADO_NOMINA"):
         activo_inicial = False
@@ -1028,7 +1078,11 @@ def actualizar_retiro_laboral(
         if fecha_cierre_forzada is None:
             fecha_cierre_forzada = _ahora_colombia()
 
-    elif nuevo_estado_caso in ("ABIERTO", "DEVUELTO_NOMINA"):
+    elif nuevo_estado_caso in (
+        "PENDIENTE_OPERACIONES",
+        "ABIERTO",
+        "DEVUELTO_NOMINA",
+    ):
         activo_forzado = True
 
     if activo_forzado is True:
@@ -1055,6 +1109,12 @@ def actualizar_retiro_laboral(
 
     def _aplicar_estado_global_si_corresponde():
         if not nuevo_estado_caso:
+            return
+
+        if nuevo_estado_caso == "PENDIENTE_OPERACIONES":
+            # El estado global OPERACIONES todavía no se parametriza aquí.
+            # Mientras el RQ siga en manos de Operaciones, no cambiamos
+            # RegistroPersonal.IdEstadoProceso para no inventar un ID.
             return
 
         if nuevo_estado_caso == "ABIERTO":
@@ -1205,28 +1265,32 @@ def actualizar_retiro_laboral(
                         }
                     )
 
-                # La fecha de envío de Operaciones corresponde al momento en
-                # que el paz y salvo queda cargado, ya sea manualmente o desde
-                # el futuro módulo de Operaciones.
-                #
-                # Se conserva la primera fecha registrada para que posteriores
-                # actualizaciones de RRLL no cambien la fecha original de envío.
-                db.execute(
-                    text("""
-                        UPDATE public."RetiroLaboral"
-                        SET
-                            "FechaEnvioOperaciones" = COALESCE(
-                                "FechaEnvioOperaciones",
-                                :fecha_envio_operaciones
-                            ),
-                            "FechaActualizacion" = CURRENT_TIMESTAMP
-                        WHERE "IdRetiroLaboral" = :id_retiro_laboral;
-                    """),
-                    {
-                        "id_retiro_laboral": row["IdRetiroLaboral"],
-                        "fecha_envio_operaciones": _ahora_colombia(),
-                    },
-                )
+                # FechaEnvioOperaciones significa que Operaciones ya entregó
+                # formalmente el caso a RRLL. No debe registrarse mientras el
+                # caso siga en PENDIENTE_OPERACIONES.
+                estado_resultante = str(
+                    row.get("EstadoCasoRRLL") or ""
+                ).strip().upper()
+
+                if estado_resultante != "PENDIENTE_OPERACIONES":
+                    # Se conserva la primera fecha registrada para que
+                    # actualizaciones posteriores no cambien la fecha original.
+                    db.execute(
+                        text("""
+                            UPDATE public."RetiroLaboral"
+                            SET
+                                "FechaEnvioOperaciones" = COALESCE(
+                                    "FechaEnvioOperaciones",
+                                    :fecha_envio_operaciones
+                                ),
+                                "FechaActualizacion" = CURRENT_TIMESTAMP
+                            WHERE "IdRetiroLaboral" = :id_retiro_laboral;
+                        """),
+                        {
+                            "id_retiro_laboral": row["IdRetiroLaboral"],
+                            "fecha_envio_operaciones": _ahora_colombia(),
+                        },
+                    )
 
         _aplicar_estado_global_si_corresponde()
         db.commit()

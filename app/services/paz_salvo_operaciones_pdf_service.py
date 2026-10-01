@@ -929,7 +929,7 @@ def _tabla_entrega_elementos(
     datos,
     estilos,
 ):
-    filas = [
+    filas_disponibles = [
         (
             "ENTREGA DE LOCKER",
             datos.get("Locker"),
@@ -960,6 +960,16 @@ def _tabla_entrega_elementos(
         ),
     ]
 
+    # El frontend envía "NO APLICA" para los elementos que no corresponden
+    # al cargo o a la clasificación del trabajador. Esos valores se
+    # conservan por compatibilidad con la estructura actual, pero no deben
+    # mostrarse en el PDF oficial.
+    filas = [
+        (etiqueta, valor)
+        for etiqueta, valor in filas_disponibles
+        if _texto(valor).upper() != "NO APLICA"
+    ]
+
     contenido = [
         [
             _parrafo(
@@ -970,22 +980,36 @@ def _tabla_entrega_elementos(
         ]
     ]
 
-    contenido.extend(
-        [
+    if filas:
+        contenido.extend(
+            [
+                [
+                    _parrafo(
+                        etiqueta,
+                        estilos["etiqueta"],
+                    ),
+                    _parrafo(
+                        valor,
+                        estilos["valor"],
+                        "SIN INFORMACIÓN",
+                    ),
+                ]
+                for etiqueta, valor in filas
+            ]
+        )
+    else:
+        contenido.append(
             [
                 _parrafo(
-                    etiqueta,
+                    "ELEMENTOS APLICABLES",
                     estilos["etiqueta"],
                 ),
                 _parrafo(
-                    valor,
+                    "SIN ELEMENTOS CONFIGURADOS",
                     estilos["valor"],
-                    "SIN INFORMACIÓN",
                 ),
             ]
-            for etiqueta, valor in filas
-        ]
-    )
+        )
 
     observaciones = _texto(
         datos.get("ObservacionesEntrega"),

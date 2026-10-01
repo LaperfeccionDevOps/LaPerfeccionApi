@@ -185,6 +185,7 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
                     "ExperienciaLaboral",
                     "Documentacion",
                     "DatosAdicionales",
+                    "IdEmpresaContratante",
                 }
             )
         )
@@ -194,6 +195,100 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
 
         db.add(nuevo)
         db.flush()
+
+        id_empresa_contratante = getattr(
+            payload,
+            "IdEmpresaContratante",
+            None,
+        )
+        id_vinculacion_nueva = None
+
+        # Compatibilidad:
+        # - Los flujos existentes que no envían empresa continúan igual.
+        # - El flujo nuevo de Selección crea su primer ciclo laboral.
+        if id_empresa_contratante is not None:
+            empresa = db.execute(
+                text(
+                    """
+                    SELECT "IdEmpresaContratante"
+                    FROM public."EmpresaContratante"
+                    WHERE "IdEmpresaContratante" = :id_empresa
+                      AND "Activo" = TRUE
+                    LIMIT 1;
+                    """
+                ),
+                {
+                    "id_empresa": id_empresa_contratante,
+                },
+            ).mappings().first()
+
+            if not empresa:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="La empresa contratante seleccionada no existe o no está activa.",
+                )
+
+            vinculacion_nueva = db.execute(
+                text(
+                    """
+                    INSERT INTO public."VinculacionLaboral"
+                    (
+                        "IdRegistroPersonal",
+                        "NumeroCiclo",
+                        "TipoVinculacion",
+                        "EstadoVinculacion",
+                        "FechaInicioProceso",
+                        "FechaIngreso",
+                        "FechaRetiro",
+                        "IdCargo",
+                        "IdCliente",
+                        "Salario",
+                        "IdTipoContrato",
+                        "FechaCreacion",
+                        "FechaActualizacion",
+                        "UsuarioActualizacion",
+                        "IdEmpresaContratante"
+                    )
+                    VALUES
+                    (
+                        :id_registro,
+                        1,
+                        'NUEVO',
+                        'EN_PROCESO',
+                        NOW(),
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NOW(),
+                        NOW(),
+                        :usuario,
+                        :id_empresa
+                    )
+                    RETURNING "IdVinculacionLaboral";
+                    """
+                ),
+                {
+                    "id_registro": nuevo.IdRegistroPersonal,
+                    "usuario": (
+                        getattr(payload, "UsuarioActualizacion", None)
+                        or "aspirante"
+                    ),
+                    "id_empresa": id_empresa_contratante,
+                },
+            ).mappings().first()
+
+            if not vinculacion_nueva:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="No fue posible crear la vinculación laboral inicial.",
+                )
+
+            id_vinculacion_nueva = int(
+                vinculacion_nueva["IdVinculacionLaboral"]
+            )
 
         nucleo_familiar = [
             NucleoFamiliarORM(
@@ -206,6 +301,17 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
         ]
         nuevo.nucleo_familiar = nucleo_familiar
 
+        if id_vinculacion_nueva is not None:
+            for nf_obj in nucleo_familiar:
+                db.add(nf_obj)
+                db.flush()
+                _asignar_vinculacion(
+                    db,
+                    "NucleoFamiliar",
+                    nf_obj.IdNucleoFamiliar,
+                    id_vinculacion_nueva,
+                )
+
         referencias = [
             ReferenciaORM(
                 **{
@@ -217,6 +323,17 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
         ]
         nuevo.referencias = referencias
 
+        if id_vinculacion_nueva is not None:
+            for referencia_obj in referencias:
+                db.add(referencia_obj)
+                db.flush()
+                _asignar_vinculacion(
+                    db,
+                    "Referencia",
+                    referencia_obj.IdReferencia,
+                    id_vinculacion_nueva,
+                )
+
         experiencia_laboral = [
             ExperienciaLaboralORM(
                 **{
@@ -227,6 +344,17 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
             for el in payload.ExperienciaLaboral
         ]
         nuevo.experiencia_laboral = experiencia_laboral
+
+        if id_vinculacion_nueva is not None:
+            for experiencia_obj in experiencia_laboral:
+                db.add(experiencia_obj)
+                db.flush()
+                _asignar_vinculacion(
+                    db,
+                    "ExperienciaLaboral",
+                    experiencia_obj.IdExperienciaLaboral,
+                    id_vinculacion_nueva,
+                )
 
         from domain.models.aspirante import RelacionTipoDocumentacionORM
 
@@ -250,6 +378,15 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
                 IdDocumento=doc_obj.IdDocumento,
             )
             db.add(relacion)
+
+            if id_vinculacion_nueva is not None:
+                db.flush()
+                _asignar_vinculacion(
+                    db,
+                    "RelacionTipoDocumentacion",
+                    relacion.IdRelacion,
+                    id_vinculacion_nueva,
+                )
 
         if payload.DatosAdicionales:
             datos_adicionales_dict = payload.DatosAdicionales.dict()
@@ -331,6 +468,7 @@ def actualizar_registro(
                 "ExperienciaLaboral",
                 "Documentacion",
                 "DatosAdicionales",
+                "IdEmpresaContratante",
             }
         ).items():
             setattr(registro, key, value)

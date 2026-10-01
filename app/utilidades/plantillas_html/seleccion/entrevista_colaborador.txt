@@ -105,6 +105,7 @@
             body {
                 margin: 0;
             }
+
             .page {
                 border: none;
             }
@@ -113,12 +114,26 @@
 </head>
 
 <body>
+
 <div class="page">
 
     <!-- ENCABEZADO -->
     <div class="header">
-        <img class="img-logo" style="margin-right:300px" src="@LOGO" alt="LOGO IZQUIERDA">
-        <!--<img class="img-logo" src="@LOGO2" alt="LOGO DERECHA">-->
+
+        <!--
+            El backend reemplaza @LOGO según la empresa
+            asociada a la VinculacionLaboral:
+
+            ALP -> Aseos La Perfección
+            MI  -> Mantener Ingeniería
+        -->
+        <img
+            class="img-logo"
+            style="margin-right:300px"
+            src="@LOGO"
+            alt="@EMPRESA_NOMBRE"
+        >
+
     </div>
 
     <div class="title">
@@ -130,33 +145,43 @@
         <tr>
             <td class="label">NOMBRES:</td>
             <td>@NOMBRES</td>
+
             <td class="label">DOCUMENTO:</td>
             <td>@DOCUMENTO</td>
         </tr>
+
         <tr>
             <td class="label">BARRIO:</td>
             <td>@BARRIO</td>
+
             <td class="label">LOCALIDAD:</td>
             <td>@LOCALIDAD</td>
         </tr>
+
         <tr>
             <td class="label">CARGO:</td>
             <td>@CARGO</td>
+
             <td class="label">EDAD:</td>
             <td>@EDAD</td>
         </tr>
+
         <tr>
             <td class="label">EST. CIVIL:</td>
             <td>@ESTADO_CIVIL</td>
+
             <td class="label">ESTUDIA:</td>
             <td>@ESTUDIA</td>
         </tr>
+
         <tr>
             <td class="label">HIJOS:</td>
             <td>@HIJOS</td>
+
             <td class="label">CELULAR:</td>
             <td>@CELULAR</td>
         </tr>
+
         <tr>
             <td class="label">EVALUADOR (A):</td>
             <td colspan="3">@EVALUADOR</td>
@@ -170,25 +195,81 @@
                 ASPECTOS GENERALES DE LA ENTREVISTA – OPERATIVO
             </td>
         </tr>
+
         <tr>
             <td colspan="4" class="textarea aspectos-generales">
-               <span class="bold">Núcleo Familiar:</span><br>
-                @NUCLEO_FAMILIAR<br><br>
 
-                <span class="bold">Aspecto Académico:</span><br>
-                @ASPECTOS_ACADEMICOS<br><br>
+                <span class="bold">
+                    Núcleo Familiar:
+                </span>
+                <br>
 
-                <span class="bold">Aspecto Laboral:</span><br>
-                @EXPERIENCIA<br>
-                <span class="bold">Ha trabajado en ALP?</span> @HA_TRABAJADO_EN_ALP<br>
-                <span class="bold">Validación AM:</span> @VALIDACION_AM<br>
-                <span class="bold">EPS:</span> @EPS<br><br>
+                @NUCLEO_FAMILIAR
 
-                <span class="bold">Aspecto Personal:</span>
-                <p>- FORTALEZAS: @FORTALEZAS</p>
-                <p>- ÁREAS DE MEJORA: @AREAS_DE_MEJORA</p><br>
+                <br><br>
 
-                <span class="bold">Concepto - Prueba Física:</span> @PRUEBA_FISICA
+                <span class="bold">
+                    Aspecto Académico:
+                </span>
+                <br>
+
+                @ASPECTOS_ACADEMICOS
+
+                <br><br>
+
+                <span class="bold">
+                    Aspecto Laboral:
+                </span>
+                <br>
+
+                @EXPERIENCIA
+
+                <br>
+
+                <span class="bold">
+                    Ha trabajado en ALP?
+                </span>
+
+                @HA_TRABAJADO_EN_ALP
+
+                <br>
+
+                <span class="bold">
+                    Validación AM:
+                </span>
+
+                @VALIDACION_AM
+
+                <br>
+
+                <span class="bold">
+                    EPS:
+                </span>
+
+                @EPS
+
+                <br><br>
+
+                <span class="bold">
+                    Aspecto Personal:
+                </span>
+
+                <p>
+                    - FORTALEZAS: @FORTALEZAS
+                </p>
+
+                <p>
+                    - ÁREAS DE MEJORA: @AREAS_DE_MEJORA
+                </p>
+
+                <br>
+
+                <span class="bold">
+                    Concepto - Prueba Física:
+                </span>
+
+                @PRUEBA_FISICA
+
             </td>
         </tr>
     </table>
@@ -196,15 +277,27 @@
     <!-- CONCEPTO FINAL -->
     <table class="footer">
         <tr>
-            <td class="label">CONCEPTO FINAL:</td>
-            <td class="concepto">@CONCEPTO_FINAL</td>
+            <td class="label">
+                CONCEPTO FINAL:
+            </td>
+
+            <td class="concepto">
+                @CONCEPTO_FINAL
+            </td>
         </tr>
+
         <tr>
-            <td class="label">OBSERVACIONES:</td>
-            <td>@OBSERVACIONES</td>
+            <td class="label">
+                OBSERVACIONES:
+            </td>
+
+            <td>
+                @OBSERVACIONES
+            </td>
         </tr>
     </table>
 
 </div>
+
 </body>
 </html>
