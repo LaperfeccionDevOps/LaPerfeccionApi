@@ -382,6 +382,10 @@ def _get_trabajador_para_portal(
                 rp."IdEstadoProceso",
                 rp."IdTipoEps",
                 te."Descripcion" AS "Eps",
+                vl_actual."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresa",
+                ec."Nombre" AS "NombreEmpresa",
+                ec."Logo" AS "LogoEmpresa",
                 EXISTS (
                     SELECT 1
                     FROM "VinculacionLaboral" vl
@@ -393,6 +397,23 @@ def _get_trabajador_para_portal(
             FROM "RegistroPersonal" rp
             LEFT JOIN "TipoEps" te
                 ON te."IdTipoEps" = rp."IdTipoEps"
+            LEFT JOIN LATERAL (
+                SELECT
+                    vl."IdVinculacionLaboral",
+                    vl."IdEmpresaContratante"
+                FROM "VinculacionLaboral" vl
+                WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND UPPER(
+                      COALESCE(vl."EstadoVinculacion", '')
+                  ) = 'ACTIVO'
+                ORDER BY
+                    vl."NumeroCiclo" DESC NULLS LAST,
+                    vl."IdVinculacionLaboral" DESC
+                LIMIT 1
+            ) vl_actual
+                ON TRUE
+            LEFT JOIN "EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl_actual."IdEmpresaContratante"
             WHERE rp."NumeroIdentificacion" = :numero
             LIMIT 1;
             """
@@ -593,6 +614,14 @@ def login_trabajador(
         ),
         "nombre_completo": nombre_completo,
         "eps": trabajador["Eps"] or "",
+        "id_empresa_contratante": (
+            int(trabajador["IdEmpresaContratante"])
+            if trabajador["IdEmpresaContratante"] is not None
+            else None
+        ),
+        "codigo_empresa": trabajador["CodigoEmpresa"] or "",
+        "empresa_contratante": trabajador["NombreEmpresa"] or "",
+        "logo_empresa": trabajador["LogoEmpresa"] or "",
         "message": "Ingreso al Portal del Trabajador exitoso",
     }
 

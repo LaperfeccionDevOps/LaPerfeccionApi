@@ -613,6 +613,126 @@ def obtener_trabajador_o_error(
     )
 
 
+def obtener_vinculacion_laboral_activa_unica(
+    db: Session,
+    id_registro_personal: int,
+) -> int | None:
+    """
+    Obtiene el ciclo laboral ACTIVO cuando existe uno y solo uno.
+
+    No infiere empresa por cliente, cargo ni por la última vinculación.
+    Si no existe una vinculación activa o hay más de una, retorna None
+    para evitar asociar el proceso disciplinario a un ciclo incorrecto.
+    """
+
+    vinculaciones = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    vl."IdVinculacionLaboral"
+                FROM public."VinculacionLaboral" vl
+                WHERE
+                    vl."IdRegistroPersonal" = :id_registro_personal
+                    AND UPPER(
+                        COALESCE(vl."EstadoVinculacion", '')
+                    ) = 'ACTIVO'
+                ORDER BY vl."IdVinculacionLaboral" DESC
+                LIMIT 2
+                """
+            ),
+            {
+                "id_registro_personal": id_registro_personal,
+            },
+        )
+        .mappings()
+        .all()
+    )
+
+    if len(vinculaciones) != 1:
+        return None
+
+    return int(
+        vinculaciones[0]["IdVinculacionLaboral"]
+    )
+
+
+def obtener_empresa_proceso_disciplinario(
+    db: Session,
+    id_proceso: int,
+) -> dict:
+    """
+    Devuelve la empresa contratante del ciclo exacto guardado en el
+    proceso disciplinario. Los procesos históricos sin vínculo quedan
+    explícitamente sin empresa, sin aplicar fallbacks.
+    """
+
+    empresa = (
+        db.execute(
+            text(
+                """
+                SELECT
+                    pd."IdVinculacionLaboral",
+                    vl."IdEmpresaContratante",
+                    ec."Codigo" AS "CodigoEmpresa",
+                    ec."Nombre" AS "NombreEmpresa",
+                    ec."Logo" AS "LogoEmpresa"
+                FROM public."ProcesoDisciplinario" pd
+                LEFT JOIN public."VinculacionLaboral" vl
+                    ON vl."IdVinculacionLaboral"
+                    = pd."IdVinculacionLaboral"
+                LEFT JOIN public."EmpresaContratante" ec
+                    ON ec."IdEmpresaContratante"
+                    = vl."IdEmpresaContratante"
+                WHERE
+                    pd."IdProcesoDisciplinario" = :id_proceso
+                LIMIT 1
+                """
+            ),
+            {
+                "id_proceso": id_proceso,
+            },
+        )
+        .mappings()
+        .first()
+    )
+
+    if not empresa:
+        return {
+            "IdVinculacionLaboral": None,
+            "IdEmpresaContratante": None,
+            "CodigoEmpresa": None,
+            "NombreEmpresa": None,
+            "LogoEmpresa": None,
+        }
+
+    return dict(empresa)
+
+
+def serializar_proceso_con_empresa(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+) -> dict:
+    """
+    Serializa el proceso conservando sus campos actuales y agrega la
+    empresa contratante del ciclo laboral exacto asociado al proceso.
+    Los procesos históricos sin IdVinculacionLaboral permanecen sin empresa.
+    """
+    proceso_serializado = {
+        clave: valor
+        for clave, valor in vars(proceso).items()
+        if clave != "_sa_instance_state"
+    }
+
+    empresa_proceso = obtener_empresa_proceso_disciplinario(
+        db=db,
+        id_proceso=proceso.IdProcesoDisciplinario,
+    )
+
+    proceso_serializado.update(empresa_proceso)
+    return proceso_serializado
+
+
 def validar_trabajador_contratado(
     trabajador: dict,
 ) -> None:
@@ -1180,6 +1300,15 @@ def crear_proceso_disciplinario(
             or "RRLL"
         )
 
+    id_vinculacion_laboral = (
+        obtener_vinculacion_laboral_activa_unica(
+            db=db,
+            id_registro_personal=(
+                data.IdRegistroPersonal
+            ),
+        )
+    )
+
     nuevo = ProcesoDisciplinario(
         IdRegistroPersonal=(
             data.IdRegistroPersonal
@@ -1199,6 +1328,27 @@ def crear_proceso_disciplinario(
         db.add(
             nuevo
         )
+        db.flush()
+
+        if id_vinculacion_laboral is not None:
+            db.execute(
+                text(
+                    """
+                    UPDATE public."ProcesoDisciplinario"
+                    SET "IdVinculacionLaboral" = :id_vinculacion_laboral
+                    WHERE "IdProcesoDisciplinario" = :id_proceso
+                    """
+                ),
+                {
+                    "id_vinculacion_laboral": (
+                        id_vinculacion_laboral
+                    ),
+                    "id_proceso": (
+                        nuevo.IdProcesoDisciplinario
+                    ),
+                },
+            )
+
         db.commit()
         db.refresh(
             nuevo
@@ -1226,11 +1376,7 @@ def crear_proceso_disciplinario(
 @router.get(
     "/trabajador/"
     "{id_registro_personal}/"
-    "borrador-operaciones",
-    response_model=(
-        ProcesoDisciplinarioResponse
-        | None
-    ),
+    "borrador-operaciones"
 )
 def obtener_borrador_operaciones_trabajador(
     id_registro_personal: int,
@@ -1244,11 +1390,19 @@ def obtener_borrador_operaciones_trabajador(
         ),
     )
 
-    return obtener_borrador_operaciones(
+    proceso = obtener_borrador_operaciones(
         db=db,
         id_registro_personal=(
             id_registro_personal
         ),
+    )
+
+    if proceso is None:
+        return None
+
+    return serializar_proceso_con_empresa(
+        db=db,
+        proceso=proceso,
     )
 
 
@@ -1290,7 +1444,13 @@ def listar_procesos_por_trabajador(
         .all()
     )
 
-    return procesos
+    return [
+        serializar_proceso_con_empresa(
+            db=db,
+            proceso=proceso,
+        )
+        for proceso in procesos
+    ]
 
 
 @router.get(
@@ -1475,6 +1635,11 @@ def obtener_historial_disciplinario_trabajador(
                 .first()
             )
 
+        empresa_proceso = obtener_empresa_proceso_disciplinario(
+            db=db,
+            id_proceso=proceso.IdProcesoDisciplinario,
+        )
+
         historial.append(
             {
                 "IdProcesoDisciplinario": (
@@ -1494,6 +1659,7 @@ def obtener_historial_disciplinario_trabajador(
                 "OrigenProceso": (
                     proceso.OrigenProceso
                 ),
+                **empresa_proceso,
                 "TieneCitacion": (
                     citacion is not None
                 ),
@@ -2164,6 +2330,10 @@ def obtener_respuesta_rrll_para_operaciones(
             "FechaActualizacion": (
                 proceso.FechaActualizacion
             ),
+            **obtener_empresa_proceso_disciplinario(
+                db=db,
+                id_proceso=id_proceso,
+            ),
         },
         "Cierre": {
             "IdCierreProcesoDisciplinario": (
@@ -2272,8 +2442,13 @@ def obtener_expediente_disciplinario(
         .all()
     )
 
+    proceso_serializado = serializar_proceso_con_empresa(
+        db=db,
+        proceso=proceso,
+    )
+
     return {
-        "Proceso": proceso,
+        "Proceso": proceso_serializado,
         "Citacion": citacion,
         "Descargo": descargo,
         "Cierre": cierre,
@@ -2404,19 +2579,21 @@ def generar_carta_citacion_descargos(
 
 
 @router.get(
-    "/{id_proceso}",
-    response_model=(
-        ProcesoDisciplinarioResponse
-    ),
+    "/{id_proceso}"
 )
 def obtener_proceso_disciplinario(
     id_proceso: int,
     db: Session = Depends(get_db),
     current=Depends(require_rrll_o_operaciones),
 ):
-    return obtener_proceso_o_error(
+    proceso = obtener_proceso_o_error(
         db=db,
         id_proceso=id_proceso,
+    )
+
+    return serializar_proceso_con_empresa(
+        db=db,
+        proceso=proceso,
     )
 
 

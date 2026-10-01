@@ -66,6 +66,13 @@ class TrabajadorBusquedaDetalleOut(BaseModel):
     FechaInicio: str | None = None
     FechaUltimoDiaLaborado: str | None = None
 
+    # Empresa contratante del ciclo laboral actual
+    IdVinculacionLaboral: int | None = None
+    IdEmpresaContratante: int | None = None
+    CodigoEmpresa: str | None = None
+    NombreEmpresa: str | None = None
+    LogoEmpresa: str | None = None
+
 
 class RetiroLaboralCreate(BaseModel):
     IdRegistroPersonal: int
@@ -551,7 +558,13 @@ def buscar_trabajador_detalle_por_documento(
           COALESCE(
                 cb."FechaIngreso",
                 rp."FechaIngresoHistorica"
-        )::text                                    AS "FechaInicio"
+        )::text                                    AS "FechaInicio",
+
+          vl_actual."IdVinculacionLaboral"          AS "IdVinculacionLaboral",
+          vl_actual."IdEmpresaContratante"         AS "IdEmpresaContratante",
+          vl_actual."CodigoEmpresa"                AS "CodigoEmpresa",
+          vl_actual."NombreEmpresa"                AS "NombreEmpresa",
+          vl_actual."LogoEmpresa"                  AS "LogoEmpresa"
 
         FROM public."RegistroPersonal" rp
 
@@ -618,6 +631,32 @@ def buscar_trabajador_detalle_por_documento(
             ORDER BY cb2."IdContratacionBasica" DESC
             LIMIT 1
         ) cb ON true
+
+        LEFT JOIN LATERAL (
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresa",
+                ec."Nombre" AS "NombreEmpresa",
+                ec."Logo" AS "LogoEmpresa"
+            FROM public."VinculacionLaboral" vl
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+            WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+              AND UPPER(COALESCE(vl."EstadoVinculacion", '')) IN (
+                  'ACTIVO',
+                  'EN_PROCESO'
+              )
+            ORDER BY
+                CASE
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'ACTIVO'
+                    THEN 0
+                    ELSE 1
+                END,
+                vl."NumeroCiclo" DESC NULLS LAST,
+                vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+        ) vl_actual ON true
 
         WHERE rp."IdTipoIdentificacion" = :id_tipo
           AND REPLACE(REPLACE(TRIM(rp."NumeroIdentificacion"),'.',''),' ','') = :numero

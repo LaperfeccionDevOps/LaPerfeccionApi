@@ -293,6 +293,9 @@ def _incapacidad_a_dict(fila):
             f'{fila["Nombres"] or ""} {fila["Apellidos"] or ""}'
         ).strip(),
         "eps": fila["Eps"],
+        "empresa_contratante": fila["EmpresaContratante"],
+        "codigo_empresa": fila["CodigoEmpresa"],
+        "id_empresa_contratante": fila["IdEmpresaContratante"],
         "tipo_incapacidad": fila["TipoIncapacidad"],
         "descripcion_tipo": fila["DescripcionTipoIncapacidad"],
         "fecha_inicio": fila["FechaInicio"],
@@ -1766,6 +1769,9 @@ def listar_incapacidades_nomina(
             rp."Nombres",
             rp."Apellidos",
             COALESCE(te."Descripcion", 'No registrada') AS "Eps",
+            ec."Nombre" AS "EmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa",
+            vl_actual."IdEmpresaContratante" AS "IdEmpresaContratante",
             i."TipoIncapacidad",
             i."DescripcionTipoIncapacidad",
             i."FechaInicio",
@@ -1796,6 +1802,27 @@ def listar_incapacidades_nomina(
             ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
         LEFT JOIN public."TipoEps" te
             ON te."IdTipoEps" = rp."IdTipoEps"
+        LEFT JOIN LATERAL (
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante"
+            FROM public."VinculacionLaboral" vl
+            WHERE
+                vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            ORDER BY
+                CASE
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'ACTIVO'
+                        THEN 0
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'EN_PROCESO'
+                        THEN 1
+                    ELSE 2
+                END,
+                vl."NumeroCiclo" DESC NULLS LAST,
+                vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+        ) vl_actual ON TRUE
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl_actual."IdEmpresaContratante"
         LEFT JOIN LATERAL (
             SELECT
                 EXISTS (
@@ -1838,6 +1865,9 @@ def listar_incapacidades_nomina(
             rp."Nombres",
             rp."Apellidos",
             te."Descripcion",
+            ec."Nombre",
+            ec."Codigo",
+            vl_actual."IdEmpresaContratante",
             i."TipoIncapacidad",
             i."DescripcionTipoIncapacidad",
             i."FechaInicio",
@@ -1899,6 +1929,9 @@ def obtener_detalle_incapacidad_nomina(
             rp."Nombres",
             rp."Apellidos",
             COALESCE(te."Descripcion", 'No registrada') AS "Eps",
+            ec."Nombre" AS "EmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa",
+            vl_actual."IdEmpresaContratante" AS "IdEmpresaContratante",
             i."TipoIncapacidad",
             i."DescripcionTipoIncapacidad",
             i."FechaInicio",
@@ -1968,6 +2001,27 @@ def obtener_detalle_incapacidad_nomina(
             ON rp."IdRegistroPersonal" = i."IdRegistroPersonal"
         LEFT JOIN public."TipoEps" te
             ON te."IdTipoEps" = rp."IdTipoEps"
+        LEFT JOIN LATERAL (
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante"
+            FROM public."VinculacionLaboral" vl
+            WHERE
+                vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+            ORDER BY
+                CASE
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'ACTIVO'
+                        THEN 0
+                    WHEN UPPER(COALESCE(vl."EstadoVinculacion", '')) = 'EN_PROCESO'
+                        THEN 1
+                    ELSE 2
+                END,
+                vl."NumeroCiclo" DESC NULLS LAST,
+                vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+        ) vl_actual ON TRUE
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl_actual."IdEmpresaContratante"
         WHERE
             i."IdIncapacidadTrabajador" = :id_incapacidad
             AND i."Activo" = TRUE

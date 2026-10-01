@@ -747,6 +747,11 @@ def listar_bandeja_retiros_rrll(db: Session = Depends(get_db)):
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
                 rl."IdCliente",
+                rl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresa",
+                ec."Nombre" AS "NombreEmpresa",
+                ec."Logo" AS "LogoEmpresa",
                 rp."NumeroIdentificacion",
                 rp."Nombres",
                 rp."Apellidos",
@@ -776,6 +781,10 @@ def listar_bandeja_retiros_rrll(db: Session = Depends(get_db)):
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+            LEFT JOIN public."VinculacionLaboral" vl
+                ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
             LEFT JOIN public."Cliente" c
                 ON c."IdCliente" = rl."IdCliente"
             LEFT JOIN public."MotivoRetiro" mr
@@ -915,6 +924,11 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
                rl."IdRetiroLaboral",
         rl."IdRegistroPersonal",
         rl."IdCliente",
+        rl."IdVinculacionLaboral",
+        vl."IdEmpresaContratante",
+        ec."Codigo" AS "CodigoEmpresa",
+        ec."Nombre" AS "NombreEmpresa",
+        ec."Logo" AS "LogoEmpresa",
         c."Nombre" AS "NombreCliente",
         rl."IdMotivoRetiro",
         mr."Nombre" AS "NombreMotivoRetiro",
@@ -935,6 +949,10 @@ def consultar_retiro_laboral(id_retiro_laboral: int, db: Session = Depends(get_d
         rl."FechaActualizacion",
         rl."UsuarioActualizacion"
     FROM public."RetiroLaboral" rl
+    LEFT JOIN public."VinculacionLaboral" vl
+        ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+    LEFT JOIN public."EmpresaContratante" ec
+        ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
     LEFT JOIN public."Cliente" c
         ON rl."IdCliente" = c."IdCliente"
     LEFT JOIN public."MotivoRetiro" mr
