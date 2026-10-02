@@ -444,7 +444,7 @@ def _construir_contenido_correo(
         f"Documento: {documento}\n\n"
         f"{introduccion}\n\n"
         f"Fecha: {fecha}\n"
-        f"Hora: {hora_inicio} a {hora_fin}\n"
+        f"Hora de citación: {hora_inicio}\n"
         f"Modalidad: {modalidad}\n"
         f"{detalle_lugar_texto}\n"
         f"Motivo: {motivo}\n"
@@ -522,7 +522,7 @@ def _construir_contenido_correo(
 
     filas_html = [
         ("Fecha", fecha),
-        ("Hora", f"{hora_inicio} a {hora_fin}"),
+        ("Hora de citación", hora_inicio),
         ("Modalidad", modalidad),
         ("Motivo", motivo),
     ]
