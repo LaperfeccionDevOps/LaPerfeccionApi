@@ -4397,6 +4397,188 @@ def descargar_archivo_documento(
 
 
 @router.delete(
+    "/rrll/acta-descargos-generada/{id_documento}",
+)
+def eliminar_acta_descargos_generada_rrll(
+    id_documento: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Elimina únicamente el Acta de Descargos GENERADA por RRLL.
+
+    Esta operación NO modifica:
+    - El Descargo del trabajador.
+    - Las evidencias aportadas por el trabajador.
+    - Las evidencias de Operaciones.
+    - El Acta de Descargos firmada.
+    - Los documentos de Carpeta Digital.
+
+    Permite que RRLL elimine el acta generada para corregir la
+    información y posteriormente genere una nueva versión.
+
+    El documento solo puede eliminarse mientras el proceso no esté
+    cerrado.
+    """
+
+    documento = obtener_documento_o_error(
+        db=db,
+        id_documento=id_documento,
+    )
+
+    tipo_documento = normalizar_tipo_documento(
+        documento.TipoDocumento
+    )
+
+    if tipo_documento != "CARTA_DESCARGOS_GENERADA":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "Este endpoint solo permite eliminar el Acta de "
+                    "Descargos generada por Relaciones Laborales."
+                ),
+                "TipoDocumento": documento.TipoDocumento,
+                "IdDocumentoProcesoDisciplinario": (
+                    documento.IdDocumentoProcesoDisciplinario
+                ),
+            },
+        )
+
+    proceso = obtener_proceso_o_error(
+        db=db,
+        id_proceso=documento.IdProcesoDisciplinario,
+    )
+
+    estado_proceso = str(
+        proceso.EstadoProceso or ""
+    ).strip().upper()
+
+    if estado_proceso == "CERRADO":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "mensaje": (
+                    "El proceso disciplinario ya está cerrado y el "
+                    "Acta de Descargos generada es únicamente de consulta."
+                ),
+                "IdProcesoDisciplinario": (
+                    proceso.IdProcesoDisciplinario
+                ),
+                "EstadoProceso": proceso.EstadoProceso,
+            },
+        )
+
+    nombre_archivo = str(
+        documento.NombreArchivo or ""
+    ).strip()
+
+    ruta_original = construir_ruta_absoluta_documento(
+        documento
+    )
+
+    ruta_temporal = None
+
+    # Primero se mueve temporalmente el archivo físico. Si la operación
+    # de BD falla, se restaura a su ubicación original.
+    if ruta_original:
+        marca_tiempo = datetime.now(
+            timezone.utc
+        ).strftime(
+            "%Y%m%d%H%M%S%f"
+        )
+
+        ruta_temporal = ruta_original.with_name(
+            f".eliminando_acta_descargos_"
+            f"{documento.IdDocumentoProcesoDisciplinario}_"
+            f"{marca_tiempo}_"
+            f"{ruta_original.name}"
+        )
+
+        try:
+            ruta_original.rename(
+                ruta_temporal
+            )
+        except OSError as error:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "mensaje": (
+                        "No fue posible preparar el archivo físico "
+                        "del Acta de Descargos para su eliminación."
+                    ),
+                    "IdDocumentoProcesoDisciplinario": (
+                        documento.IdDocumentoProcesoDisciplinario
+                    ),
+                },
+            ) from error
+
+    try:
+        db.delete(documento)
+        db.commit()
+
+    except SQLAlchemyError as error:
+        db.rollback()
+
+        if (
+            ruta_temporal
+            and ruta_temporal.exists()
+            and ruta_original
+            and not ruta_original.exists()
+        ):
+            try:
+                ruta_temporal.rename(
+                    ruta_original
+                )
+            except OSError:
+                pass
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "mensaje": (
+                    "No fue posible eliminar el registro del Acta de "
+                    "Descargos generada."
+                ),
+                "IdDocumentoProcesoDisciplinario": id_documento,
+            },
+        ) from error
+
+    archivo_fisico_eliminado = (
+        ruta_temporal is None
+    )
+
+    advertencia = None
+
+    if ruta_temporal:
+        try:
+            ruta_temporal.unlink(
+                missing_ok=True
+            )
+            archivo_fisico_eliminado = True
+        except OSError:
+            archivo_fisico_eliminado = False
+            advertencia = (
+                "El registro del Acta fue eliminado, pero quedó "
+                "un archivo temporal pendiente de limpieza."
+            )
+
+    return {
+        "success": True,
+        "message": (
+            "Acta de Descargos generada eliminada correctamente. "
+            "Puede generarse una nueva versión."
+        ),
+        "IdDocumentoProcesoDisciplinario": id_documento,
+        "IdProcesoDisciplinario": (
+            proceso.IdProcesoDisciplinario
+        ),
+        "NombreArchivo": nombre_archivo,
+        "ArchivoFisicoEliminado": archivo_fisico_eliminado,
+        "Advertencia": advertencia,
+    }
+
+
+@router.delete(
     "/rrll/evidencia-trabajador/{id_documento}",
 )
 def eliminar_evidencia_trabajador_rrll(
