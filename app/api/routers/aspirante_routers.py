@@ -514,6 +514,50 @@ def actualizar_estado_aspirante(
 
         estado_anterior = registro_actual.get("IdEstadoProceso")
 
+        # Validación de negocio para avanzar a Contratación (estado 24).
+        # El estado 24 solo puede asignarse cuando existe una asignación
+        # completa de Cargo + Cliente + Salario para el aspirante.
+        if nuevo_estado == 24:
+            asignacion = db.execute(
+                text("""
+                    SELECT
+                        "IdCargo",
+                        "IdCliente",
+                        "Salario"
+                    FROM public."AsignacionCargoCliente"
+                    WHERE "IdRegistroPersonal" = :id
+                    LIMIT 1
+                """),
+                {"id": id_registro},
+            ).mappings().first()
+
+            tiene_cargo = (
+                asignacion is not None
+                and asignacion.get("IdCargo") is not None
+                and int(asignacion.get("IdCargo")) > 0
+            )
+
+            tiene_cliente = (
+                asignacion is not None
+                and asignacion.get("IdCliente") is not None
+                and int(asignacion.get("IdCliente")) > 0
+            )
+
+            salario = asignacion.get("Salario") if asignacion else None
+            try:
+                salario_valido = salario is not None and float(salario) > 0
+            except (TypeError, ValueError):
+                salario_valido = False
+
+            if not tiene_cargo or not tiene_cliente or not salario_valido:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "No es posible avanzar a contratación. "
+                        "Debe tener cargo, cliente y salario completos."
+                    ),
+                )
+
         # Protección exclusiva para usuarios que operan únicamente con rol de Selección.
         # No interfiere con los cambios realizados por Contratación o Talento Humano.
         roles_ids = {
