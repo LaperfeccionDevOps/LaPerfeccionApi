@@ -493,10 +493,19 @@ def sumar_dias_habiles(
 def obtener_ventana_extraordinaria(
     fecha_base: date | None = None,
 ) -> list[date]:
-    """Devuelve los próximos cinco días hábiles, sin incluir hoy."""
+    """
+    Devuelve la ventana de cinco días hábiles para citas extraordinarias,
+    incluyendo el día actual si es hábil.
+
+    La regla es exclusiva de extraordinarias; las citaciones ordinarias
+    continúan sujetas a los cinco días hábiles mínimos desde su creación.
+    """
     fecha_actual = fecha_base or obtener_fecha_actual_colombia()
     fechas: list[date] = []
     fecha_revision = fecha_actual
+
+    if es_dia_habil_colombia(fecha_revision):
+        fechas.append(fecha_revision)
 
     while len(fechas) < DIAS_HABILES_VENTANA_EXTRAORDINARIA:
         fecha_revision += timedelta(days=1)
@@ -1371,6 +1380,31 @@ def obtener_bloques_extraordinarios_disponibles(
     db: Session,
     fecha_evento: date,
 ) -> tuple[list[tuple[time, time]], bool]:
+    # Para una cita extraordinaria del mismo día, únicamente se habilitan
+    # los dos cupos urgentes ya definidos. No se exponen los bloques
+    # ordinarios de la agenda.
+    if fecha_evento == obtener_fecha_actual_colombia():
+        bloques_contingencia = [
+            (hora_inicio, hora_fin)
+            for hora_inicio, hora_fin in BLOQUES_EXTRAORDINARIOS_CONTINGENCIA
+            if not es_bloque_persistente_bloqueado(
+                db=db,
+                fecha_evento=fecha_evento,
+                hora_inicio=hora_inicio,
+                hora_fin=hora_fin,
+            )
+            and buscar_cruce_horario(
+                db=db,
+                fecha_evento=fecha_evento,
+                hora_inicio=hora_inicio,
+                hora_fin=hora_fin,
+            ) is None
+        ]
+        return bloques_contingencia, True
+
+    # Para las demás fechas se conserva exactamente la lógica existente:
+    # si hay bloques ordinarios disponibles, se muestran esos; si no,
+    # se habilitan los bloques extraordinarios de contingencia.
     bloques_ordinarios = obtener_bloques_ordinarios_disponibles(
         db=db,
         fecha_evento=fecha_evento,
@@ -2459,26 +2493,35 @@ def crear_evento_agenda(
             )
         )
 
-        validar_fecha_minima_citacion(
-            fecha_evento=data.FechaEvento,
-            fecha_creacion_evento=fecha_creacion_evento,
-        )
-
-        solicitud_viernes_aprobada = (
-            validar_programacion_citacion(
+        if data.EsExtraordinaria:
+            hora_fin_calculada = validar_programacion_extraordinaria_citacion(
                 db=db,
                 fecha_evento=data.FechaEvento,
                 hora_inicio=data.HoraInicio,
-                hora_fin=hora_fin_calculada,
-                id_registro_personal=(
-                    data.IdRegistroPersonal
-                ),
-                id_proceso_disciplinario=(
-                    data.IdProcesoDisciplinario
-                ),
-                bloquear_autorizacion=True,
+                id_proceso_disciplinario=data.IdProcesoDisciplinario,
+                bloquear_cupo=True,
             )
-        )
+        else:
+            validar_fecha_minima_citacion(
+                fecha_evento=data.FechaEvento,
+                fecha_creacion_evento=fecha_creacion_evento,
+            )
+
+            solicitud_viernes_aprobada = (
+                validar_programacion_citacion(
+                    db=db,
+                    fecha_evento=data.FechaEvento,
+                    hora_inicio=data.HoraInicio,
+                    hora_fin=hora_fin_calculada,
+                    id_registro_personal=(
+                        data.IdRegistroPersonal
+                    ),
+                    id_proceso_disciplinario=(
+                        data.IdProcesoDisciplinario
+                    ),
+                    bloquear_autorizacion=True,
+                )
+            )
 
         datos_evento["HoraFin"] = (
             hora_fin_calculada
