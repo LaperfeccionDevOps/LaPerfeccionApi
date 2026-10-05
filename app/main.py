@@ -17,127 +17,174 @@ from api.routers import documentos_activos_routers
 from api.routers import estado_proceso_routers
 from api.routers import nomina_comunicaciones_routers
 from api.routers import retiro_laboral_routers
+
 from api.routers.agenda_proceso_disciplinario_router import (
     router as agenda_proceso_disciplinario_router,
 )
+
 from api.routers.asignacion_cargo_cliente_routers import (
     router as asignacion_cargo_cliente_router,
 )
+
 from api.routers.asistente_descargo_proceso_disciplinario_router import (
     router as asistente_descargo_proceso_disciplinario_router,
 )
+
 from api.routers.aspirante_routers import router as aspirante_router
 from api.routers.auth import router as auth_router
+
 from api.routers.trabajador_incapacidades_routers import (
     router as trabajador_incapacidades_router,
 )
+
 from api.routers.autorizacion_agenda_disciplinaria_router import (
     router as autorizacion_agenda_disciplinaria_router,
 )
+
 from api.routers.cierre_proceso_disciplinario_router import (
     router as cierre_proceso_disciplinario_router,
 )
+
 from api.routers.cita_routers import router as cita_router
 from api.routers.clientes_routers import router as clientes_router
+from api.routers.cargos_routers import router as cargos_router
+
 from api.routers.citacion_proceso_disciplinario_router import (
     router as citacion_proceso_disciplinario_router,
 )
+
 from api.routers.configuracion_routers import router as configuracion_router
 from api.routers.consultar_combos_routers import router as consultar_combos_router
 from api.routers.contratacion_basica_routers import router as contratacion_basica_router
+
 from api.routers.contratacion_copia_dotacion_router import (
     router as contratacion_copia_dotacion_router,
 )
+
 from api.routers.contratacion_registro_routers import (
     router as contratacion_registro_router,
 )
+
 from api.routers.contratado_routers import router as contratado_router
+
 from api.routers.contratos_obra_labor_routers import (
     router as contratos_obra_labor_router,
 )
+
 from api.routers.datos_proceso_aspirante_routers import (
     router as datos_proceso_aspirante_router,
 )
+
 from api.routers.datos_seleccion_routers import router as datos_seleccion_router
+
 from api.routers.descargar_documentos_routers import (
     router as descargar_documentos_router,
 )
+
 from api.routers.descargo_proceso_disciplinario_router import (
     router as descargo_proceso_disciplinario_router,
 )
+
 from api.routers.documento_proceso_disciplinario_router import (
     router as documento_proceso_disciplinario_router,
 )
+
 from api.routers.documentos_contratacion_routers import (
     router as subir_documento_contratacion,
 )
+
 from api.routers.documentos_ingreso_routers import (
     router as documentos_ingreso_router,
 )
+
 from api.routers.documentos_seguridad_routers import (
     router as documentos_seguridad_router,
 )
+
 from api.routers.entrevista_retiro_routers import router as entrevista_retiro_router
 from api.routers.entrevista_routers import router as entrevista_router
+
 from api.routers.entrevistas_candidato_routers import (
     router as entrevistas_candidato_router,
 )
+
 from api.routers.experiencia_laboral_routers import (
     router as experiencia_laboral_router,
 )
+
 from api.routers.experiencia_laboral_validacion_routers import (
     router as experiencia_laboral_validacion_router,
 )
+
 from api.routers.formacion_educacion_routers import (
     router as formacion_educacion_router,
 )
+
 from api.routers.gestion_mensual_indicadores_routers import (
     router as gestion_mensual_indicadores_router,
 )
+
 from api.routers.indicadores_proceso_disciplinario_router import (
     router as indicadores_proceso_disciplinario_router,
 )
+
 from api.routers.motivo_cierre_routers import router as motivo_cierre_router
+
 from api.routers.nomina_actualizacion_datos_routers import (
     router as nomina_actualizacion_datos_router,
 )
+
 from api.routers.nomina_incapacidades_routers import (
     router as nomina_incapacidades_router,
 )
+
 from api.routers.nomina_retiros_routers import router as nomina_retiros_router
 from api.routers.nucleo_familiar_routers import router as nucleo_familiar_router
+
 from api.routers.observaciones_experiencia_laboral_routers import (
     router as observaciones_experiencia_laboral_router,
 )
+
 from api.routers.observaciones_nucleo_familiar_routers import (
     router as obs_nf_router,
 )
+
 from api.routers.operaciones_retiros_routers import (
     router as operaciones_retiros_router,
 )
+
 from api.routers.panel_gerencial_rrll_routers import (
     router as panel_gerencial_rrll_router,
 )
+
 from api.routers.perfil_aspirante_routers import router as perfil_aspirante_router
+
 from api.routers.proceso_disciplinario_router import (
     router as proceso_disciplinario_router,
 )
+
 from api.routers.rechazo_contratacion_routers import (
     router as rechazo_contratacion_router,
 )
+
 from api.routers.referencia_personal_validacion_routers import (
     router as ref_pers_val_router,
 )
+
 from api.routers.reintegros_routers import router as reintegros_router
+
 from api.routers.retiro_laboral_adjunto_routers import (
     router as retiro_laboral_adjunto_router,
 )
+
 from api.routers.rrll_busqueda_routers import router as rrll_busqueda_router
 from api.routers.rrll_excel_routers import router as rrll_excel_router
 from api.routers.seleccion_rq_routers import router as seleccion_rq_router
+
 from api.routers.solicitud_autorizacion_agenda_disciplinaria_router import (
     router as solicitud_autorizacion_agenda_disciplinaria_router,
 )
+
 from api.routers.tratamiento_datos_routers import router as tratamiento_datos_router
 
 
@@ -150,6 +197,7 @@ app = FastAPI(
     ),
     debug=True,
 )
+
 
 origins = [
     "http://127.0.0.1:5500",
@@ -169,10 +217,12 @@ origins = [
     "https://qa.laperfeccion.app",
 ]
 
+
 app.add_middleware(
     ProxyHeadersMiddleware,
     trusted_hosts="*",
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -186,29 +236,36 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 # Routers
 # ─────────────────────────────────────────────
+
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+
 app.include_router(
     trabajador_incapacidades_router,
     prefix="/api",
 )
+
 app.include_router(aspirante_router, prefix="/api", tags=["aspirantes"])
 app.include_router(consultar_combos_router, prefix="/api", tags=["combos"])
 app.include_router(cita_router, prefix="/api", tags=["citas"])
 app.include_router(entrevista_router, prefix="/api", tags=["entrevistas"])
+
 app.include_router(
     estado_proceso_routers.router,
     prefix="/api",
     tags=["estados proceso"],
 )
+
 app.include_router(
     nucleo_familiar_router,
     prefix="/api",
     tags=["nucleo-familiar"],
 )
+
 app.include_router(
     observaciones_experiencia_laboral_router,
     prefix="/api",
 )
+
 app.include_router(contratacion_basica_router)
 app.include_router(datos_seleccion_router)
 app.include_router(experiencia_laboral_validacion_router)
@@ -217,23 +274,28 @@ app.include_router(tratamiento_datos_router)
 app.include_router(descargar_documentos_router)
 app.include_router(contratado_router)
 app.include_router(contratacion_copia_dotacion_router)
+
 app.include_router(
     experiencia_laboral_router,
     prefix="/api",
     tags=["experiencia-laboral"],
 )
+
 app.include_router(ref_pers_val_router)
 app.include_router(experiencia_laboral_validacion_router)
 app.include_router(perfil_aspirante_router)
+
 app.include_router(
     datos_proceso_aspirante_router,
     prefix="/api",
     tags=["datos-proceso-aspirante"],
 )
+
 app.include_router(documentos_ingreso_router)
 app.include_router(contratacion_registro_router)
 app.include_router(asignacion_cargo_cliente_router)
 app.include_router(clientes_router)
+app.include_router(cargos_router)
 app.include_router(documentos_seguridad_router)
 app.include_router(contratos_obra_labor_router)
 app.include_router(entrevistas_candidato_router)
@@ -272,6 +334,7 @@ app.include_router(reintegros_router)
 # ─────────────────────────────────────────────
 # Endpoints básicos de salud
 # ─────────────────────────────────────────────
+
 @app.get("/")
 def root():
     """
