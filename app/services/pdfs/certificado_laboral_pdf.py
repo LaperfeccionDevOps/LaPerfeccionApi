@@ -387,11 +387,24 @@ class CertificadoLaboralPDF:
             salario,
         )
 
-        texto_info = (
-            "Para mayor información de ser necesario, se pueden comunicar al PBX "
-            "4204893 EXT 1046, ó al numero celular 3176456953, ó al correo "
-            "electronico contratacion@aseoslaperfeccion.com ."
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
+
+        if codigo == "ALP":
+            texto_info = (
+                "Para mayor información de ser necesario, se pueden comunicar al PBX "
+                "4204893 EXT 1046, ó al numero celular 3176456953, ó al correo "
+                "electronico contratacion@aseoslaperfeccion.com ."
+            )
+        elif codigo == "MI":
+            texto_info = (
+                "Para mayor información de ser necesario, se pueden comunicar al número "
+                "+57 318 430 7338, ó al correo electronico comercial@manteneringenieria.com ."
+            )
+        else:
+            raise ValueError(
+                f"Empresa contratante no reconocida para la información de contacto: "
+                f"{codigo or 'SIN CÓDIGO'}"
+            )
 
         self.parrafo_justificado(
             texto_info,
@@ -442,30 +455,78 @@ class CertificadoLaboralPDF:
         )
 
     def pie(self):
-        self.pdf.setFont("Helvetica", 5.6)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            72,
-            "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            63,
-            "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
 
-        self.pdf.line(40, 55, self.width - 40, 55)
+        if codigo == "ALP":
+            # Pie institucional de Aseos La Perfección.
+            self.pdf.setFont("Helvetica", 5.4)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                58,
+                "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                50,
+                "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
+            )
 
-        self.pdf.setFont("Helvetica", 6.5)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            40,
-            "Calle 4 Bis No. 53C-50 • PBX: 420 48 93 - 261 32 74 - 261 46 25 • Bogotá, D.C. - Colombia",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            27,
-            "www.aseoslaperfeccion.com        comercial@aseoslaperfeccion.com",
+            self.pdf.line(55, 44, self.width - 55, 44)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                32,
+                "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                21,
+                "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                11,
+                "www.aseoslaperfeccion.com",
+            )
+            return
+
+        if codigo == "MI":
+            # Pie institucional oficial de Mantener Ingeniería.
+            self.pdf.setFont("Helvetica", 5.2)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                61,
+                "Soluciones integrales para el sector residencial, comercial e institucional, anticipándose a las necesidades de sus clientes con innovación, gestión eficiente y tecnología de vanguardia.",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                53,
+                "Contamos con un equipo calificado y un firme compromiso con la calidad, el medio ambiente y el desarrollo sostenible.",
+            )
+
+            self.pdf.line(55, 46, self.width - 55, 46)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                34,
+                "Calle 25 # 32-22 de Bogotá D.C. - Colombia - +57 318 430 7338",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                23,
+                "comercial@manteneringenieria.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                12,
+                "www.manteneringenieria.com",
+            )
+            return
+
+        raise ValueError(
+            f"Empresa contratante no reconocida para el pie de página: {codigo or 'SIN CÓDIGO'}"
         )
 
     def generar(self):

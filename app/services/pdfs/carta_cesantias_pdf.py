@@ -387,37 +387,80 @@ class CartaCesantiasPDF:
         self.pdf.drawString(65, 96, "NMS")
 
     def pie(self):
-        self.pdf.setFont("Helvetica", 5.4)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            58,
-            "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            50,
-            "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
 
-        self.pdf.line(55, 44, self.width - 55, 44)
+        if codigo == "ALP":
+            # Pie institucional de Aseos La Perfección.
+            self.pdf.setFont("Helvetica", 5.4)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                58,
+                "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                50,
+                "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
+            )
 
-        self.pdf.setFont("Helvetica", 6)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            32,
-            "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
-        )
+            self.pdf.line(55, 44, self.width - 55, 44)
 
-        self.pdf.drawCentredString(
-            self.width / 2,
-            21,
-            "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
-        )
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                32,
+                "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                21,
+                "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                11,
+                "www.aseoslaperfeccion.com",
+            )
+            return
 
-        self.pdf.drawCentredString(
-            self.width / 2,
-            11,
-            "www.aseoslaperfeccion.com",
+        if codigo == "MI":
+            # Pie institucional oficial de Mantener Ingeniería.
+            self.pdf.setFont("Helvetica", 5.2)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                61,
+                "Soluciones integrales para el sector residencial, comercial e institucional, anticipándose a las necesidades de sus clientes con innovación, gestión eficiente y tecnología de vanguardia.",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                53,
+                "Contamos con un equipo calificado y un firme compromiso con la calidad, el medio ambiente y el desarrollo sostenible.",
+            )
+
+            self.pdf.line(55, 46, self.width - 55, 46)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                34,
+                "Calle 25 # 32-22 de Bogotá D.C. - Colombia - +57 318 430 7338",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                23,
+                "comercial@manteneringenieria.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                12,
+                "www.manteneringenieria.com",
+            )
+            return
+
+        # La empresa ya se valida al construir el documento; esta protección
+        # evita generar un pie de página incorrecto si el dato cambia.
+        raise ValueError(
+            f"Empresa contratante no reconocida para el pie de página: {codigo or 'SIN CÓDIGO'}"
         )
 
     def generar(self):
