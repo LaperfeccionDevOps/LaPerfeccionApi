@@ -112,6 +112,9 @@ from api.routers.panel_gerencial_rrll_routers import (
     router as panel_gerencial_rrll_router,
 )
 from api.routers.perfil_aspirante_routers import router as perfil_aspirante_router
+from api.routers.permisos_trabajo_alturas_routers import (
+    router as permisos_trabajo_alturas_router,
+)
 from api.routers.proceso_disciplinario_router import (
     router as proceso_disciplinario_router,
 )
@@ -252,6 +255,7 @@ app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(nomina_actualizacion_datos_router)
 app.include_router(panel_gerencial_rrll_router)
 app.include_router(reintegros_router)
+app.include_router(permisos_trabajo_alturas_router)
 
 
 # ─────────────────────────────────────────────
