@@ -38,6 +38,7 @@ from api.routers.cierre_proceso_disciplinario_router import (
     router as cierre_proceso_disciplinario_router,
 )
 from api.routers.cita_routers import router as cita_router
+from api.routers.clientes_routers import router as clientes_router
 from api.routers.citacion_proceso_disciplinario_router import (
     router as citacion_proceso_disciplinario_router,
 )
@@ -232,6 +233,7 @@ app.include_router(
 app.include_router(documentos_ingreso_router)
 app.include_router(contratacion_registro_router)
 app.include_router(asignacion_cargo_cliente_router)
+app.include_router(clientes_router)
 app.include_router(documentos_seguridad_router)
 app.include_router(contratos_obra_labor_router)
 app.include_router(entrevistas_candidato_router)
