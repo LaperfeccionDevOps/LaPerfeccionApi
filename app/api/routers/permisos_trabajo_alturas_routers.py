@@ -1,6 +1,6 @@
 # ruff: noqa: B008
 
-from datetime import datetime
+from datetime import datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -29,6 +29,10 @@ ROLES_PERMITIDOS = {
     ROL_DESARROLLADOR,
 }
 
+# Colombia no tiene horario de verano. La fecha del permiso se calcula en
+# PostgreSQL con esta zona para que "hoy" no dependa del equipo del usuario.
+ZONA_HORARIA = "America/Bogota"
+
 
 class ClienteOut(BaseModel):
     id_cliente: int
@@ -37,14 +41,17 @@ class ClienteOut(BaseModel):
 
 class PermisoTrabajoAlturasIn(BaseModel):
     id_cliente: int = Field(..., gt=0)
-    sede: str = Field(..., min_length=1, max_length=150)
+    hora_inicio_tarea: time
+    hora_fin_tarea: time
 
 
 class PermisoTrabajoAlturasOut(BaseModel):
     id_permiso_trabajo_alturas: int
     id_cliente: int
     cliente: str
-    sede: str
+    sede: str | None = None
+    fecha_hora_inicio_tarea: datetime | None = None
+    fecha_hora_fin_tarea: datetime | None = None
     fecha_creacion: datetime
 
 
@@ -95,6 +102,8 @@ def listar_permisos(
                    P."IdCliente"               AS id_cliente,
                    C."Nombre"                  AS cliente,
                    P."Sede"                    AS sede,
+                   P."FechaHoraInicioTarea"    AS fecha_hora_inicio_tarea,
+                   P."FechaHoraFinTarea"       AS fecha_hora_fin_tarea,
                    P."FechaCreacion"           AS fecha_creacion
             FROM public."PermisoTrabajoAlturas" P
             JOIN public."Cliente" C ON C."IdCliente" = P."IdCliente"
@@ -116,12 +125,13 @@ def crear_permiso(
     db: Session = Depends(get_db),
     _current=Depends(require_operaciones_alturas),
 ):
-    sede = payload.sede.strip()
-
-    if not sede:
+    if payload.hora_fin_tarea <= payload.hora_inicio_tarea:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El campo Sede es obligatorio.",
+            detail=(
+                "La hora de finalización debe ser mayor "
+                "a la hora de inicio."
+            ),
         )
 
     cliente = db.execute(
@@ -141,16 +151,35 @@ def crear_permiso(
         )
 
     try:
+        # La fecha siempre es la de hoy en Colombia; del usuario solo se
+        # reciben las horas.
         fila = db.execute(
             text("""
-                INSERT INTO public."PermisoTrabajoAlturas" ("IdCliente", "Sede")
-                VALUES (:id_cliente, :sede)
+                WITH hoy AS (
+                    SELECT (now() AT TIME ZONE :zona)::date AS fecha
+                )
+                INSERT INTO public."PermisoTrabajoAlturas" (
+                    "IdCliente",
+                    "FechaHoraInicioTarea",
+                    "FechaHoraFinTarea"
+                )
+                SELECT :id_cliente,
+                       (hoy.fecha + CAST(:hora_inicio AS time)) AT TIME ZONE :zona,
+                       (hoy.fecha + CAST(:hora_fin AS time)) AT TIME ZONE :zona
+                FROM hoy
                 RETURNING "IdPermisoTrabajoAlturas" AS id_permiso_trabajo_alturas,
                           "IdCliente"               AS id_cliente,
                           "Sede"                    AS sede,
+                          "FechaHoraInicioTarea"    AS fecha_hora_inicio_tarea,
+                          "FechaHoraFinTarea"       AS fecha_hora_fin_tarea,
                           "FechaCreacion"           AS fecha_creacion
             """),
-            {"id_cliente": payload.id_cliente, "sede": sede},
+            {
+                "id_cliente": payload.id_cliente,
+                "hora_inicio": payload.hora_inicio_tarea,
+                "hora_fin": payload.hora_fin_tarea,
+                "zona": ZONA_HORARIA,
+            },
         ).mappings().one()
         db.commit()
     except Exception:
