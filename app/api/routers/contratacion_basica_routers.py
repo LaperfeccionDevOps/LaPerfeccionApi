@@ -31,6 +31,9 @@ class ContratacionBasicaIn(BaseModel):
     IdBanco: int | None = None
     IdTipoContrato: int | None = None
     FechaIngreso: datetime.date | None = None
+    # Solo aplica a contratos a término fijo (IdTipoContrato = 2).
+    # Se mantiene opcional para no afectar registros y flujos existentes.
+    FechaVencimientoContrato: datetime.date | None = None
     RiesgoLaboral: str | None = None
 
     Posicion: str | None = Field(

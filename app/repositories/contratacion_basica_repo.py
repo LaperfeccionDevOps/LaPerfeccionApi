@@ -16,6 +16,7 @@ class ContratacionBasicaRepo:
       "IdBanco",
       "IdTipoContrato",
       "FechaIngreso",
+      "FechaVencimientoContrato",
       "RiesgoLaboral",
       "Posicion",
       "Escalafon",
@@ -305,6 +306,7 @@ class ContratacionBasicaRepo:
               "IdBanco",
               "IdTipoContrato",
               "FechaIngreso",
+              "FechaVencimientoContrato",
               "RiesgoLaboral",
               "Posicion",
               "Escalafon",
@@ -323,6 +325,7 @@ class ContratacionBasicaRepo:
               :IdBanco,
               :IdTipoContrato,
               :FechaIngreso,
+              :FechaVencimientoContrato,
               :RiesgoLaboral,
               :Posicion,
               :Escalafon,
@@ -348,6 +351,7 @@ class ContratacionBasicaRepo:
             "IdBanco": data.get("IdBanco"),
             "IdTipoContrato": data.get("IdTipoContrato"),
             "FechaIngreso": data.get("FechaIngreso"),
+            "FechaVencimientoContrato": data.get("FechaVencimientoContrato"),
             "RiesgoLaboral": data.get("RiesgoLaboral"),
             "Posicion": data.get("Posicion"),
             "Escalafon": data.get("Escalafon"),
@@ -444,6 +448,7 @@ class ContratacionBasicaRepo:
                   :FechaIngreso,
                   "FechaIngreso"
               ),
+              "FechaVencimientoContrato" = :FechaVencimientoContrato,
               "RiesgoLaboral" = COALESCE(
                   :RiesgoLaboral,
                   "RiesgoLaboral"
@@ -496,6 +501,7 @@ class ContratacionBasicaRepo:
             "IdBanco": data.get("IdBanco"),
             "IdTipoContrato": data.get("IdTipoContrato"),
             "FechaIngreso": fecha_ingreso_solicitada,
+            "FechaVencimientoContrato": data.get("FechaVencimientoContrato"),
             "RiesgoLaboral": data.get("RiesgoLaboral"),
             "Posicion": data.get("Posicion"),
             "Escalafon": data.get("Escalafon"),
