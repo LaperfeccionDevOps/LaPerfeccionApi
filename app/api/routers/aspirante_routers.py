@@ -215,11 +215,13 @@ def listar_aspirantes(
     fecha_hasta: date | None = Query(None),
     id_estado: int | None = Query(None),
     search: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current=Depends(require_consulta_aspirantes_operaciones),
 ):
     try:
         sql = """
-            SELECT
+            SELECT DISTINCT
                 rp."IdRegistroPersonal",
                 rp."IdTipoIdentificacion",
                 rp."IdTipoCargo",
@@ -299,12 +301,12 @@ def listar_aspirantes(
         params = {}
 
         if fecha_desde:
-            sql += ' AND rp."FechaCreacion"::date >= :fecha_desde'
+            sql += ' AND rp."FechaCreacion" >= :fecha_desde'
             params["fecha_desde"] = fecha_desde
 
         if fecha_hasta:
-            sql += ' AND rp."FechaCreacion"::date <= :fecha_hasta'
-            params["fecha_hasta"] = fecha_hasta
+            sql += ' AND rp."FechaCreacion" < :fecha_hasta_exclusiva'
+            params["fecha_hasta_exclusiva"] = fecha_hasta + timedelta(days=1)
 
         if id_estado:
             sql += ' AND rp."IdEstadoProceso" = :id_estado'
@@ -346,61 +348,15 @@ def listar_aspirantes(
                     f"%{termino}%"
                 )
 
-        sql += """
-            GROUP BY
-                rp."IdRegistroPersonal",
-                rp."IdTipoIdentificacion",
-                rp."IdTipoCargo",
-                rp."IdTipoEps",
-                rp."IdTipoEstadoCivil",
-                rp."IdTipoGenero",
-                rp."IdEstadoProceso",
-                rp."NumeroIdentificacion",
-                rp."FechaExpedicion",
-                rp."LugarExpedicion",
-                rp."Nombres",
-                rp."Apellidos",
-                rp."IdCargo",
-                rp."Email",
-                rp."Celular",
-                rp."TieneWhatsapp",
-                rp."NumeroWhatsapp",
-                rp."PesoKilogramos",
-                rp."AlturaMetros",
-                rp."NombreContactoEmergencia",
-                rp."ContactoEmergencia",
-                rp."FechaCreacion",
-                rp."FechaActualizacion",
-                rp."UsuarioActualizacion",
-                rp."FechaNacimiento",
-                rp."IdFondoPensiones",
-                rp."IdLimitacionFisicaHijo",
-                rp."IdNivelEducativo",
-                rp."TieneHijos",
-                rp."CuantosHijos",
-                rp."TelefonoContactoEmergencia",
-                rp."EstudiaActualmente",
-                rp."IdTipoEstadoFormacion",
-                rp."ComoSeEnteroVacante",
-                rp."IdLugarNacimiento",
-                rp."TieneLimitacionesFisicas",
-                rp."DescripcionFormacionAcademica",
-                rp."IdLimitacionFisica",
-                rp."IdFondoCesantias",
-                esp."Nombre",
-                DA."Direccion",
-                L."Nombre",
-                DA."Barrio",
-                CARG."NombreCargo",
-                ASCARGO."Salario",
-                CB."FechaIngreso",
-                rp."FechaIngresoHistorica",
-                CL."Nombre"
-            ORDER BY rp."FechaCreacion" DESC
-        """
+        sql += ' ORDER BY rp."FechaCreacion" DESC, rp."IdRegistroPersonal" DESC'
+        # Paginación optativa: las llamadas existentes siguen devolviendo una lista completa.
+        if limit is not None:
+            sql += " LIMIT :limit OFFSET :offset"
+            params["limit"] = limit
+            params["offset"] = offset
 
         rows = db.execute(text(sql), params).mappings().all()
-        return rows
+        return [dict(row) for row in rows]
 
     except SQLAlchemyError as e:
         raise HTTPException(
