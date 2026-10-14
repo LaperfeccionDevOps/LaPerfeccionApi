@@ -1,5 +1,6 @@
 # ruff: noqa: B008, BLE001
 
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -1123,181 +1125,621 @@ def _validar_cliente(
     return cliente
 
 
+def _obtener_responsabilidades_perfil_paz_salvo(db: Session, id_cargo: int) -> dict:
+    """Consulta informativa del perfil del cargo, sin alterar el flujo de guardado."""
+    perfil = db.execute(
+        text("""
+            SELECT p.*
+            FROM public."CargoPerfilPazSalvoOperaciones" cp
+            INNER JOIN public."PerfilPazSalvoOperaciones" p
+                ON p."IdPerfilPazSalvoOperaciones" = cp."IdPerfilPazSalvoOperaciones"
+            WHERE cp."IdCargo" = :id_cargo
+              AND COALESCE(cp."Activo", true) = true
+              AND COALESCE(p."Activo", true) = true
+            LIMIT 1;
+        """),
+        {"id_cargo": id_cargo},
+    ).mappings().first()
+
+    if not perfil:
+        return {"IdPerfilPazSalvoOperaciones": None,
+                "NombrePerfilPazSalvo": None, "Responsabilidades": []}
+
+    id_perfil = int(perfil["IdPerfilPazSalvoOperaciones"])
+    nombre = (perfil.get("NombrePerfil") or perfil.get("Nombre")
+              or perfil.get("DescripcionPerfil") or perfil.get("CodigoPerfil"))
+    filas = db.execute(
+        text("""
+            SELECT r.*, pr."Obligatorio"
+            FROM public."PerfilResponsabilidadPazSalvoOperaciones" pr
+            INNER JOIN public."ResponsabilidadPazSalvoOperaciones" r
+                ON r."IdResponsabilidadPazSalvoOperaciones" = pr."IdResponsabilidadPazSalvoOperaciones"
+            WHERE pr."IdPerfilPazSalvoOperaciones" = :id_perfil
+              AND COALESCE(pr."Activo", true) = true
+              AND COALESCE(r."Activo", true) = true
+            ORDER BY r."IdResponsabilidadPazSalvoOperaciones";
+        """),
+        {"id_perfil": id_perfil},
+    ).mappings().all()
+    responsabilidades = []
+    for fila in filas:
+        responsabilidades.append({
+            "IdResponsabilidadPazSalvoOperaciones": int(fila["IdResponsabilidadPazSalvoOperaciones"]),
+            "CodigoResponsabilidad": fila.get("CodigoResponsabilidad") or fila.get("Codigo"),
+            "NombreResponsabilidad": fila.get("NombreResponsabilidad") or fila.get("Nombre"),
+            "Descripcion": fila.get("Descripcion"),
+            "Obligatorio": bool(fila["Obligatorio"]),
+        })
+    return {"IdPerfilPazSalvoOperaciones": id_perfil,
+            "NombrePerfilPazSalvo": str(nombre or "").strip(),
+            "Responsabilidades": responsabilidades}
+
+
+# Registro independiente de responsabilidades por perfil.
+# No altera el guardado tradicional, PDF, RQ ni el envío a RRLL.
+class RespuestaResponsabilidadPazSalvo(BaseModel):
+    IdResponsabilidadPazSalvoOperaciones: int
+    EstadoEntrega: str | None = None
+    Observacion: str | None = None
+
+
+class GuardarResponsabilidadesPazSalvo(BaseModel):
+    Responsabilidades: list[RespuestaResponsabilidadPazSalvo]
+
+
+@router.put("/paz-salvo/{id_paz_y_salvo}/responsabilidades")
+def guardar_responsabilidades_paz_salvo(
+    id_paz_y_salvo: int,
+    payload: GuardarResponsabilidadesPazSalvo,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+    _commit: bool = True,
+):
+    """Guarda las respuestas del perfil únicamente en casos pendientes de Operaciones."""
+    try:
+        caso = db.execute(text("""
+            SELECT ps."IdRegistroPersonal", rl."EstadoCasoRRLL"
+            FROM public."PazYSalvoOperaciones" ps
+            INNER JOIN public."RetiroLaboral" rl
+                ON rl."IdRetiroLaboral" = ps."IdRetiroLaboral"
+            WHERE ps."IdPazYSalvo" = :id
+              AND COALESCE(rl."Activo", true) = true
+            FOR UPDATE OF ps
+        """), {"id": id_paz_y_salvo}).mappings().first()
+        if not caso:
+            raise HTTPException(status_code=404, detail="Paz y Salvo no encontrado.")
+        if str(caso["EstadoCasoRRLL"] or "").strip().upper() != "PENDIENTE_OPERACIONES":
+            raise HTTPException(status_code=409, detail="Solo se pueden editar responsabilidades de casos pendientes en Operaciones.")
+
+        cargo = _obtener_cargo_actual(db, int(caso["IdRegistroPersonal"]))
+        if not cargo:
+            raise HTTPException(status_code=409, detail="El trabajador no tiene un cargo vigente.")
+        perfil = _obtener_responsabilidades_perfil_paz_salvo(db, cargo["IdCargo"])
+        permitidos = {
+            r["IdResponsabilidadPazSalvoOperaciones"]
+            for r in perfil["Responsabilidades"]
+        }
+        ids = [r.IdResponsabilidadPazSalvoOperaciones for r in payload.Responsabilidades]
+        if len(ids) != len(set(ids)) or set(ids) != permitidos:
+            raise HTTPException(status_code=400, detail="Las responsabilidades deben coincidir exactamente con las configuradas para el perfil vigente, sin duplicados.")
+
+        usuario = _obtener_usuario_actual_rq(current)["Usuario"]
+        for respuesta in payload.Responsabilidades:
+            estado = (respuesta.EstadoEntrega or "").strip().upper() or None
+            if estado not in {None, "NO APLICA", "ENTREGADO", "PENDIENTE"}:
+                raise HTTPException(status_code=400, detail="EstadoEntrega debe ser NO APLICA, ENTREGADO o PENDIENTE.")
+            observacion = _normalizar_texto_opcional(respuesta.Observacion)
+            db.execute(text("""
+                INSERT INTO public."PazYSalvoOperacionesResponsabilidad" (
+                    "IdPazYSalvo", "IdResponsabilidadPazSalvoOperaciones",
+                    "EstadoEntrega", "Observacion", "Activo", "UsuarioCreacion"
+                ) VALUES (:id, :responsabilidad, :estado, :observacion, true, :usuario)
+                ON CONFLICT ("IdPazYSalvo", "IdResponsabilidadPazSalvoOperaciones")
+                DO UPDATE SET "EstadoEntrega" = EXCLUDED."EstadoEntrega",
+                    "Observacion" = EXCLUDED."Observacion", "Activo" = true,
+                    "FechaActualizacion" = CURRENT_TIMESTAMP,
+                    "UsuarioActualizacion" = :usuario
+            """), {
+                "id": id_paz_y_salvo,
+                "responsabilidad": respuesta.IdResponsabilidadPazSalvoOperaciones,
+                "estado": estado,
+                "observacion": observacion,
+                "usuario": usuario,
+            })
+        if _commit:
+            db.commit()
+        return {"success": True, "data": {"IdPazYSalvo": id_paz_y_salvo,
+                "CantidadResponsabilidades": len(ids)}}
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/paz-salvo/{id_paz_y_salvo}/responsabilidades")
+def consultar_responsabilidades_guardadas(
+    id_paz_y_salvo: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Consulta respuestas guardadas sin modificar registros."""
+    existe = db.execute(text('SELECT 1 FROM public."PazYSalvoOperaciones" WHERE "IdPazYSalvo" = :id'),
+                        {"id": id_paz_y_salvo}).first()
+    if not existe:
+        raise HTTPException(status_code=404, detail="Paz y Salvo no encontrado.")
+    filas = db.execute(text("""
+        SELECT "IdResponsabilidadPazSalvoOperaciones", "EstadoEntrega", "Observacion"
+        FROM public."PazYSalvoOperacionesResponsabilidad"
+        WHERE "IdPazYSalvo" = :id AND "Activo" = true
+        ORDER BY "IdResponsabilidadPazSalvoOperaciones"
+    """), {"id": id_paz_y_salvo}).mappings().all()
+    return {"success": True, "data": [dict(fila) for fila in filas]}
+
+
+# Catálogo funcional solicitado por Operaciones. No modifica tablas ni guardados.
+# Los códigos son estables para permitir la futura persistencia individual.
+VALIDACIONES_TRANSVERSALES_PAZ_SALVO = (
+    ("CARNET_ALP", "Carné de Aseos La Perfección"),
+    ("CARNET_ARL", "Carné o identificación de ARL (cuando corresponda)"),
+    ("ACCESO_CLIENTE", "Carné, tarjeta o permiso de acceso del cliente"),
+    ("LLAVES_CONTROLES", "Llaves y controles de acceso"),
+    ("CASILLERO_LOCKER", "Casillero o locker"),
+    ("DOTACION_EPP", "Dotación y EPP reutilizables asignados"),
+    ("ELEMENTOS_ALP_CLIENTE", "Elementos asignados por ALP o por el cliente"),
+    ("CONFIRMACION_CLIENTE", "Confirmación del cliente (cuando aplique)"),
+    ("DESCUENTOS", "Novedades, faltantes o descuentos previa validación"),
+    ("RESPONSABLE_RECIBE", "Responsable de recibir y aprobar la entrega"),
+)
+
+VALIDACIONES_ESPECIFICAS_PAZ_SALVO = {
+    "OPERATIVO_BASICO": (
+        ("EPP_PERSONAL", "Elementos de protección personal"),
+    ),
+    "OPERATIVO_TECNICO": (
+        ("RELACION_HERRAMIENTAS", "Relación detallada de herramientas"),
+        ("EQUIPOS_MAQUINARIA", "Equipos y maquinaria asignados"),
+        ("CANTIDAD_ESTADO", "Cantidad y estado de los elementos"),
+        ("PROPIEDAD_ELEMENTOS", "Identificar si el elemento pertenece a ALP o al cliente"),
+        ("INVENTARIOS_CUSTODIA", "Inventarios y otros elementos bajo custodia"),
+        ("RESPONSABLE_TECNICO", "Persona que recibe y valida la entrega"),
+    ),
+    "ADMINISTRATIVO_CAMPO": (
+        ("EQUIPOS_COMUNICACION", "Equipos tecnológicos y de comunicación"),
+        ("USUARIOS_ACCESOS", "Usuarios, correos, aplicaciones y accesos asignados"),
+        ("DOCUMENTOS_ARCHIVOS", "Documentos, archivos e información bajo responsabilidad"),
+        ("ACTA_PUESTO", "Acta de entrega del puesto de trabajo"),
+        ("ACTIVIDADES", "Actividades finalizadas, en curso y pendientes"),
+        ("UBICACION_ARCHIVOS", "Ubicación de archivos y documentos"),
+        ("RECEPTOR_PUESTO", "Persona que recibe el puesto"),
+    ),
+    "SUPERVISION_LIDERAZGO": (
+        ("HERRAMIENTAS_EQUIPOS", "Herramientas, equipos y elementos asignados"),
+        ("USUARIOS_CLAVES", "Usuarios, claves y accesos tecnológicos"),
+        ("REGISTROS_OPERACION", "Documentos, inventarios y registros de la operación"),
+        ("ACTA_GESTION", "Acta de entrega de gestión"),
+        ("ACTIVIDADES_PROGRAMADAS", "Estado de las actividades programadas"),
+        ("PENDIENTES_CLIENTE", "Pendientes operativos, administrativos y compromisos con el cliente"),
+        ("RECEPTOR_OPERACION", "Persona que recibe la operación"),
+    ),
+    "SERVICIOS_ESPECIALES": (
+        ("HERRAMIENTAS_TECNICAS", "Herramientas y equipos técnicos"),
+        ("INSTRUMENTOS_MEDICION", "Instrumentos de medición y control"),
+        ("EPP_ESPECIALIZADO", "Elementos de protección personal especializados"),
+        ("INSUMOS_CUSTODIA", "Insumos o elementos bajo custodia"),
+        ("ESTADO_SERVICIO", "Estado de actividades y pendientes del servicio"),
+        ("SUMINISTROS_CLIENTE", "Elementos suministrados por el cliente"),
+    ),
+    "TRABAJO_ALTURAS": (
+        ("EQUIPO_DESCRIPCION", "Descripción individual del equipo contra caídas"),
+        ("EQUIPO_CODIGO", "Código o identificación del equipo"),
+        ("EQUIPO_CANTIDAD", "Cantidad entregada"),
+        ("EQUIPO_ESTADO", "Estado al momento de la devolución"),
+        ("EQUIPO_NOVEDADES", "Faltantes o novedades"),
+        ("CONCEPTO_COORDINADOR", "Concepto del coordinador de trabajo en alturas"),
+        ("RECEPTOR_ALTURAS", "Nombre y confirmación de quien recibe"),
+    ),
+    # Perfil administrativo interno: validaciones transversales y de custodia.
+    "ADMINISTRATIVO_INTERNO": (
+        ("EQUIPOS_TECNOLOGICOS", "Equipos tecnológicos asignados"),
+        ("USUARIOS_CORREOS", "Usuarios, correos y accesos tecnológicos"),
+        ("DOCUMENTOS_CUSTODIA", "Documentos, archivos e inventarios bajo custodia"),
+        ("ENTREGA_PENDIENTES", "Entrega de actividades y pendientes del puesto"),
+    ),
+}
+
+
+def _catalogo_validaciones_perfil(codigo_perfil: str) -> list[dict]:
+    # Campos de consulta, no son registros persistidos en BD.
+    especificas = VALIDACIONES_ESPECIFICAS_PAZ_SALVO.get(codigo_perfil, ())
+    return [
+        {"CodigoElemento": codigo, "NombreElemento": nombre,
+         "TipoValidacion": tipo, "Obligatorio": False,
+         "EstadosPermitidos": ["ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"],
+         "ObservacionObligatoria": False}
+        for tipo, grupo in (("TRANSVERSAL", VALIDACIONES_TRANSVERSALES_PAZ_SALVO),
+                            ("PERFIL", especificas))
+        for codigo, nombre in grupo
+    ]
+
+
+# Validaciones por perfil: persistencia independiente en QA.
+# Se utiliza la tabla public."PazYSalvoOperacionesValidacion".
+class RespuestaValidacionPazSalvo(BaseModel):
+    CodigoElemento: str
+    Estado: str | None = None
+    Observacion: str | None = None
+
+
+class GuardarValidacionesPazSalvo(BaseModel):
+    Validaciones: list[RespuestaValidacionPazSalvo]
+
+
+def _contexto_validaciones_paz_salvo(db: Session, id_paz_y_salvo: int, bloquear: bool = False):
+    sufijo_bloqueo = ' FOR UPDATE OF ps' if bloquear else ''
+    caso = db.execute(text('''
+        SELECT ps."IdRegistroPersonal", rl."EstadoCasoRRLL"
+        FROM public."PazYSalvoOperaciones" ps
+        INNER JOIN public."RetiroLaboral" rl
+          ON rl."IdRetiroLaboral" = ps."IdRetiroLaboral"
+        WHERE ps."IdPazYSalvo" = :id
+          AND COALESCE(rl."Activo", true) = true
+    ''' + sufijo_bloqueo), {"id": id_paz_y_salvo}).mappings().first()
+    if not caso:
+        raise HTTPException(status_code=404, detail="Paz y Salvo activo no encontrado.")
+    cargo = _obtener_cargo_actual(db, int(caso["IdRegistroPersonal"]))
+    if not cargo:
+        raise HTTPException(status_code=409, detail="El trabajador no tiene cargo configurado.")
+    perfil = db.execute(text('''
+        SELECT p."CodigoPerfil", p."NombrePerfil"
+        FROM public."CargoPerfilPazSalvoOperaciones" cp
+        INNER JOIN public."PerfilPazSalvoOperaciones" p
+          ON p."IdPerfilPazSalvoOperaciones" = cp."IdPerfilPazSalvoOperaciones"
+        WHERE cp."IdCargo" = :cargo
+          AND COALESCE(cp."Activo", true) = true
+          AND COALESCE(p."Activo", true) = true
+        LIMIT 1
+    '''), {"cargo": cargo["IdCargo"]}).mappings().first()
+    if not perfil:
+        raise HTTPException(status_code=409, detail="El cargo no tiene perfil de Paz y Salvo activo.")
+    codigo = str(perfil["CodigoPerfil"] or "").strip().upper()
+    if codigo not in VALIDACIONES_ESPECIFICAS_PAZ_SALVO:
+        raise HTTPException(status_code=409, detail="El perfil no tiene catálogo de validaciones configurado.")
+    return caso, cargo, codigo, _catalogo_validaciones_perfil(codigo)
+
+
+@router.get("/paz-salvo/{id_paz_y_salvo}/validaciones")
+def consultar_validaciones_paz_salvo(
+    id_paz_y_salvo: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    # Solo muestra las validaciones transversales y las del perfil del cargo.
+    caso, cargo, codigo, catalogo = _contexto_validaciones_paz_salvo(db, id_paz_y_salvo)
+    filas = db.execute(text('''
+        SELECT "CodigoElemento", "CodigoPerfil", "Estado", "Observacion"
+        FROM public."PazYSalvoOperacionesValidacion"
+        WHERE "IdPazYSalvo" = :id AND "CodigoPerfil" = :perfil
+    '''), {"id": id_paz_y_salvo, "perfil": codigo}).mappings().all()
+    respuestas = {fila["CodigoElemento"]: fila for fila in filas}
+    resultado = []
+    for item in catalogo:
+        registro = respuestas.get(item["CodigoElemento"])
+        resultado.append({**item,
+            "Estado": registro["Estado"] if registro else None,
+            "Observacion": registro["Observacion"] if registro else None})
+    return {"success": True, "data": {
+        "IdPazYSalvo": id_paz_y_salvo,
+        "IdCargo": cargo["IdCargo"], "NombreCargo": cargo["NombreCargo"],
+        "CodigoPerfil": codigo, "Validaciones": resultado,
+    }}
+
+
+@router.put("/paz-salvo/{id_paz_y_salvo}/validaciones")
+def guardar_validaciones_paz_salvo(
+    id_paz_y_salvo: int,
+    payload: GuardarValidacionesPazSalvo,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+    _commit: bool = True,
+):
+    # Guarda solo las respuestas enviadas, sin exigir diligenciar todas.
+    try:
+        caso, cargo, codigo, catalogo = _contexto_validaciones_paz_salvo(db, id_paz_y_salvo, bloquear=True)
+        if str(caso["EstadoCasoRRLL"] or "").strip().upper() != "PENDIENTE_OPERACIONES":
+            raise HTTPException(status_code=409, detail="Solo se pueden editar casos pendientes de Operaciones.")
+        permitidos = {item["CodigoElemento"] for item in catalogo}
+        codigos = [str(r.CodigoElemento or "").strip().upper() for r in payload.Validaciones]
+        if len(codigos) != len(set(codigos)) or any(c not in permitidos for c in codigos):
+            raise HTTPException(status_code=400, detail="Hay validaciones duplicadas o ajenas al perfil del cargo.")
+        usuario = _obtener_usuario_actual_rq(current)["Usuario"]
+        for respuesta, elemento in zip(payload.Validaciones, codigos):
+            estado = str(respuesta.Estado or "").strip().upper() or None
+            if estado not in {None, "ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"}:
+                raise HTTPException(status_code=400, detail=f"Estado no permitido para {elemento}.")
+            observacion = _normalizar_texto_opcional(respuesta.Observacion)
+            db.execute(text('''
+                INSERT INTO public."PazYSalvoOperacionesValidacion" (
+                    "IdPazYSalvo", "CodigoElemento", "CodigoPerfil", "Estado",
+                    "Observacion", "UsuarioCreacion"
+                ) VALUES (:id, :elemento, :perfil, :estado, :observacion, :usuario)
+                ON CONFLICT ("IdPazYSalvo", "CodigoElemento")
+                DO UPDATE SET "CodigoPerfil" = EXCLUDED."CodigoPerfil",
+                  "Estado" = EXCLUDED."Estado", "Observacion" = EXCLUDED."Observacion",
+                  "FechaActualizacion" = CURRENT_TIMESTAMP,
+                  "UsuarioActualizacion" = :usuario
+            '''), {"id": id_paz_y_salvo, "elemento": elemento,
+                  "perfil": codigo, "estado": estado,
+                  "observacion": observacion, "usuario": usuario})
+        if _commit:
+            db.commit()
+        return {"success": True, "data": {"IdPazYSalvo": id_paz_y_salvo,
+                "CodigoPerfil": codigo, "CantidadGuardada": len(codigos)}}
+    except Exception:
+        db.rollback()
+        raise
+
+
+# Respuestas individuales de los elementos parametrizados por perfil.
+# Endpoints independientes: no modifican el formulario histórico, PDF ni RRLL.
+class RespuestaElementoPerfilPazSalvo(BaseModel):
+    IdPerfilElementoPazSalvoOperaciones: int
+    Estado: str | None = None
+    Observacion: str | None = None
+
+
+class GuardarElementosPerfilPazSalvo(BaseModel):
+    ElementosPerfil: list[RespuestaElementoPerfilPazSalvo]
+
+
+def _contexto_elementos_perfil_paz_salvo(
+    db: Session, id_paz_y_salvo: int, bloquear: bool = False
+):
+    sufijo = " FOR UPDATE OF ps" if bloquear else ""
+    caso = db.execute(text("""
+        SELECT ps."IdRegistroPersonal", rl."EstadoCasoRRLL"
+        FROM public."PazYSalvoOperaciones" ps
+        INNER JOIN public."RetiroLaboral" rl
+            ON rl."IdRetiroLaboral" = ps."IdRetiroLaboral"
+        WHERE ps."IdPazYSalvo" = :id
+          AND COALESCE(rl."Activo", true) = true
+    """ + sufijo), {"id": id_paz_y_salvo}).mappings().first()
+    if not caso:
+        raise HTTPException(status_code=404, detail="Paz y Salvo activo no encontrado.")
+
+    cargo = _obtener_cargo_actual(db, int(caso["IdRegistroPersonal"]))
+    if not cargo:
+        raise HTTPException(status_code=409, detail="El trabajador no tiene cargo vigente.")
+
+    perfil = db.execute(text("""
+        SELECT p."IdPerfilPazSalvoOperaciones", p."CodigoPerfil"
+        FROM public."CargoPerfilPazSalvoOperaciones" cp
+        INNER JOIN public."PerfilPazSalvoOperaciones" p
+            ON p."IdPerfilPazSalvoOperaciones" = cp."IdPerfilPazSalvoOperaciones"
+        WHERE cp."IdCargo" = :cargo
+          AND COALESCE(cp."Activo", true) = true
+          AND COALESCE(p."Activo", true) = true
+        LIMIT 1
+    """), {"cargo": cargo["IdCargo"]}).mappings().first()
+    if not perfil:
+        raise HTTPException(status_code=409, detail="El cargo no tiene perfil de Paz y Salvo activo.")
+
+    elementos = db.execute(text("""
+        SELECT "IdPerfilElementoPazSalvoOperaciones", "CodigoElemento",
+               "NombreElemento", "TipoGestion", "Obligatorio"
+        FROM public."PerfilElementoPazSalvoOperaciones"
+        WHERE "IdPerfilPazSalvoOperaciones" = :perfil AND "Activo" = true
+        ORDER BY "IdPerfilElementoPazSalvoOperaciones"
+    """), {"perfil": perfil["IdPerfilPazSalvoOperaciones"]}).mappings().all()
+    return caso, cargo, perfil, elementos
+
+
+@router.get("/paz-salvo/{id_paz_y_salvo}/elementos-perfil")
+def consultar_elementos_perfil_paz_salvo(
+    id_paz_y_salvo: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Consulta catálogo vigente y respuestas guardadas del caso, sin escribir datos."""
+    caso, cargo, perfil, elementos = _contexto_elementos_perfil_paz_salvo(db, id_paz_y_salvo)
+    filas = db.execute(text("""
+        SELECT "IdPerfilElementoPazSalvoOperaciones", "Estado", "Observacion"
+        FROM public."PazYSalvoOperacionesElementoPerfilRespuesta"
+        WHERE "IdPazYSalvo" = :id AND "Activo" = true
+    """), {"id": id_paz_y_salvo}).mappings().all()
+    respuestas = {int(f["IdPerfilElementoPazSalvoOperaciones"]): f for f in filas}
+    resultado = []
+    for elemento in elementos:
+        item = dict(elemento)
+        respuesta = respuestas.get(int(item["IdPerfilElementoPazSalvoOperaciones"]))
+        item["Estado"] = respuesta["Estado"] if respuesta else None
+        item["Observacion"] = respuesta["Observacion"] if respuesta else None
+        resultado.append(item)
+    return {"success": True, "data": {
+        "IdPazYSalvo": id_paz_y_salvo,
+        "IdCargo": cargo["IdCargo"],
+        "NombreCargo": cargo["NombreCargo"],
+        "CodigoPerfil": perfil["CodigoPerfil"],
+        "ElementosPerfil": resultado,
+    }}
+
+
+@router.put("/paz-salvo/{id_paz_y_salvo}/elementos-perfil")
+def guardar_elementos_perfil_paz_salvo(
+    id_paz_y_salvo: int,
+    payload: GuardarElementosPerfilPazSalvo,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+    _commit: bool = True,
+):
+    """Guarda solo elementos enviados y válidos del perfil en casos pendientes."""
+    try:
+        caso, cargo, perfil, elementos = _contexto_elementos_perfil_paz_salvo(
+            db, id_paz_y_salvo, bloquear=True
+        )
+        if str(caso["EstadoCasoRRLL"] or "").strip().upper() != "PENDIENTE_OPERACIONES":
+            raise HTTPException(status_code=409, detail="Solo se pueden editar casos pendientes de Operaciones.")
+
+        permitidos = {int(e["IdPerfilElementoPazSalvoOperaciones"]) for e in elementos}
+        ids = [r.IdPerfilElementoPazSalvoOperaciones for r in payload.ElementosPerfil]
+        if len(ids) != len(set(ids)) or any(i not in permitidos for i in ids):
+            raise HTTPException(status_code=400, detail="Hay elementos duplicados o ajenos al perfil vigente.")
+
+        usuario = _obtener_usuario_actual_rq(current)["Usuario"]
+        for respuesta in payload.ElementosPerfil:
+            estado = str(respuesta.Estado or "").strip().upper() or None
+            if estado not in {None, "ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"}:
+                raise HTTPException(status_code=400, detail="Estado no permitido para el elemento.")
+            observacion = _normalizar_texto_opcional(respuesta.Observacion)
+            parametros = {
+                "id": id_paz_y_salvo,
+                "elemento": respuesta.IdPerfilElementoPazSalvoOperaciones,
+                "estado": estado,
+                "observacion": observacion,
+                "usuario": usuario,
+            }
+            # El bloqueo del caso serializa escrituras concurrentes. No se presupone
+            # una restricción UNIQUE no verificada en la tabla nueva.
+            existente = db.execute(text("""
+                SELECT "IdRespuestaElementoPerfil"
+                FROM public."PazYSalvoOperacionesElementoPerfilRespuesta"
+                WHERE "IdPazYSalvo" = :id
+                  AND "IdPerfilElementoPazSalvoOperaciones" = :elemento
+                FOR UPDATE
+            """), parametros).scalar_one_or_none()
+            if existente is None:
+                db.execute(text("""
+                    INSERT INTO public."PazYSalvoOperacionesElementoPerfilRespuesta" (
+                        "IdPazYSalvo", "IdPerfilElementoPazSalvoOperaciones",
+                        "Estado", "Observacion", "Activo", "UsuarioCreacion"
+                    ) VALUES (:id, :elemento, :estado, :observacion, true, :usuario)
+                """), parametros)
+            else:
+                parametros["respuesta"] = existente
+                db.execute(text("""
+                    UPDATE public."PazYSalvoOperacionesElementoPerfilRespuesta"
+                    SET "Estado" = :estado, "Observacion" = :observacion,
+                        "Activo" = true, "FechaActualizacion" = CURRENT_TIMESTAMP,
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdRespuestaElementoPerfil" = :respuesta
+                """), parametros)
+        if _commit:
+            db.commit()
+        return {"success": True, "data": {
+            "IdPazYSalvo": id_paz_y_salvo,
+            "CodigoPerfil": perfil["CodigoPerfil"],
+            "CantidadGuardada": len(ids),
+        }}
+    except Exception:
+        db.rollback()
+        raise
+
+
 @router.get("/elementos/trabajador/{id_registro_personal}")
 def obtener_elementos_paz_salvo_por_trabajador(
     id_registro_personal: int,
     db: Session = Depends(get_db),
     current=Depends(require_operaciones_retiros),
 ):
-    """
-    Devuelve los elementos de Paz y Salvo aplicables al trabajador.
-
-    Prioridad:
-    1. Configuración específica del cargo en CargoElementoPazSalvo.
-    2. Si el cargo no tiene elementos específicos activos, usa la
-       clasificación ADMINISTRATIVO / OPERATIVO configurada en
-       CargoClasificacionPazSalvo y toma los elementos generales desde
-       ClasificacionElementoPazSalvo.
-    """
-    trabajador = _obtener_trabajador_contratado(
-        db=db,
-        id_registro_personal=id_registro_personal,
-    )
-
-    cargo = _obtener_cargo_actual(
-        db=db,
-        id_registro_personal=id_registro_personal,
-    )
-
-    if cargo is None:
-        return {
-            "success": True,
-            "data": {
-                "IdRegistroPersonal": id_registro_personal,
-                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
-                "NombreCompleto": trabajador["NombreCompleto"],
-                "IdCargo": None,
-                "NombreCargo": None,
-                "TipoClasificacion": None,
-                "OrigenConfiguracion": "SIN_CONFIGURACION",
-                "Elementos": [],
-            },
-        }
-
-    # ============================================================
-    # PRIORIDAD 1: ELEMENTOS ESPECÍFICOS DEL CARGO
-    # ============================================================
-    query_elementos_cargo = text("""
-        SELECT
-            ceps."IdCargoElementoPazSalvo" AS "IdConfiguracionElemento",
-            ceps."IdCargo",
-            ceps."CodigoElemento",
-            ceps."NombreElemento"
-        FROM public."CargoElementoPazSalvo" ceps
-        WHERE ceps."IdCargo" = :id_cargo
-          AND COALESCE(ceps."Activo", true) = true
-        ORDER BY
-            ceps."IdCargoElementoPazSalvo" ASC;
-    """)
-
-    elementos_cargo = db.execute(
-        query_elementos_cargo,
-        {"id_cargo": cargo["IdCargo"]},
-    ).mappings().all()
-
-    if elementos_cargo:
-        return {
-            "success": True,
-            "data": {
-                "IdRegistroPersonal": id_registro_personal,
-                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
-                "NombreCompleto": trabajador["NombreCompleto"],
-                "IdCargo": cargo["IdCargo"],
-                "NombreCargo": cargo["NombreCargo"],
-                "TipoClasificacion": None,
-                "OrigenConfiguracion": "CARGO",
-                "Elementos": [
-                    {
-                        "IdConfiguracionElemento": int(
-                            row["IdConfiguracionElemento"]
-                        ),
-                        "CodigoElemento": str(
-                            row["CodigoElemento"] or ""
-                        ).strip(),
-                        "NombreElemento": str(
-                            row["NombreElemento"] or ""
-                        ).strip(),
-                    }
-                    for row in elementos_cargo
-                ],
-            },
-        }
-
-    # ============================================================
-    # PRIORIDAD 2: CLASIFICACIÓN ADMINISTRATIVO / OPERATIVO
-    # ============================================================
-    query_clasificacion = text("""
-        SELECT
-            ccps."TipoClasificacion"
-        FROM public."CargoClasificacionPazSalvo" ccps
-        WHERE ccps."IdCargo" = :id_cargo
-          AND COALESCE(ccps."Activo", true) = true
-        LIMIT 1;
-    """)
-
-    clasificacion = db.execute(
-        query_clasificacion,
-        {"id_cargo": cargo["IdCargo"]},
-    ).mappings().first()
-
-    if not clasificacion:
-        return {
-            "success": True,
-            "data": {
-                "IdRegistroPersonal": id_registro_personal,
-                "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
-                "NombreCompleto": trabajador["NombreCompleto"],
-                "IdCargo": cargo["IdCargo"],
-                "NombreCargo": cargo["NombreCargo"],
-                "TipoClasificacion": None,
-                "OrigenConfiguracion": "SIN_CONFIGURACION",
-                "Elementos": [],
-            },
-        }
-
-    tipo_clasificacion = str(
-        clasificacion["TipoClasificacion"] or ""
-    ).strip().upper()
-
-    query_elementos_clasificacion = text("""
-        SELECT
-            ceps."IdClasificacionElementoPazSalvo"
-                AS "IdConfiguracionElemento",
-            ceps."TipoClasificacion",
-            ceps."CodigoElemento",
-            ceps."NombreElemento"
-        FROM public."ClasificacionElementoPazSalvo" ceps
-        WHERE ceps."TipoClasificacion" = :tipo_clasificacion
-          AND COALESCE(ceps."Activo", true) = true
-        ORDER BY
-            ceps."IdClasificacionElementoPazSalvo" ASC;
-    """)
-
-    elementos_clasificacion = db.execute(
-        query_elementos_clasificacion,
-        {"tipo_clasificacion": tipo_clasificacion},
-    ).mappings().all()
-
-    return {
-        "success": True,
-        "data": {
-            "IdRegistroPersonal": id_registro_personal,
-            "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
-            "NombreCompleto": trabajador["NombreCompleto"],
-            "IdCargo": cargo["IdCargo"],
-            "NombreCargo": cargo["NombreCargo"],
-            "TipoClasificacion": tipo_clasificacion,
-            "OrigenConfiguracion": (
-                "CLASIFICACION"
-                if elementos_clasificacion
-                else "SIN_CONFIGURACION"
-            ),
-            "Elementos": [
-                {
-                    "IdConfiguracionElemento": int(
-                        row["IdConfiguracionElemento"]
-                    ),
-                    "CodigoElemento": str(
-                        row["CodigoElemento"] or ""
-                    ).strip(),
-                    "NombreElemento": str(
-                        row["NombreElemento"] or ""
-                    ).strip(),
-                }
-                for row in elementos_clasificacion
-            ],
-        },
+    # Carga elementos antiguos y validaciones por perfil sin cambiar guardados.
+    trabajador = _obtener_trabajador_contratado(db, id_registro_personal)
+    cargo = _obtener_cargo_actual(db, id_registro_personal)
+    data = {
+        "IdRegistroPersonal": id_registro_personal,
+        "NumeroIdentificacion": trabajador["NumeroIdentificacion"],
+        "NombreCompleto": trabajador["NombreCompleto"],
+        "IdCargo": cargo["IdCargo"] if cargo else None,
+        "NombreCargo": cargo["NombreCargo"] if cargo else None,
+        "TipoClasificacion": None,
+        "OrigenConfiguracion": "SIN_CONFIGURACION",
+        "IdPerfilPazSalvoOperaciones": None,
+        "NombrePerfilPazSalvo": None,
+        "CodigoPerfilPazSalvo": None,
+        "Responsabilidades": [],
+        "Elementos": [],
+        "ValidacionesPerfil": [],
+        "ElementosPerfil": [],
     }
+    if cargo is None:
+        return {"success": True, "data": data}
+
+    id_cargo = cargo["IdCargo"]
+    perfil = _obtener_responsabilidades_perfil_paz_salvo(db, id_cargo)
+    data.update({
+        "IdPerfilPazSalvoOperaciones": perfil["IdPerfilPazSalvoOperaciones"],
+        "NombrePerfilPazSalvo": perfil["NombrePerfilPazSalvo"],
+        "Responsabilidades": perfil["Responsabilidades"],
+    })
+    perfil_row = db.execute(text('''
+        SELECT p."CodigoPerfil"
+        FROM public."CargoPerfilPazSalvoOperaciones" cp
+        JOIN public."PerfilPazSalvoOperaciones" p
+          ON p."IdPerfilPazSalvoOperaciones" = cp."IdPerfilPazSalvoOperaciones"
+        WHERE cp."IdCargo" = :id_cargo
+          AND COALESCE(cp."Activo", true) = true
+          AND COALESCE(p."Activo", true) = true
+        LIMIT 1
+    '''), {"id_cargo": id_cargo}).mappings().first()
+    codigo_perfil = str(perfil_row["CodigoPerfil"] or "").strip().upper() if perfil_row else ""
+    data["CodigoPerfilPazSalvo"] = codigo_perfil or None
+    data["ValidacionesPerfil"] = _catalogo_validaciones_perfil(codigo_perfil) if codigo_perfil else []
+
+    # Catálogo adicional por perfil: solo lectura. No reemplaza "Elementos"
+    # ni modifica la persistencia del Paz y Salvo existente.
+    if perfil["IdPerfilPazSalvoOperaciones"] is not None:
+        filas_perfil = db.execute(text('''
+            SELECT "IdPerfilElementoPazSalvoOperaciones" AS "IdConfiguracionElemento",
+                   "CodigoElemento", "NombreElemento", "TipoGestion", "Obligatorio"
+            FROM public."PerfilElementoPazSalvoOperaciones"
+            WHERE "IdPerfilPazSalvoOperaciones" = :id_perfil
+              AND "Activo" = true
+            ORDER BY "IdPerfilElementoPazSalvoOperaciones"
+        '''), {"id_perfil": perfil["IdPerfilPazSalvoOperaciones"]}).mappings().all()
+        data["ElementosPerfil"] = [dict(fila) for fila in filas_perfil]
+
+    # Compatibilidad: conservar los elementos específicos ya parametrizados.
+    filas_cargo = db.execute(text('''
+        SELECT "IdCargoElementoPazSalvo" AS "IdConfiguracionElemento",
+               "CodigoElemento", "NombreElemento"
+        FROM public."CargoElementoPazSalvo"
+        WHERE "IdCargo" = :id_cargo AND COALESCE("Activo", true) = true
+        ORDER BY "IdCargoElementoPazSalvo"
+    '''), {"id_cargo": id_cargo}).mappings().all()
+    if filas_cargo:
+        data["Elementos"] = [dict(fila) for fila in filas_cargo]
+        data["OrigenConfiguracion"] = "CARGO"
+    else:
+        clasificacion = db.execute(text('''
+            SELECT "TipoClasificacion" FROM public."CargoClasificacionPazSalvo"
+            WHERE "IdCargo" = :id_cargo AND COALESCE("Activo", true) = true
+            LIMIT 1
+        '''), {"id_cargo": id_cargo}).mappings().first()
+        if clasificacion:
+            tipo = str(clasificacion["TipoClasificacion"] or "").strip().upper()
+            data["TipoClasificacion"] = tipo
+            filas = db.execute(text('''
+                SELECT "IdClasificacionElementoPazSalvo" AS "IdConfiguracionElemento",
+                       "CodigoElemento", "NombreElemento"
+                FROM public."ClasificacionElementoPazSalvo"
+                WHERE "TipoClasificacion" = :tipo AND COALESCE("Activo", true) = true
+                ORDER BY "IdClasificacionElementoPazSalvo"
+            '''), {"tipo": tipo}).mappings().all()
+            if filas:
+                data["Elementos"] = [dict(fila) for fila in filas]
+                data["OrigenConfiguracion"] = "CLASIFICACION"
+
+    # Si la clasificación antigua está vacía, mostrar los campos del perfil.
+    # ID None indica que aún NO hay parametrización individual persistida.
+    # No se inventan IDs que puedan confundirse con registros de la BD.
+    if not data["Elementos"] and data["ValidacionesPerfil"]:
+        data["Elementos"] = [
+            {"IdConfiguracionElemento": None,
+             "CodigoElemento": v["CodigoElemento"],
+             "NombreElemento": v["NombreElemento"],
+             "TipoValidacion": v["TipoValidacion"],
+             "Obligatorio": False}
+            for v in data["ValidacionesPerfil"]
+        ]
+        data["OrigenConfiguracion"] = "PERFIL"
+    return {"success": True, "data": data}
 
 
 @router.get("/usuario-actual")
@@ -1903,6 +2345,36 @@ def obtener_proceso_abierto_para_continuar(
 
 
 
+def _guardar_bloques_perfil_en_transaccion(db, current, id_paz_y_salvo: int, raw: str | None):
+    """Guarda bloques opcionales sin commit; el guardado principal controla la transacción."""
+    if not raw:
+        return
+    try:
+        bloques = json.loads(raw)
+        if not isinstance(bloques, dict):
+            raise ValueError("Se esperaba un objeto JSON")
+        for clave in ("ElementosPerfil", "Validaciones", "Responsabilidades"):
+            if clave in bloques and not isinstance(bloques[clave], list):
+                raise ValueError(f"{clave} debe ser una lista")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"BloquesPerfilJSON inválido: {exc}") from exc
+    if bloques.get("ElementosPerfil"):
+        guardar_elementos_perfil_paz_salvo(
+            id_paz_y_salvo, GuardarElementosPerfilPazSalvo(ElementosPerfil=bloques["ElementosPerfil"]),
+            db=db, current=current, _commit=False,
+        )
+    if bloques.get("Validaciones"):
+        guardar_validaciones_paz_salvo(
+            id_paz_y_salvo, GuardarValidacionesPazSalvo(Validaciones=bloques["Validaciones"]),
+            db=db, current=current, _commit=False,
+        )
+    if bloques.get("Responsabilidades"):
+        guardar_responsabilidades_paz_salvo(
+            id_paz_y_salvo, GuardarResponsabilidadesPazSalvo(Responsabilidades=bloques["Responsabilidades"]),
+            db=db, current=current, _commit=False,
+        )
+
+
 # ============================================================
 # ACTUALIZAR PROCESO PENDIENTE - PAZ Y SALVO EXISTENTE
 # ============================================================
@@ -1946,6 +2418,7 @@ async def actualizar_paz_salvo_proceso_pendiente(
     UsuariosClavesDispositivos: str | None = Form(None),
     CorreoSupervisora: str | None = Form(None),
     EstadoPazYSalvo: str = Form(...),
+    BloquesPerfilJSON: str | None = Form(None),
 
     # Compatibilidad con un PDF manual.
     archivo: UploadFile | None = File(None),
@@ -2584,6 +3057,7 @@ async def actualizar_paz_salvo_proceso_pendiente(
         # - NO se cambia RetiroLaboral.EstadoCasoRRLL.
         # - NO se llena FechaEnvioOperaciones.
         # El envío formal sigue siendo un paso separado.
+        _guardar_bloques_perfil_en_transaccion(db, current, IdPazYSalvo, BloquesPerfilJSON)
         db.commit()
 
         return {
@@ -4108,6 +4582,7 @@ async def guardar_retiro_operaciones(
     UsuariosClavesDispositivos: str | None = Form(None),
     CorreoSupervisora: str | None = Form(None),
     EstadoPazYSalvo: str = Form(...),
+    BloquesPerfilJSON: str | None = Form(None),
 
     # Compatibilidad con el flujo anterior.
     # El flujo actual genera automáticamente el PDF oficial cuando
@@ -4669,6 +5144,7 @@ async def guardar_retiro_operaciones(
         # Mientras el caso siga en PENDIENTE_OPERACIONES no se cambia
         # RegistroPersonal.IdEstadoProceso. El estado global 30 se asignará
         # únicamente cuando Operaciones haga el envío formal a RRLL.
+        _guardar_bloques_perfil_en_transaccion(db, current, id_paz_y_salvo, BloquesPerfilJSON)
         db.commit()
 
         return {
