@@ -1787,6 +1787,32 @@ def exportar_excel_rq_seleccion(
 
 
 # ============================================================
+# KPI 1 - CONSULTA DE COBERTURA (NO SINCRONIZA ESTADO RQ)
+# ============================================================
+
+@router.get("/indicadores/cobertura")
+def indicadores_cobertura_rq_seleccion(
+    db: Session = Depends(get_db),
+    current=Depends(require_seleccion_rq),
+):
+    """Devuelve RQ y coberturas con las mismas reglas de la bandeja.
+
+    No modifica EstadoRQ ni registra actualizaciones de las RQ.
+    El helper de festivos existente puede autoprovisionar el calendario
+    FestivoColombia si el año consultado aún no está parametrizado.
+    """
+    rows = db.execute(text(CONSULTA_BASE_RQ_SELECCION + """
+        WHERE COALESCE(rq."Activo", true) = true
+          AND COALESCE(rq."EnviadoSeleccion", false) = true
+          AND rq."FechaEnvioSeleccion" IS NOT NULL
+          AND NULLIF(TRIM(COALESCE(rq."TipoRQ", '')), '') IS NOT NULL
+        ORDER BY rq."FechaEnvioSeleccion" DESC, rq."IdRQOperaciones" DESC
+    """)).mappings().all()
+    items = [_serializar_rq_seleccion(db, row) for row in rows]
+    return {"success": True, "total": len(items), "data": items}
+
+
+# ============================================================
 # DETALLE - DEBE IR AL FINAL PARA NO CAPTURAR /catalogos/...
 # ============================================================
 
