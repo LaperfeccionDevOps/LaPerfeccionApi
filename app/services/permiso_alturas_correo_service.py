@@ -54,7 +54,15 @@ def _consultar_resumen(db, id_permiso: int) -> dict | None:
                    to_char(P."FechaHoraInicioTarea" AT TIME ZONE :zona, 'HH24:MI') AS hora_inicio,
                    to_char(P."FechaHoraFinTarea" AT TIME ZONE :zona, 'HH24:MI') AS hora_fin,
                    to_char(P."FechaAutorizacion" AT TIME ZONE :zona, 'DD/MM/YYYY HH24:MI') AS fecha_autorizacion,
-                   P."TipoTrabajoAlturas" AS tipo_trabajo,
+                   COALESCE(
+                       (SELECT string_agg(O."Nombre", ', ' ORDER BY O."Orden")
+                        FROM public."PermisoTrabajoAlturasOpcion" PO
+                        JOIN public."OpcionPermisoAlturas" O
+                          ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+                        WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
+                          AND O."Tipo" = 'MECANISMO'),
+                       P."TipoTrabajoAlturas"
+                   ) AS tipo_trabajo,
                    P."AlturaAproximadaMetros" AS altura,
                    P."DescripcionProcedimiento" AS descripcion,
                    P."Observaciones" AS observaciones

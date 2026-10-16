@@ -74,11 +74,12 @@ TEXTOS_LEGALES = [
     "precauciones señaladas han sido cumplidas y autorizo el trabajo.",
 ]
 
+# Logo con NIT (el mismo de las cartas de citación y los certificados).
 RUTA_LOGO = (
     Path(__file__).resolve().parents[1]
     / "assets"
     / "comunicaciones"
-    / "LOGO_EMPRESA.jpeg"
+    / "LOGO_EMPRESA_NIT.png"
 )
 
 ZONA_HORARIA = "America/Bogota"
@@ -217,6 +218,10 @@ def _logo_recortado() -> bytes | None:
         )
         imagen = imagen.crop(caja)
 
+    # El original es grande (~900 KB); para el encabezado basta un ancho menor
+    # y así el PDF no aumenta de peso.
+    imagen.thumbnail((900, 900))
+
     salida = BytesIO()
     imagen.save(salida, format="PNG")
     return salida.getvalue()
@@ -270,14 +275,47 @@ def _consultar_datos(db, id_permiso: int) -> dict | None:
                    to_char(P."FechaHoraInicioTarea" AT TIME ZONE :zona, 'DD/MM/YYYY HH24:MI') AS inicio,
                    to_char(P."FechaHoraFinTarea" AT TIME ZONE :zona, 'DD/MM/YYYY HH24:MI') AS fin,
                    to_char(P."FechaAutorizacion" AT TIME ZONE :zona, 'DD/MM/YYYY HH24:MI') AS fecha_autorizacion,
-                   P."TipoTrabajoAlturas" AS tipo_trabajo,
+                   COALESCE(
+                       (SELECT string_agg(O."Nombre", ', ' ORDER BY O."Orden")
+                        FROM public."PermisoTrabajoAlturasOpcion" PO
+                        JOIN public."OpcionPermisoAlturas" O
+                          ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+                        WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
+                          AND O."Tipo" = 'MECANISMO'),
+                       P."TipoTrabajoAlturas"
+                   ) AS tipo_trabajo,
                    P."DescripcionProcedimiento" AS descripcion,
-                   P."HerramientasUtensilios" AS herramientas,
+                   COALESCE(
+                       (SELECT string_agg(O."Nombre", ', ' ORDER BY O."Orden")
+                        FROM public."PermisoTrabajoAlturasOpcion" PO
+                        JOIN public."OpcionPermisoAlturas" O
+                          ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+                        WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
+                          AND O."Tipo" = 'HERRAMIENTA'),
+                       P."HerramientasUtensilios"
+                   ) AS herramientas,
                    P."AlturaAproximadaMetros" AS altura,
                    P."ReEntrenamiento" AS re_entrenamiento,
                    P."TrabajoSuspension" AS trabajo_suspension,
-                   P."SistemasAcceso" AS sistemas_acceso,
-                   P."SistemasIngenieria" AS sistemas_ingenieria,
+                   COALESCE(
+                       (SELECT string_agg(O."Nombre", ', ' ORDER BY O."Orden")
+                        FROM public."PermisoTrabajoAlturasOpcion" PO
+                        JOIN public."OpcionPermisoAlturas" O
+                          ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+                        WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
+                          AND O."Tipo" = 'SISTEMA_ACCESO'),
+                       P."SistemasAcceso"
+                   ) AS sistemas_acceso,
+                   COALESCE(
+                       (SELECT string_agg(O."Nombre", ', ' ORDER BY O."Orden")
+                        FROM public."PermisoTrabajoAlturasOpcion" PO
+                        JOIN public."OpcionPermisoAlturas" O
+                          ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+                        WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
+                          AND O."Tipo" = 'SISTEMA_INGENIERIA'),
+                       P."SistemasIngenieria"
+                   ) AS sistemas_ingenieria,
+                   P."AplicaMedidasColectivas" AS aplica_medidas_colectivas,
                    P."MedidasColectivas" AS medidas_colectivas,
                    P."OtroElementoProteccion" AS otro_epp,
                    P."Observaciones" AS observaciones,
@@ -469,6 +507,14 @@ def _seccion_tarea(p: dict) -> list:
     return [KeepTogether(tabla)]
 
 
+def _medidas_colectivas(p: dict) -> str | None:
+    # "No aplica" si así se respondió; en permisos anteriores a la pregunta,
+    # el texto que se haya escrito.
+    if p["aplica_medidas_colectivas"] is False:
+        return "No aplica"
+    return p["medidas_colectivas"]
+
+
 def _seccion_medidas(p: dict) -> list:
     anchos = [2.9 * cm, 1.1 * cm, 2.6 * cm, 1.1 * cm, 3.4 * cm]
     anchos.append(ANCHO_UTIL - sum(anchos))
@@ -476,7 +522,7 @@ def _seccion_medidas(p: dict) -> list:
         _fila_seccion("3. MEDIDAS DE PREVENCIÓN", 6),
         [_p("Re-entrenamiento", ESTILO_NEGRITA), _p(_si_no(p["re_entrenamiento"])),
          _p("Trabajo en suspensión", ESTILO_NEGRITA), _p(_si_no(p["trabajo_suspension"])),
-         _p("Medidas colectivas de prevención ¿Cuáles?", ESTILO_NEGRITA), _p(p["medidas_colectivas"])],
+         _p("Medidas colectivas de prevención ¿Cuáles?", ESTILO_NEGRITA), _p(_medidas_colectivas(p))],
         [_p("Sistemas de acceso a utilizar ¿Cuál?", ESTILO_NEGRITA), _p(p["sistemas_acceso"]), "", "",
          _p("Sistemas de ingeniería ¿Cuál?", ESTILO_NEGRITA), _p(p["sistemas_ingenieria"])],
     ]
@@ -650,7 +696,7 @@ def _dibujar_pagina(canvas, documento, borrador: bool, id_permiso: int):
 
     # Encabezado: logo | título | código, versión y fecha.
     logo = _logo_recortado()
-    celda_logo = _imagen(logo, 4.4 * cm, 1.5 * cm) if logo else ""
+    celda_logo = _imagen(logo, 4.5 * cm, 1.7 * cm) if logo else ""
     encabezado = Table(
         [[
             celda_logo,

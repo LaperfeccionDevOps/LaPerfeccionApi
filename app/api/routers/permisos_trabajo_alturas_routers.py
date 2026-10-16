@@ -84,6 +84,21 @@ def _sql_lista_completa(tipo: str) -> str:
                  AND I."Activo"
            )"""
 
+# Listas de selección múltiple del paso 3 (tabla "OpcionPermisoAlturas").
+# Campo de la API -> tipo de opción en la base de datos.
+TIPOS_OPCION_TAREA = {
+    "mecanismos": "MECANISMO",
+    "sistemas_ingenieria": "SISTEMA_INGENIERIA",
+    "herramientas": "HERRAMIENTA",
+    "sistemas_acceso": "SISTEMA_ACCESO",
+}
+# Listas en las que se debe elegir al menos una opción (nombre para mensajes).
+OPCIONES_TAREA_OBLIGATORIAS = {
+    "mecanismos": "Mecanismo de trabajo en alturas",
+    "herramientas": "Herramientas a utilizar",
+    "sistemas_acceso": "Sistemas de acceso a utilizar",
+}
+
 # Firma del trabajador: imagen PNG dibujada en pantalla, enviada como data URL.
 PREFIJO_FIRMA_PNG = "data:image/png;base64,"
 FIRMA_PNG_ENCABEZADO = b"\x89PNG\r\n\x1a\n"
@@ -151,6 +166,18 @@ class PermisoTrabajoAlturasOut(BaseModel):
     estado: str = ESTADO_EN_DILIGENCIAMIENTO
 
 
+class OpcionTareaOut(BaseModel):
+    id_opcion_permiso_alturas: int
+    tipo: str
+    nombre: str
+    orden: int
+
+
+class OpcionSeleccionadaOut(BaseModel):
+    id_opcion_permiso_alturas: int
+    nombre: str
+
+
 class PermisoDetalleOut(PermisoTrabajoAlturasOut):
     # 2. Datos básicos y 3. Medidas de prevención (paso 3 del formulario).
     tipo_trabajo_alturas: str | None = None
@@ -160,8 +187,14 @@ class PermisoDetalleOut(PermisoTrabajoAlturasOut):
     re_entrenamiento: bool | None = None
     sistemas_acceso: str | None = None
     sistemas_ingenieria: str | None = None
+    aplica_medidas_colectivas: bool | None = None
     medidas_colectivas: str | None = None
     trabajo_suspension: bool | None = None
+    # Opciones elegidas en el paso 3, por lista (mecanismos, herramientas,
+    # sistemas_acceso, sistemas_ingenieria). Los campos de texto anteriores
+    # (tipo_trabajo_alturas, herramientas_utensilios, sistemas_acceso,
+    # sistemas_ingenieria) solo tienen datos en permisos anteriores.
+    selecciones: dict[str, list[OpcionSeleccionadaOut]] = {}
     # 4. Elementos de protección.
     otro_elemento_proteccion: str | None = None
     proteccion_completa: bool = False
@@ -239,18 +272,23 @@ class ProteccionIn(BaseModel):
 
 
 class TareaPermisoIn(BaseModel):
-    tipo_trabajo_alturas: str = Field(..., max_length=150)
     descripcion_procedimiento: str = Field(..., max_length=4000)
-    herramientas_utensilios: str = Field(..., max_length=4000)
     altura_aproximada_metros: Decimal = Field(
         ..., gt=0, le=Decimal("9999.99"), decimal_places=2
     )
     re_entrenamiento: bool
-    sistemas_acceso: str = Field(..., max_length=300)
-    # ¿Cuál? / ¿Cuáles? — opcionales: no todas las tareas los tienen.
-    sistemas_ingenieria: str | None = Field(None, max_length=300)
+    # ¿Aplican medidas colectivas de prevención? Si aplican, se describe cuál
+    # se utilizará (obligatorio); si no, no se guarda texto.
+    aplica_medidas_colectivas: bool
     medidas_colectivas: str | None = Field(None, max_length=300)
     trabajo_suspension: bool
+    # Selección múltiple (ids de "OpcionPermisoAlturas"). Mecanismos,
+    # herramientas y sistemas de acceso exigen al menos una opción;
+    # sistemas de ingeniería es opcional.
+    mecanismos: list[int] = []
+    herramientas: list[int] = []
+    sistemas_acceso: list[int] = []
+    sistemas_ingenieria: list[int] = []
 
 
 class TrabajadorBusquedaOut(BaseModel):
@@ -392,6 +430,55 @@ def listar_ciudades(
     return [dict(fila) for fila in filas]
 
 
+@router.get("/opciones-tarea", response_model=list[OpcionTareaOut])
+def listar_opciones_tarea(
+    db: Session = Depends(get_db),
+    _current=Depends(require_operaciones_alturas),
+):
+    """Opciones activas de las listas del paso 3 (todas las listas)."""
+    filas = db.execute(
+        text("""
+            SELECT "IdOpcionPermisoAlturas" AS id_opcion_permiso_alturas,
+                   "Tipo"                   AS tipo,
+                   "Nombre"                 AS nombre,
+                   "Orden"                  AS orden
+            FROM public."OpcionPermisoAlturas"
+            WHERE "Activo"
+            ORDER BY "Tipo", "Orden"
+        """)
+    ).mappings().all()
+
+    return [dict(fila) for fila in filas]
+
+
+def _selecciones_permiso(db: Session, id_permiso: int) -> dict[str, list[dict]]:
+    """Opciones elegidas en el paso 3, agrupadas por lista."""
+    filas = db.execute(
+        text("""
+            SELECT O."Tipo"                   AS tipo,
+                   O."IdOpcionPermisoAlturas" AS id_opcion_permiso_alturas,
+                   O."Nombre"                 AS nombre
+            FROM public."PermisoTrabajoAlturasOpcion" PO
+            JOIN public."OpcionPermisoAlturas" O
+              ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
+            WHERE PO."IdPermisoTrabajoAlturas" = :id_permiso
+            ORDER BY O."Tipo", O."Orden"
+        """),
+        {"id_permiso": id_permiso},
+    ).mappings().all()
+
+    campo_por_tipo = {tipo: campo for campo, tipo in TIPOS_OPCION_TAREA.items()}
+    selecciones = {campo: [] for campo in TIPOS_OPCION_TAREA}
+
+    for fila in filas:
+        selecciones[campo_por_tipo[fila["tipo"]]].append({
+            "id_opcion_permiso_alturas": fila["id_opcion_permiso_alturas"],
+            "nombre": fila["nombre"],
+        })
+
+    return selecciones
+
+
 SQL_PERMISOS = """
     SELECT P."IdPermisoTrabajoAlturas" AS id_permiso_trabajo_alturas,
            P."IdRegistroPersonalResponsable" AS id_registro_personal_responsable,
@@ -414,6 +501,7 @@ SQL_PERMISOS = """
            P."ReEntrenamiento"         AS re_entrenamiento,
            P."SistemasAcceso"          AS sistemas_acceso,
            P."SistemasIngenieria"      AS sistemas_ingenieria,
+           P."AplicaMedidasColectivas" AS aplica_medidas_colectivas,
            P."MedidasColectivas"       AS medidas_colectivas,
            P."TrabajoSuspension"       AS trabajo_suspension,
            P."OtroElementoProteccion"  AS otro_elemento_proteccion,
@@ -740,6 +828,7 @@ def obtener_permiso(
         **fila,
         "firmas": [dict(firma) for firma in firmas],
         "correos_notificacion": obtener_correos_notificacion(),
+        "selecciones": _selecciones_permiso(db, id_permiso),
     }
 
 
@@ -754,45 +843,91 @@ def guardar_tarea_permiso(
     _validar_permiso_editable(db, id_permiso)
 
     datos = {
-        "tipo_trabajo_alturas": _texto_requerido(
-            payload.tipo_trabajo_alturas, "Tipo de trabajo en alturas"
-        ),
         "descripcion_procedimiento": _texto_requerido(
             payload.descripcion_procedimiento,
             "Descripción y procedimiento de la tarea",
         ),
-        "herramientas_utensilios": _texto_requerido(
-            payload.herramientas_utensilios, "Herramientas y utensilios"
-        ),
         "altura_aproximada_metros": payload.altura_aproximada_metros,
         "re_entrenamiento": payload.re_entrenamiento,
-        "sistemas_acceso": _texto_requerido(
-            payload.sistemas_acceso, "Sistemas de acceso"
+        "aplica_medidas_colectivas": payload.aplica_medidas_colectivas,
+        "medidas_colectivas": (
+            _texto_requerido(
+                payload.medidas_colectivas,
+                "Medida colectiva de prevención",
+            )
+            if payload.aplica_medidas_colectivas
+            else None
         ),
-        "sistemas_ingenieria": (payload.sistemas_ingenieria or "").strip()
-        or None,
-        "medidas_colectivas": (payload.medidas_colectivas or "").strip()
-        or None,
         "trabajo_suspension": payload.trabajo_suspension,
     }
+
+    elegidas = {campo: getattr(payload, campo) for campo in TIPOS_OPCION_TAREA}
+
+    for campo, etiqueta in OPCIONES_TAREA_OBLIGATORIAS.items():
+        if not elegidas[campo]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Selecciona al menos una opción en: {etiqueta}.",
+            )
+
+    # Cada id debe existir, estar activo y pertenecer a su lista.
+    tipo_por_opcion = dict(
+        db.execute(
+            text("""
+                SELECT "IdOpcionPermisoAlturas", "Tipo"
+                FROM public."OpcionPermisoAlturas"
+                WHERE "Activo"
+            """)
+        ).all()
+    )
+
+    for campo, ids in elegidas.items():
+        if len(ids) != len(set(ids)) or any(
+            tipo_por_opcion.get(id_opcion) != TIPOS_OPCION_TAREA[campo]
+            for id_opcion in ids
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Hay opciones no válidas o inactivas en la tarea.",
+            )
 
     try:
         db.execute(
             text("""
                 UPDATE public."PermisoTrabajoAlturas"
-                SET "TipoTrabajoAlturas"       = :tipo_trabajo_alturas,
-                    "DescripcionProcedimiento" = :descripcion_procedimiento,
-                    "HerramientasUtensilios"   = :herramientas_utensilios,
+                SET "DescripcionProcedimiento" = :descripcion_procedimiento,
                     "AlturaAproximadaMetros"   = :altura_aproximada_metros,
                     "ReEntrenamiento"          = :re_entrenamiento,
-                    "SistemasAcceso"           = :sistemas_acceso,
-                    "SistemasIngenieria"       = :sistemas_ingenieria,
+                    "AplicaMedidasColectivas"  = :aplica_medidas_colectivas,
                     "MedidasColectivas"        = :medidas_colectivas,
                     "TrabajoSuspension"        = :trabajo_suspension
                 WHERE "IdPermisoTrabajoAlturas" = :id_permiso
             """),
             {**datos, "id_permiso": id_permiso},
         )
+
+        # Se reemplaza la selección completa de las cuatro listas.
+        db.execute(
+            text("""
+                DELETE FROM public."PermisoTrabajoAlturasOpcion"
+                WHERE "IdPermisoTrabajoAlturas" = :id_permiso
+            """),
+            {"id_permiso": id_permiso},
+        )
+
+        for ids in elegidas.values():
+            for id_opcion in ids:
+                db.execute(
+                    text("""
+                        INSERT INTO public."PermisoTrabajoAlturasOpcion" (
+                            "IdPermisoTrabajoAlturas",
+                            "IdOpcionPermisoAlturas"
+                        )
+                        VALUES (:id_permiso, :id_opcion)
+                    """),
+                    {"id_permiso": id_permiso, "id_opcion": id_opcion},
+                )
+
         db.commit()
     except Exception:
         db.rollback()
@@ -1044,14 +1179,15 @@ def _pasos_pendientes(permiso: dict) -> list[str]:
     tarea_completa = all(
         permiso[campo] not in (None, "")
         for campo in (
-            "tipo_trabajo_alturas",
             "descripcion_procedimiento",
-            "herramientas_utensilios",
             "altura_aproximada_metros",
             "re_entrenamiento",
-            "sistemas_acceso",
+            "aplica_medidas_colectivas",
             "trabajo_suspension",
         )
+    ) and all(
+        permiso["selecciones"].get(campo)
+        for campo in OPCIONES_TAREA_OBLIGATORIAS
     )
 
     if not tarea_completa:
