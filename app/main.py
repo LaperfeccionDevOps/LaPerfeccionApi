@@ -131,6 +131,9 @@ from api.routers.solicitud_autorizacion_agenda_disciplinaria_router import (
     router as solicitud_autorizacion_agenda_disciplinaria_router,
 )
 from api.routers.tratamiento_datos_routers import router as tratamiento_datos_router
+from api.routers.salidas_no_conformes_routers import (
+    router as salidas_no_conformes_router,
+)
 
 
 app = FastAPI(
@@ -252,6 +255,7 @@ app.include_router(nomina_comunicaciones_routers.router)
 app.include_router(nomina_actualizacion_datos_router)
 app.include_router(panel_gerencial_rrll_router)
 app.include_router(reintegros_router)
+app.include_router(salidas_no_conformes_router)
 
 
 # ─────────────────────────────────────────────
