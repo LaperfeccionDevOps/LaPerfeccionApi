@@ -107,6 +107,7 @@ class RegisterRequest(BaseModel):
     contrasena: str
     estado: str = "ACTIVO"
     id_rol: int
+    id_area_responsable_snc: Optional[int] = None
 
 
 class AsignarRolRequest(BaseModel):
@@ -124,6 +125,7 @@ class ActualizarUsuarioRequest(BaseModel):
     estado: str
     id_rol: int
     permisos: list[str] = []
+    id_area_responsable_snc: Optional[int] = None
 
 
 # ------------------ Helpers ------------------
@@ -457,6 +459,51 @@ def me_restringido(
     }
 
 
+# ------------------ Área de trabajo SNC ------------------
+
+def _validar_area_snc(db: Session, id_area: Optional[int]):
+    if id_area is None:
+        return
+    if id_area <= 0:
+        raise HTTPException(status_code=400, detail="Selecciona un área de trabajo válida")
+    existe = db.execute(text('''
+        SELECT 1 FROM public."AreaResponsableSNC"
+        WHERE "IdAreaResponsableSNC" = :id_area AND "Activo" = TRUE
+    '''), {"id_area": id_area}).scalar()
+    if not existe:
+        raise HTTPException(status_code=400, detail="El área de trabajo no existe o está inactiva")
+
+
+def _guardar_area_snc(db: Session, id_usuario, id_area: int):
+    # Mantiene la asignación única vigente por usuario. No altera roles ni permisos.
+    db.execute(text('''
+        INSERT INTO public."UsuarioAreaSNC"
+            ("IdUsuario", "IdAreaResponsableSNC", "Activo")
+        VALUES (:id_usuario, :id_area, TRUE)
+        ON CONFLICT ("IdUsuario") DO UPDATE
+        SET "IdAreaResponsableSNC" = EXCLUDED."IdAreaResponsableSNC",
+            "Activo" = TRUE
+    '''), {"id_usuario": id_usuario, "id_area": id_area})
+
+
+@router.get("/auth/areas-trabajo-snc")
+def listar_areas_trabajo_snc(
+    db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
+):
+    filas = db.execute(text('''
+        SELECT "IdAreaResponsableSNC", "NombreArea"
+        FROM public."AreaResponsableSNC"
+        WHERE "Activo" = TRUE
+        ORDER BY "NombreArea"
+    ''')).mappings().all()
+    return [
+        {"id_area_responsable_snc": int(f["IdAreaResponsableSNC"]),
+         "nombre_area": f["NombreArea"]}
+        for f in filas
+    ]
+
+
 # ------------------ Users / roles management ------------------
 
 @router.post(
@@ -537,6 +584,8 @@ def registrar_usuario(
     if not rol:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El rol especificado no existe")
 
+    _validar_area_snc(db, payload.id_area_responsable_snc)
+
     usuario_actual = current["usuario"]
     usuario_creador = (
         usuario_actual.Usuario
@@ -563,6 +612,9 @@ def registrar_usuario(
                 IdRol=rol.IdRol,
             )
         )
+
+        if payload.id_area_responsable_snc is not None:
+            _guardar_area_snc(db, nuevo_usuario.IdUsuario, payload.id_area_responsable_snc)
 
         db.commit()
         db.refresh(nuevo_usuario)
@@ -621,6 +673,13 @@ def listar_usuarios(
         .all()
     )
 
+    areas_usuario = db.execute(text('''
+        SELECT "IdUsuario", "IdAreaResponsableSNC"
+        FROM public."UsuarioAreaSNC"
+        WHERE "Activo" = TRUE
+    ''')).mappings().all()
+    area_por_usuario = {str(f["IdUsuario"]): int(f["IdAreaResponsableSNC"]) for f in areas_usuario}
+
     return [
         {
             "id_usuario": str(fila.IdUsuario),
@@ -631,6 +690,7 @@ def listar_usuarios(
             "id_rol": fila.IdRol,
             "nombre_rol": fila.NombreRol,
             "permisos": _get_permisos(db, fila.IdUsuario),
+            "id_area_responsable_snc": area_por_usuario.get(str(fila.IdUsuario)),
         }
         for fila in filas
     ]
@@ -697,6 +757,8 @@ def actualizar_usuario(
         func.lower(Usuario.CorreoCorporativo) == correo_corporativo,
     ).first():
         raise HTTPException(status_code=400, detail="El correo corporativo ya se encuentra registrado")
+
+    _validar_area_snc(db, payload.id_area_responsable_snc)
 
     usuario_actual = current["usuario"]
     usuario_actualizacion = (
@@ -800,6 +862,8 @@ def actualizar_usuario(
             )
 
     try:
+        if payload.id_area_responsable_snc is not None:
+            _guardar_area_snc(db, usuario.IdUsuario, payload.id_area_responsable_snc)
         db.commit()
         db.refresh(usuario)
     except Exception as e:
@@ -816,6 +880,7 @@ def actualizar_usuario(
         "id_rol": rol.IdRol,
         "nombre_rol": rol.NombreRol,
         "permisos": _get_permisos(db, usuario.IdUsuario),
+        "id_area_responsable_snc": payload.id_area_responsable_snc,
     }
 
 

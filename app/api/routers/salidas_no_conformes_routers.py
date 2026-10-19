@@ -3,8 +3,9 @@
 Fases 1 a 3: catálogos, registro y consultas personales de SNC en QA.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 from uuid import UUID
+import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -29,23 +30,20 @@ def _verificar_base_qa(db: Session) -> None:
         )
 
 
-def _usuario_autorizado(current: dict) -> None:
-    """Fase piloto: acceso limitado a roles operativos previstos y globales."""
-    roles = set(current.get("roles_ids") or [])
-    roles = {int(rol) for rol in roles}
-    roles_permitidos = {1, 2, 3, 5, 6, 13, 15}
-    if not roles.intersection(roles_permitidos):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permisos para consultar los catálogos SNC.",
-        )
-
-
 def _validar_acceso(db: Session, current: dict) -> None:
+    """Acceso operativo SNC para usuarios autenticados y activos.
+
+    Las restricciones por creador/responsable se aplican en cada operación.
+    El panel general conserva su comprobación exclusiva de SUPERADMIN.
+    """
     _verificar_base_qa(db)
-    _usuario_autorizado(current)
-    usuario = current["usuario"]
-    if (usuario.HashEstado or "").strip().upper() != "ACTIVO":
+    usuario = current.get("usuario") if isinstance(current, dict) else None
+    if usuario is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesión sin usuario válido.",
+        )
+    if (getattr(usuario, "HashEstado", None) or "").strip().upper() != "ACTIVO":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="El usuario está inactivo.",
@@ -222,6 +220,33 @@ def registrar_snc(
         if activo is None:
             raise HTTPException(status_code=422, detail='La cuenta vinculada al responsable no está activa.')
 
+    # Capturar el área de origen al momento del registro. No se admite
+    # crear una SNC sin una asignación activa y válida del usuario creador.
+    areas_origen = db.execute(
+        text('''
+            SELECT ua."IdAreaResponsableSNC" AS id_area
+            FROM public."UsuarioAreaSNC" ua
+            INNER JOIN public."AreaResponsableSNC" a
+                ON a."IdAreaResponsableSNC" = ua."IdAreaResponsableSNC"
+            WHERE ua."IdUsuario" = :creador
+              AND ua."Activo" = TRUE
+              AND a."Activo" = TRUE
+            LIMIT 2
+        '''),
+        {'creador': id_creador},
+    ).scalars().all()
+    if not areas_origen:
+        raise HTTPException(
+            status_code=422,
+            detail='Tu usuario no tiene un área de trabajo activa configurada. Solicita su asignación antes de registrar la SNC.',
+        )
+    if len(areas_origen) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail='Tu usuario tiene más de un área de trabajo activa. Solicita corregir la asignación antes de registrar la SNC.',
+        )
+    id_area_origen = areas_origen[0]
+
     try:
         id_snc = db.execute(
             text('''
@@ -229,10 +254,11 @@ def registrar_snc(
                     "FechaSNC", "IdUsuarioCreador", "IdProcesoSNC",
                     "Descripcion", "Impacto", "IdAreaResponsableSNC",
                     "IdResponsableSNC", "IdUsuarioResponsable",
-                    "IdCorreoRemitente", "IdCorreoDestinatario", "Estado"
+                    "IdCorreoRemitente", "IdCorreoDestinatario", "Estado", "IdAreaOrigenSNC"
                 ) VALUES (
                     :fecha, :creador, :proceso, :descripcion, :impacto, :area,
-                    :responsable, :usuario_responsable, :remitente, :destinatario, 'ABIERTO'
+                    :responsable, :usuario_responsable, :remitente, :destinatario, 'ABIERTO',
+                    :area_origen
                 ) RETURNING "IdSalidaNoConforme"
             '''),
             {
@@ -242,6 +268,7 @@ def registrar_snc(
                 'descripcion': datos.descripcion,
                 'impacto': datos.impacto,
                 'area': datos.id_area_responsable_snc,
+                'area_origen': id_area_origen,
                 'responsable': datos.id_responsable_snc,
                 'usuario_responsable': id_usuario_responsable,
                 'remitente': datos.id_correo_remitente,
@@ -576,3 +603,249 @@ def cerrar_snc(
         "estado": "CERRADO",
         "mensaje": "Salida no conforme cerrada correctamente en QA.",
     }
+
+
+# Fase SUPERADMIN: consultas globales de solo lectura. No modifica el flujo personal.
+def _validar_superadmin(db: Session, current: dict) -> None:
+    _validar_acceso(db, current)
+    nombres = {
+        "".join(c for c in unicodedata.normalize("NFKD", str(nombre).upper())
+                if not unicodedata.combining(c)).replace(" ", "").replace("_", "").replace("-", "")
+        for nombre in (current.get("roles") or [])
+    }
+    if "SUPERADMIN" not in nombres and "SUPERADMINISTRADOR" not in nombres:
+        raise HTTPException(status_code=403, detail="Consulta exclusiva de SUPERADMIN.")
+
+
+def _serializar_snc(fila):
+    d = dict(fila)
+    for k, v in d.items():
+        if isinstance(v, UUID):
+            d[k] = str(v)
+    return d
+
+
+# Fechas del historial: permiten medir etapas aun después del cierre.
+_SNC_GENERAL_FROM = '''
+    FROM public."SalidaNoConforme" s
+    LEFT JOIN public."ProcesoSNC" p ON p."IdProcesoSNC" = s."IdProcesoSNC"
+    LEFT JOIN public."AreaResponsableSNC" a ON a."IdAreaResponsableSNC" = s."IdAreaResponsableSNC"
+    LEFT JOIN public."ResponsableSNC" r ON r."IdResponsableSNC" = s."IdResponsableSNC"
+    LEFT JOIN public."Usuario" uc ON uc."IdUsuario" = s."IdUsuarioCreador"
+    LEFT JOIN public."Usuario" ur ON ur."IdUsuario" = s."IdUsuarioResponsable"
+    LEFT JOIN public."UsuarioAreaSNC" ua ON ua."IdUsuario" = s."IdUsuarioCreador" AND ua."Activo" = TRUE
+    LEFT JOIN public."AreaResponsableSNC" ao ON ao."IdAreaResponsableSNC" = COALESCE(s."IdAreaOrigenSNC", ua."IdAreaResponsableSNC")
+    LEFT JOIN LATERAL (
+        SELECT MIN(h."FechaAccion") AS fecha_respuesta
+        FROM public."HistorialSalidaNoConforme" h
+        WHERE h."IdSalidaNoConforme" = s."IdSalidaNoConforme"
+          AND h."TipoAccion" = 'RESPUESTA'
+    ) hr ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT MIN(h."FechaAccion") AS fecha_cierre
+        FROM public."HistorialSalidaNoConforme" h
+        WHERE h."IdSalidaNoConforme" = s."IdSalidaNoConforme"
+          AND h."TipoAccion" = 'CIERRE'
+    ) hc ON TRUE
+'''
+
+_SNC_GENERAL_SELECT = '''
+    SELECT s."IdSalidaNoConforme" AS id,
+           s."FechaSNC" AS fecha_snc, s."FechaCreacion" AS fecha_creacion,
+           s."Estado" AS estado, s."Descripcion" AS descripcion,
+           s."Impacto" AS impacto, p."NombreProceso" AS proceso,
+           a."NombreArea" AS area_responsable,
+           ao."NombreArea" AS area_origen,
+           COALESCE(s."IdAreaOrigenSNC", ua."IdAreaResponsableSNC") AS id_area_origen_snc,
+           (s."IdAreaOrigenSNC" IS NOT NULL) AS origen_historico_confirmado,
+           s."IdAreaResponsableSNC" AS id_area_responsable_snc,
+           r."NombreResponsable" AS responsable,
+           uc."NombreUsuario" AS creado_por,
+           ur."NombreUsuario" AS usuario_responsable,
+           hr.fecha_respuesta, hc.fecha_cierre,
+           ROUND((EXTRACT(EPOCH FROM (COALESCE(hr.fecha_respuesta, CURRENT_TIMESTAMP) - s."FechaCreacion")) / 86400.0)::numeric, 2) AS dias_hasta_respuesta,
+           CASE WHEN hr.fecha_respuesta IS NULL THEN NULL ELSE
+             ROUND((EXTRACT(EPOCH FROM (COALESCE(hc.fecha_cierre, CURRENT_TIMESTAMP) - hr.fecha_respuesta)) / 86400.0)::numeric, 2)
+           END AS dias_hasta_cierre_desde_respuesta,
+           CASE WHEN hc.fecha_cierre IS NULL THEN NULL ELSE
+             ROUND((EXTRACT(EPOCH FROM (hc.fecha_cierre - s."FechaCreacion")) / 86400.0)::numeric, 2)
+           END AS dias_totales_cierre
+'''
+
+
+def _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo='TODAS'):
+    partes = []
+    parametros = {}
+    if estado:
+        if estado not in ('ABIERTO', 'RESPONDIDO', 'CERRADO'):
+            raise HTTPException(status_code=422, detail="Estado SNC inválido.")
+        partes.append('s."Estado" = :estado')
+        parametros['estado'] = estado
+    if busqueda and busqueda.strip():
+        partes.append('''(CAST(s."IdSalidaNoConforme" AS TEXT) ILIKE :busqueda
+                         OR uc."NombreUsuario" ILIKE :busqueda
+                         OR ur."NombreUsuario" ILIKE :busqueda
+                         OR r."NombreResponsable" ILIKE :busqueda)''')
+        parametros['busqueda'] = '%' + busqueda.strip() + '%'
+    if tipo not in ('TODAS', 'EMITIDAS', 'RECIBIDAS', 'INTERNAS'):
+        raise HTTPException(status_code=422, detail='Tipo de relación SNC inválido.')
+    origen = 'COALESCE(s."IdAreaOrigenSNC", ua."IdAreaResponsableSNC")'
+    destino = 's."IdAreaResponsableSNC"'
+    if id_area is not None:
+        parametros['id_area'] = id_area
+        if tipo == 'EMITIDAS':
+            partes.append(f'({origen} = :id_area AND {destino} <> :id_area)')
+        elif tipo == 'RECIBIDAS':
+            partes.append(f'({destino} = :id_area AND {origen} IS DISTINCT FROM :id_area)')
+        elif tipo == 'INTERNAS':
+            partes.append(f'({origen} = :id_area AND {destino} = :id_area)')
+        else:
+            partes.append(f'({origen} = :id_area OR {destino} = :id_area)')
+    elif tipo != 'TODAS':
+        if tipo == 'EMITIDAS':
+            partes.append(f'({origen} IS NOT NULL AND {origen} <> {destino})')
+        elif tipo == 'RECIBIDAS':
+            partes.append(f'({origen} IS DISTINCT FROM {destino})')
+        else:
+            partes.append(f'({origen} = {destino})')
+    if fecha_desde:
+        partes.append('s."FechaCreacion"::date >= :desde')
+        parametros['desde'] = fecha_desde
+    if fecha_hasta:
+        partes.append('s."FechaCreacion"::date <= :hasta')
+        parametros['hasta'] = fecha_hasta
+    if fecha_desde and fecha_hasta and fecha_desde > fecha_hasta:
+        raise HTTPException(status_code=422, detail="Rango de fechas inválido.")
+    return (' WHERE ' + ' AND '.join(partes)) if partes else '', parametros
+
+
+@router.get('/general')
+def listar_snc_general(
+    estado: str | None = None, busqueda: str | None = None,
+    id_area: int | None = None, fecha_desde: date | None = None,
+    fecha_hasta: date | None = None, pagina: int = 1,
+    limite: int = 15, tipo: str = 'TODAS', db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_superadmin(db, current)
+    if pagina < 1 or limite < 1 or limite > 15:
+        raise HTTPException(status_code=422, detail="Paginación inválida (máximo 15).")
+    where, params = _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
+    total = db.execute(text('SELECT COUNT(*) ' + _SNC_GENERAL_FROM + where), params).scalar_one()
+    filas = db.execute(text(_SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where +
+        ' ORDER BY s."FechaCreacion" DESC, s."IdSalidaNoConforme" DESC LIMIT :limite OFFSET :offset'),
+        {**params, 'limite': limite, 'offset': (pagina - 1) * limite}).mappings().all()
+    return {'total': total, 'pagina': pagina, 'limite': limite,
+            'paginas': max(1, (total + limite - 1) // limite),
+            'registros': [_serializar_snc(f) for f in filas]}
+
+
+@router.get('/general/indicadores')
+def indicadores_snc_general(
+    id_area: int | None = None, busqueda: str | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    tipo: str = 'TODAS',
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    # Totales únicos; relaciones por dirección.
+    _validar_superadmin(db, current)
+    where, params = _filtros_generales(None, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
+    base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where
+    filas = db.execute(text('''
+        SELECT estado, area_responsable, COUNT(*) AS total,
+               ROUND(AVG(dias_hasta_respuesta) FILTER (WHERE fecha_respuesta IS NOT NULL), 2) AS promedio_dias_respuesta,
+               ROUND(AVG(dias_totales_cierre) FILTER (WHERE fecha_cierre IS NOT NULL), 2) AS promedio_dias_cierre
+        FROM (''' + base + ''') datos
+        GROUP BY estado, area_responsable ORDER BY area_responsable, estado
+    '''), params).mappings().all()
+    meses = db.execute(text('''
+        SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion), 'YYYY-MM') AS mes,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE estado = 'ABIERTO') AS abiertos,
+               COUNT(*) FILTER (WHERE estado = 'RESPONDIDO') AS respondidos,
+               COUNT(*) FILTER (WHERE estado = 'CERRADO') AS cerrados,
+               COUNT(*) FILTER (WHERE id_area_origen_snc IS NOT NULL AND id_area_origen_snc <> id_area_responsable_snc AND (CAST(:area_scope AS BIGINT) IS NULL OR id_area_origen_snc = :area_scope)) AS emitidas,
+               COUNT(*) FILTER (WHERE id_area_origen_snc IS DISTINCT FROM id_area_responsable_snc AND (CAST(:area_scope AS BIGINT) IS NULL OR id_area_responsable_snc = :area_scope)) AS recibidas,
+               COUNT(*) FILTER (WHERE id_area_origen_snc = id_area_responsable_snc AND (CAST(:area_scope AS BIGINT) IS NULL OR id_area_origen_snc = :area_scope)) AS internas
+        FROM (''' + base + ''') datos
+        GROUP BY DATE_TRUNC('month', fecha_creacion)
+        ORDER BY DATE_TRUNC('month', fecha_creacion)
+    '''), {**params, 'area_scope': id_area}).mappings().all()
+    resumen = db.execute(text('''
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE fecha_respuesta IS NOT NULL) AS con_respuesta,
+               COUNT(*) FILTER (WHERE fecha_cierre IS NOT NULL) AS con_cierre,
+               ROUND(AVG(dias_hasta_respuesta) FILTER (WHERE fecha_respuesta IS NOT NULL), 2) AS promedio_dias_respuesta,
+               ROUND(AVG(dias_totales_cierre) FILTER (WHERE fecha_cierre IS NOT NULL), 2) AS promedio_dias_cierre,
+               COUNT(*) FILTER (WHERE id_area_origen_snc IS NULL) AS origen_sin_parametrizar,
+               COUNT(*) FILTER (WHERE id_area_origen_snc IS NOT NULL AND NOT origen_historico_confirmado) AS origen_inferido,
+               COUNT(*) FILTER (WHERE id_area_origen_snc = id_area_responsable_snc) AS internas
+        FROM (''' + base + ''') datos
+    '''), params).mappings().one()
+    # Desglose para el área seleccionada; no se cuentan internas como cruzadas.
+    if id_area is not None:
+        where_scope, scope_params = _filtros_generales(None, busqueda, id_area, fecha_desde, fecha_hasta, 'TODAS')
+        scope_base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where_scope
+        desglose = db.execute(text('''
+            SELECT COUNT(*) FILTER (WHERE id_area_origen_snc = :area AND id_area_responsable_snc <> :area) AS emitidas,
+                   COUNT(*) FILTER (WHERE id_area_responsable_snc = :area AND id_area_origen_snc IS DISTINCT FROM :area) AS recibidas,
+                   COUNT(*) FILTER (WHERE id_area_origen_snc = :area AND id_area_responsable_snc = :area) AS internas,
+                   COUNT(*) FILTER (WHERE id_area_responsable_snc = :area AND id_area_origen_snc IS NULL) AS recibidas_sin_origen
+            FROM (''' + scope_base + ''') datos
+        '''), {**scope_params, 'area': id_area}).mappings().one()
+    else:
+        desglose = {'emitidas': None, 'recibidas': None, 'internas': None, 'recibidas_sin_origen': None}
+    # Ranking global independiente del área seleccionada: cada relación externa aporta
+    # una emisión al origen (si está parametrizado) y una recepción al destino.
+    where_global, global_params = _filtros_generales(None, busqueda, None, fecha_desde, fecha_hasta)
+    ranking_base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where_global
+    ranking = db.execute(text('''
+        WITH datos AS (''' + ranking_base + '''), relaciones AS (
+          SELECT area_origen AS area, 'EMITIDAS' AS tipo, estado
+          FROM datos WHERE id_area_origen_snc IS NOT NULL AND id_area_origen_snc <> id_area_responsable_snc
+          UNION ALL
+          SELECT area_responsable AS area, 'RECIBIDAS' AS tipo, estado
+          FROM datos WHERE id_area_origen_snc IS DISTINCT FROM id_area_responsable_snc
+        )
+        SELECT COALESCE(area, 'Origen sin parametrizar') AS area,
+               COUNT(*) FILTER (WHERE tipo = 'EMITIDAS') AS emitidas,
+               COUNT(*) FILTER (WHERE tipo = 'RECIBIDAS') AS recibidas,
+               COUNT(*) FILTER (WHERE estado = 'ABIERTO') AS abiertas,
+               COUNT(*) FILTER (WHERE estado = 'RESPONDIDO') AS respondidas,
+               COUNT(*) FILTER (WHERE estado = 'CERRADO') AS cerradas
+        FROM relaciones GROUP BY area ORDER BY COUNT(*) DESC, area
+    '''), global_params).mappings().all()
+    return {
+        'grupos': [dict(f) for f in filas],
+        'totales': {e: sum(f['total'] for f in filas if f['estado'] == e)
+                    for e in ('ABIERTO', 'RESPONDIDO', 'CERRADO')},
+        'mensual': [dict(f) for f in meses],
+        'resumen': dict(resumen), 'desglose': dict(desglose),
+        'ranking': [dict(f) for f in ranking],
+    }
+
+
+@router.get('/general/{id_snc}')
+def detalle_snc_general(id_snc: int, db: Session = Depends(get_db),
+                        current: dict = Depends(get_current_user)):
+    _validar_superadmin(db, current)
+    if id_snc <= 0:
+        raise HTTPException(status_code=422, detail="Número SNC inválido.")
+    fila = db.execute(text(_SNC_GENERAL_SELECT + _SNC_GENERAL_FROM +
+        ' WHERE s."IdSalidaNoConforme" = :id'), {'id': id_snc}).mappings().first()
+    if not fila:
+        raise HTTPException(status_code=404, detail="La SNC no existe.")
+    gestion = db.execute(text('''SELECT "DescripcionGestion" AS analisis_causa,
+        "AccionCorrectiva" AS plan_accion, "Observaciones" AS observaciones,
+        "FechaGestion" AS fecha_respuesta
+        FROM public."GestionSalidaNoConforme"
+        WHERE "IdSalidaNoConforme" = :id AND "EstadoResultante" = 'RESPONDIDO'
+        AND "Activo" = TRUE ORDER BY "FechaGestion" DESC LIMIT 1'''), {'id': id_snc}).mappings().first()
+    historial = db.execute(text('''SELECT "TipoAccion" AS tipo_accion,
+        "EstadoAnterior" AS estado_anterior, "EstadoNuevo" AS estado_nuevo,
+        "Observacion" AS observacion, "FechaAccion" AS fecha_accion
+        FROM public."HistorialSalidaNoConforme"
+        WHERE "IdSalidaNoConforme" = :id ORDER BY "FechaAccion", "IdHistorialSalidaNoConforme"'''),
+        {'id': id_snc}).mappings().all()
+    return {'snc': _serializar_snc(fila), 'respuesta': dict(gestion) if gestion else None,
+            'historial': [dict(h) for h in historial]}
