@@ -15,6 +15,8 @@ router = APIRouter(
 
 
 class ActualizacionDatosRequest(BaseModel):
+    Nombres: Optional[str] = None
+    Apellidos: Optional[str] = None
     Email: Optional[str] = None
     Direccion: Optional[str] = None
     Barrio: Optional[str] = None
@@ -309,6 +311,8 @@ def obtener_detalle_trabajador_actualizacion_datos(
                 SELECT
                     rp."IdRegistroPersonal",
                     rp."NumeroIdentificacion",
+                    rp."Nombres",
+                    rp."Apellidos",
 
                     TRIM(
                         CONCAT(
@@ -417,7 +421,7 @@ def actualizar_datos_trabajador(
     - Solo modifica los campos enviados.
     - Los campos no enviados conservan su valor actual.
     - Permite completar valores que actualmente estén NULL o vacíos.
-    - Nombre e identificación son de solo lectura.
+    - La identificación es de solo lectura. Nombres y apellidos son editables.
     - Registra historial únicamente cuando existe un cambio real.
     - Si el trabajador no tiene DatosAdicionales, crea el registro
       únicamente cuando se envía Dirección, Barrio o Localidad.
@@ -445,6 +449,16 @@ def actualizar_datos_trabajador(
         )
 
     campos_registro_personal = {
+        "Nombres": {
+            "columna": "Nombres",
+            "codigo": "NOMBRES",
+            "nombre": "Nombres",
+        },
+        "Apellidos": {
+            "columna": "Apellidos",
+            "codigo": "APELLIDOS",
+            "nombre": "Apellidos",
+        },
         "Email": {
             "columna": "Email",
             "codigo": "CORREO",
@@ -510,6 +524,16 @@ def actualizar_datos_trabajador(
                 + ", ".join(sorted(campos_no_permitidos))
             ),
         )
+
+    # Evitar nombres o apellidos vacíos, incluidos espacios en blanco.
+    for campo in ("Nombres", "Apellidos"):
+        if campo in campos_enviados:
+            valor = getattr(payload, campo)
+            if not isinstance(valor, str) or not valor.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{campo} no puede quedar vacío.",
+                )
 
     try:
         trabajador = db.execute(
@@ -650,6 +674,8 @@ def actualizar_datos_trabajador(
                 )
 
         valores_registro_personal = {
+            "Nombres": payload.Nombres.strip() if payload.Nombres is not None else None,
+            "Apellidos": payload.Apellidos.strip() if payload.Apellidos is not None else None,
             "Email": payload.Email,
             "Celular": payload.Celular,
             "TieneWhatsapp": payload.TieneWhatsapp,
