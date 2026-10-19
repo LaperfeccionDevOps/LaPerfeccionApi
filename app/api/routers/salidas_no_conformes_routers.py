@@ -1,7 +1,4 @@
-"""Catálogos de Salidas No Conformes (SNC).
-
-Fases 1 a 3: catálogos, registro y consultas personales de SNC en QA.
-"""
+"""Catálogos y gestión de Salidas No Conformes (SNC) para QA y producción."""
 
 from datetime import date, datetime, timezone
 from uuid import UUID
@@ -20,13 +17,13 @@ from infrastructure.security.auth_dependencies import get_current_user
 router = APIRouter(prefix="/api/salidas-no-conformes", tags=["Salidas No Conformes"])
 
 
-def _verificar_base_qa(db: Session) -> None:
-    """Impide consultar estos endpoints fuera de la BD QA durante desarrollo."""
+def _verificar_base_permitida(db: Session) -> None:
+    """Permite SNC solo en las bases de datos autorizadas de QA y producción."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-    if nombre_bd != "LA_PERFECCION_QA":
+    if nombre_bd not in ("LA_PERFECCION_QA", "la_perfeccion"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Módulo SNC en desarrollo: conexión distinta de LA_PERFECCION_QA.",
+            detail="Módulo SNC no habilitado para la base de datos conectada.",
         )
 
 
@@ -36,7 +33,7 @@ def _validar_acceso(db: Session, current: dict) -> None:
     Las restricciones por creador/responsable se aplican en cada operación.
     El panel general conserva su comprobación exclusiva de SUPERADMIN.
     """
-    _verificar_base_qa(db)
+    _verificar_base_permitida(db)
     usuario = current.get("usuario") if isinstance(current, dict) else None
     if usuario is None:
         raise HTTPException(
@@ -172,7 +169,7 @@ def registrar_snc(
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
-    # Registra una SNC y su historial en una transacción; solo en QA.
+    # Registra una SNC y su historial en una transacción.
     _validar_acceso(db, current)
     try:
         id_creador = UUID(str(current["usuario"].IdUsuario))
@@ -305,7 +302,7 @@ def registrar_snc(
         'id_responsable_snc': datos.id_responsable_snc,
         'id_usuario_responsable': str(id_usuario_responsable) if id_usuario_responsable else None,
         'asignacion_pendiente': id_usuario_responsable is None,
-        'mensaje': 'SNC registrada correctamente en QA.',
+        'mensaje': 'SNC registrada correctamente.',
     }
 
 
@@ -484,7 +481,7 @@ def responder_snc(
     except Exception:
         db.rollback()
         raise
-    return {"id": id_snc, "estado": "RESPONDIDO", "mensaje": "Respuesta registrada correctamente en QA."}
+    return {"id": id_snc, "estado": "RESPONDIDO", "mensaje": "Respuesta registrada correctamente."}
 
 
 @router.get("/{id_snc}/respuesta")
@@ -601,7 +598,7 @@ def cerrar_snc(
     return {
         "id": id_snc,
         "estado": "CERRADO",
-        "mensaje": "Salida no conforme cerrada correctamente en QA.",
+        "mensaje": "Salida no conforme cerrada correctamente.",
     }
 
 
