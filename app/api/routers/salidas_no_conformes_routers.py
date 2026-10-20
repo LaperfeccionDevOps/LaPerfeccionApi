@@ -3,6 +3,13 @@
 from datetime import date, datetime, timezone
 from uuid import UUID
 import unicodedata
+import os
+import uuid
+import zipfile
+from pathlib import Path
+
+from fastapi import File, Form, UploadFile
+from fastapi.responses import FileResponse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -17,14 +24,17 @@ from infrastructure.security.auth_dependencies import get_current_user
 router = APIRouter(prefix="/api/salidas-no-conformes", tags=["Salidas No Conformes"])
 
 
-def _verificar_base_permitida(db: Session) -> None:
-    """Permite SNC solo en las bases de datos autorizadas de QA y producción."""
+def _ambiente_snc(db: Session) -> str:
+    """Determina el ambiente desde la BD real, sin depender del .env del servidor."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-    if nombre_bd not in ("LA_PERFECCION_QA", "la_perfeccion"):
+    ambientes = {"LA_PERFECCION_QA": "qa", "la_perfeccion": "prod"}
+    ambiente = ambientes.get(nombre_bd)
+    if ambiente is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Módulo SNC no habilitado para la base de datos conectada.",
+            detail="Módulo SNC no habilitado para esta base de datos.",
         )
+    return ambiente
 
 
 def _validar_acceso(db: Session, current: dict) -> None:
@@ -33,7 +43,7 @@ def _validar_acceso(db: Session, current: dict) -> None:
     Las restricciones por creador/responsable se aplican en cada operación.
     El panel general conserva su comprobación exclusiva de SUPERADMIN.
     """
-    _verificar_base_permitida(db)
+    _ambiente_snc(db)
     usuario = current.get("usuario") if isinstance(current, dict) else None
     if usuario is None:
         raise HTTPException(
@@ -122,16 +132,21 @@ def listar_responsables_snc(
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
-    """Lista los responsables activos en el orden definido por el Forms."""
+    """Lista responsables activos con su correo vinculado, conservando el orden Forms."""
     _validar_acceso(db, current)
     filas = db.execute(
         text('''
-            SELECT "IdResponsableSNC" AS id,
-                   "NombreResponsable" AS nombre,
-                   "IdUsuario" AS id_usuario
-            FROM public."ResponsableSNC"
-            WHERE "Activo" = TRUE
-            ORDER BY "OrdenVisualizacion" ASC
+            SELECT r."IdResponsableSNC" AS id,
+                   r."NombreResponsable" AS nombre,
+                   r."IdUsuario" AS id_usuario,
+                   r."IdCorreoSNC" AS id_correo_snc,
+                   c."Correo" AS correo
+            FROM public."ResponsableSNC" r
+            LEFT JOIN public."CorreoSNC" c
+                ON c."IdCorreoSNC" = r."IdCorreoSNC"
+               AND c."Activo" = TRUE
+            WHERE r."Activo" = TRUE
+            ORDER BY r."OrdenVisualizacion" ASC
         ''')
     ).mappings().all()
     return [
@@ -139,6 +154,8 @@ def listar_responsables_snc(
             "id": fila["id"],
             "nombre": fila["nombre"],
             "id_usuario": str(fila["id_usuario"]) if fila["id_usuario"] else None,
+            "id_correo_snc": fila["id_correo_snc"] if fila["correo"] else None,
+            "correo": fila["correo"],
         }
         for fila in filas
     ]
@@ -148,13 +165,13 @@ class CrearSNC(BaseModel):
     fecha_snc: date
     id_proceso_snc: int = Field(gt=0)
     descripcion: str = Field(min_length=1, max_length=20000)
-    impacto: str = Field(min_length=1, max_length=20000)
+    impacto: str | None = Field(default=None, max_length=20000)  # Compatibilidad con registros anteriores
     id_area_responsable_snc: int = Field(gt=0)
     id_responsable_snc: int = Field(gt=0)
     id_correo_remitente: int = Field(gt=0)
     id_correo_destinatario: int = Field(gt=0)
 
-    @field_validator("descripcion", "impacto")
+    @field_validator("descripcion")
     @classmethod
     def texto_no_vacio(cls, valor: str) -> str:
         valor = valor.strip()
@@ -263,7 +280,7 @@ def registrar_snc(
                 'creador': id_creador,
                 'proceso': datos.id_proceso_snc,
                 'descripcion': datos.descripcion,
-                'impacto': datos.impacto,
+                'impacto': (datos.impacto or '').strip(),  # Columna histórica conservada; formulario ya no la solicita
                 'area': datos.id_area_responsable_snc,
                 'area_origen': id_area_origen,
                 'responsable': datos.id_responsable_snc,
@@ -846,3 +863,288 @@ def detalle_snc_general(id_snc: int, db: Session = Depends(get_db),
         {'id': id_snc}).mappings().all()
     return {'snc': _serializar_snc(fila), 'respuesta': dict(gestion) if gestion else None,
             'historial': [dict(h) for h in historial]}
+
+
+# -----------------------------------------------------------------------------
+# EVIDENCIAS SNC. No modifica el mecanismo documental de Retiros.
+# El frontend debe llamar a /{id_snc}/responder-con-evidencias usando FormData.
+# -----------------------------------------------------------------------------
+_EXT_SNC = {
+    ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".csv": "text/csv", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+    ".m4a": "audio/mp4", ".ogg": "audio/ogg", ".mp4": "video/mp4",
+    ".mov": "video/quicktime", ".webm": "video/webm",
+}
+_MAX_ARCHIVOS_SNC = 5
+_MAX_DOCUMENTO_SNC = 20 * 1024 * 1024
+_MAX_VIDEO_SNC = 100 * 1024 * 1024
+_MAX_TOTAL_SNC = 150 * 1024 * 1024
+
+
+def _storage_snc(db: Session) -> Path:
+    """Separa físicamente evidencias QA y PROD según la BD conectada.
+
+    SNC_STORAGE_ROOT conserva compatibilidad con la configuración local de QA.
+    En producción solo se utiliza SNC_STORAGE_ROOT_PROD (o la ruta PROD).
+    """
+    ambiente = _ambiente_snc(db)
+    if ambiente == "prod":
+        configuracion = os.environ.get("SNC_STORAGE_ROOT_PROD")
+        predeterminada = "C:/LaPerfeccionStorage/calidad/prod/snc"
+    else:
+        configuracion = os.environ.get("SNC_STORAGE_ROOT_QA") or os.environ.get("SNC_STORAGE_ROOT")
+        predeterminada = "C:/LaPerfeccionStorage/calidad/qa/snc"
+    raiz = Path(configuracion or predeterminada).expanduser().resolve()
+    # Impide usar por error la carpeta de un ambiente en el otro.
+    otra = Path("C:/LaPerfeccionStorage/calidad/qa/snc" if ambiente == "prod"
+                else "C:/LaPerfeccionStorage/calidad/prod/snc").resolve()
+    if raiz == otra:
+        raise HTTPException(503, "La carpeta SNC configurada corresponde al otro ambiente.")
+    return raiz
+
+
+def _comprobar_cabecera_snc(extension: str, cabecera: bytes) -> bool:
+    # Validación de firmas básicas; debe complementarse con análisis antivirus
+    # en el servidor antes de habilitar archivos de terceros en producción.
+    if extension == ".pdf":
+        return cabecera.startswith(b"%PDF-")
+    if extension == ".png":
+        return cabecera.startswith(b"\x89PNG\r\n\x1a\n")
+    if extension in (".jpg", ".jpeg"):
+        return cabecera.startswith(b"\xff\xd8\xff")
+    if extension == ".webp":
+        return cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
+    if extension in (".docx", ".xlsx"):
+        return cabecera.startswith(b"PK\x03\x04")
+    if extension in (".doc", ".xls"):
+        return cabecera.startswith(bytes.fromhex("D0CF11E0A1B11AE1"))
+    if extension == ".wav":
+        return cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WAVE"
+    if extension == ".mp3":
+        return cabecera.startswith(b"ID3") or (len(cabecera) > 1 and cabecera[0] == 255 and (cabecera[1] & 224) == 224)
+    if extension in (".mp4", ".mov", ".m4a"):
+        return cabecera[4:8] == b"ftyp"
+    if extension in (".ogg",):
+        return cabecera.startswith(b"OggS")
+    if extension == ".webm":
+        return cabecera.startswith(bytes.fromhex("1A45DFA3"))
+    if extension == ".csv":
+        return b"\x00" not in cabecera
+    return False
+
+
+async def _guardar_temporal_snc(archivo: UploadFile, carpeta: Path):
+    nombre_original = Path((archivo.filename or "").replace("\\", "/")).name
+    extension = Path(nombre_original).suffix.lower()
+    if not nombre_original or extension not in _EXT_SNC:
+        raise HTTPException(422, "Formato no permitido para evidencia SNC.")
+    limite = _MAX_VIDEO_SNC if extension in (".mp4", ".mov", ".webm") else _MAX_DOCUMENTO_SNC
+    carpeta.mkdir(parents=True, exist_ok=True)
+    nombre_interno = uuid.uuid4().hex + extension
+    ruta = carpeta / nombre_interno
+    tamano = 0
+    cabecera = b""
+    try:
+        with ruta.open("xb") as salida:
+            while True:
+                bloque = await archivo.read(1024 * 1024)
+                if not bloque:
+                    break
+                if len(cabecera) < 32:
+                    cabecera += bloque[:32 - len(cabecera)]
+                tamano += len(bloque)
+                if tamano > limite:
+                    raise HTTPException(413, f"El archivo excede el límite de {limite // (1024*1024)} MB.")
+                salida.write(bloque)
+        if not tamano or not _comprobar_cabecera_snc(extension, cabecera):
+            raise HTTPException(422, f"El archivo {nombre_original} está vacío o su formato no coincide.")
+        if extension in (".docx", ".xlsx"):
+            try:
+                with zipfile.ZipFile(ruta) as z:
+                    nombres = set(z.namelist())
+                    esperado = "word/document.xml" if extension == ".docx" else "xl/workbook.xml"
+                    if esperado not in nombres:
+                        raise HTTPException(422, "Documento Office no válido.")
+            except (zipfile.BadZipFile, OSError) as exc:
+                raise HTTPException(422, "Documento Office dañado.") from exc
+        return {
+            "nombre_original": nombre_original[:255], "nombre_almacenado": nombre_interno,
+            "ruta": ruta, "tipo_mime": _EXT_SNC[extension], "tamano": tamano,
+        }
+    except BaseException:
+        ruta.unlink(missing_ok=True)
+        raise
+    finally:
+        await archivo.close()
+
+
+def _autorizar_evidencia_snc(db: Session, current: dict, id_snc: int):
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    snc = db.execute(text('''
+        SELECT "IdUsuarioCreador" AS creador, "IdUsuarioResponsable" AS responsable
+        FROM public."SalidaNoConforme" WHERE "IdSalidaNoConforme" = :id
+    '''), {"id": id_snc}).mappings().first()
+    if snc is None:
+        raise HTTPException(404, "SNC no encontrada.")
+    nombres = {
+        "".join(c for c in unicodedata.normalize("NFKD", str(n).upper())
+                if not unicodedata.combining(c)).replace(" ", "").replace("_", "").replace("-", "")
+        for n in (current.get("roles") or [])
+    }
+    admin = "SUPERADMIN" in nombres or "SUPERADMINISTRADOR" in nombres
+    if usuario not in (snc["creador"], snc["responsable"]) and not admin:
+        raise HTTPException(403, "No tiene permiso para consultar evidencias de esta SNC.")
+    return usuario
+
+
+@router.post("/{id_snc}/responder-con-evidencias", status_code=200)
+async def responder_snc_con_evidencias(
+    id_snc: int,
+    analisis_causa: str = Form(...),
+    plan_accion: str = Form(...),
+    archivos: list[UploadFile] | None = File(None),
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    if id_snc <= 0:
+        raise HTTPException(422, "Número de SNC inválido.")
+    # Validación explícita para el formulario multipart.
+    if not analisis_causa.strip() or not plan_accion.strip():
+        raise HTTPException(422, "Análisis de causa y plan de acción son obligatorios.")
+    if len(analisis_causa) > 20000 or len(plan_accion) > 20000:
+        raise HTTPException(422, "El texto supera el máximo de 20.000 caracteres.")
+    datos = ResponderSNC(analisis_causa=analisis_causa, plan_accion=plan_accion)
+    # Verificación previa para evitar subir archivos de SNC ajenas.
+    previa = db.execute(text('''
+        SELECT "IdUsuarioResponsable" AS responsable, "Estado" AS estado
+        FROM public."SalidaNoConforme" WHERE "IdSalidaNoConforme" = :id
+    '''), {"id": id_snc}).mappings().first()
+    if not previa:
+        raise HTTPException(404, "La SNC no existe.")
+    if previa["responsable"] != usuario:
+        raise HTTPException(403, "Solo el responsable asignado puede responder.")
+    if previa["estado"] not in ("ABIERTO", "EN_GESTION"):
+        raise HTTPException(409, "La SNC no admite respuestas en su estado actual.")
+    archivos = archivos or []
+    if len(archivos) > _MAX_ARCHIVOS_SNC:
+        raise HTTPException(422, f"Máximo {_MAX_ARCHIVOS_SNC} evidencias por respuesta.")
+    carpeta = _storage_snc(db) / str(id_snc)
+    guardados = []
+    try:
+        # Primero validar y escribir archivos, sin cambiar aún el estado de SNC.
+        total = 0
+        for archivo in archivos:
+            meta = await _guardar_temporal_snc(archivo, carpeta)
+            guardados.append(meta)
+            total += meta["tamano"]
+            if total > _MAX_TOTAL_SNC:
+                raise HTTPException(413, "Las evidencias superan 150 MB en total.")
+        snc = db.execute(text('''
+            SELECT "IdUsuarioResponsable" AS responsable, "Estado" AS estado
+            FROM public."SalidaNoConforme"
+            WHERE "IdSalidaNoConforme" = :id FOR UPDATE
+        '''), {"id": id_snc}).mappings().first()
+        if not snc:
+            raise HTTPException(404, "La SNC no existe.")
+        if snc["responsable"] != usuario:
+            raise HTTPException(403, "Solo el responsable asignado puede responder.")
+        if snc["estado"] not in ("ABIERTO", "EN_GESTION"):
+            raise HTTPException(409, "La SNC no admite respuestas en su estado actual.")
+        id_gestion = db.execute(text('''
+            INSERT INTO public."GestionSalidaNoConforme" (
+                "IdSalidaNoConforme", "IdUsuarioGestion", "DescripcionGestion",
+                "AccionCorrectiva", "Observaciones", "EstadoResultante", "FechaGestion", "Activo"
+            ) VALUES (:id, :usuario, :causa, :plan, NULL, 'RESPONDIDO', CURRENT_TIMESTAMP, TRUE)
+            RETURNING "IdGestionSalidaNoConforme"
+        '''), {"id": id_snc, "usuario": usuario,
+               "causa": datos.analisis_causa, "plan": datos.plan_accion}).scalar_one()
+        for meta in guardados:
+            db.execute(text('''
+                INSERT INTO public."GestionSalidaNoConformeAdjunto" (
+                    "IdGestionSalidaNoConforme", "NombreOriginal", "NombreAlmacenado",
+                    "RutaArchivo", "TipoMime", "TamanoBytes", "IdUsuarioCarga", "Activo"
+                ) VALUES (:gestion, :original, :interno, :ruta, :mime, :tamano, :usuario, TRUE)
+            '''), {"gestion": id_gestion, "original": meta["nombre_original"],
+                   "interno": meta["nombre_almacenado"],
+                   "ruta": str(meta["ruta"]), "mime": meta["tipo_mime"],
+                   "tamano": meta["tamano"], "usuario": usuario})
+        db.execute(text('''
+            INSERT INTO public."HistorialSalidaNoConforme" (
+                "IdSalidaNoConforme", "IdUsuarioAccion", "TipoAccion",
+                "EstadoAnterior", "EstadoNuevo", "Observacion", "FechaAccion"
+            ) VALUES (:id, :usuario, 'RESPUESTA', :anterior, 'RESPONDIDO',
+                'El responsable registró análisis de causa, plan de acción y evidencias', CURRENT_TIMESTAMP)
+        '''), {"id": id_snc, "usuario": usuario, "anterior": snc["estado"]})
+        db.execute(text('''
+            UPDATE public."SalidaNoConforme"
+            SET "Estado" = 'RESPONDIDO', "FechaActualizacion" = CURRENT_TIMESTAMP
+            WHERE "IdSalidaNoConforme" = :id
+        '''), {"id": id_snc})
+        db.commit()
+        return {"id": id_snc, "id_gestion": id_gestion, "estado": "RESPONDIDO",
+                "evidencias": len(guardados), "mensaje": "Respuesta y evidencias registradas correctamente."}
+    except BaseException:
+        db.rollback()
+        for meta in guardados:
+            meta["ruta"].unlink(missing_ok=True)
+        raise
+
+
+@router.get("/{id_snc}/evidencias")
+def listar_evidencias_snc(
+    id_snc: int, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _autorizar_evidencia_snc(db, current, id_snc)
+    filas = db.execute(text('''
+        SELECT a."IdAdjuntoSNC" AS id, a."NombreOriginal" AS nombre,
+               a."TipoMime" AS tipo_mime, a."TamanoBytes" AS tamano_bytes,
+               a."FechaCreacion" AS fecha_creacion
+        FROM public."GestionSalidaNoConformeAdjunto" a
+        INNER JOIN public."GestionSalidaNoConforme" g
+          ON g."IdGestionSalidaNoConforme" = a."IdGestionSalidaNoConforme"
+        WHERE g."IdSalidaNoConforme" = :id AND a."Activo" = TRUE
+        ORDER BY a."IdAdjuntoSNC"
+    '''), {"id": id_snc}).mappings().all()
+    return [dict(fila) for fila in filas]
+
+
+@router.get("/evidencias/{id_adjunto}/descargar")
+def descargar_evidencia_snc(
+    id_adjunto: int, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    fila = db.execute(text('''
+        SELECT a."IdAdjuntoSNC" AS id, a."NombreOriginal" AS nombre,
+               a."NombreAlmacenado" AS interno, a."RutaArchivo" AS ruta,
+               g."IdSalidaNoConforme" AS id_snc
+        FROM public."GestionSalidaNoConformeAdjunto" a
+        INNER JOIN public."GestionSalidaNoConforme" g
+          ON g."IdGestionSalidaNoConforme" = a."IdGestionSalidaNoConforme"
+        WHERE a."IdAdjuntoSNC" = :id AND a."Activo" = TRUE
+    '''), {"id": id_adjunto}).mappings().first()
+    if not fila:
+        raise HTTPException(404, "Evidencia no encontrada.")
+    _autorizar_evidencia_snc(db, current, fila["id_snc"])
+    raiz = _storage_snc(db)
+    # Se reconstruye la ruta desde IDs internos, nunca desde una ruta solicitada
+    # por el cliente o una ruta arbitraria de base de datos.
+    ruta = (raiz / str(fila["id_snc"]) / fila["interno"]).resolve()
+    if ruta.parent != (raiz / str(fila["id_snc"])).resolve():
+        raise HTTPException(403, "Ruta de archivo no permitida.")
+    if not ruta.is_file():
+        raise HTTPException(404, "El archivo físico no está disponible.")
+    return FileResponse(
+        path=str(ruta), media_type="application/octet-stream",
+        filename=fila["nombre"], content_disposition_type="attachment",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
