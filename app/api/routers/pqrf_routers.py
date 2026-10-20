@@ -1,7 +1,7 @@
 """API de PQRF - Fase 1: catálogos. Desarrollo exclusivo en QA."""
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -127,8 +127,7 @@ def listar_clientes(
         FROM public."Cliente"
         WHERE "Activo" = TRUE
           AND "Nombre" ILIKE :buscar
-        ORDER BY "Nombre"
-        LIMIT 100
+        ORDER BY "Nombre", "IdCliente"
     """), {"buscar": f"%{termino}%"}).mappings().all()
 
     return [dict(fila) for fila in filas]
@@ -295,6 +294,8 @@ _CONSULTA_PERSONAL_PQRF = """
         p."IdCorreoPQRF" AS id_correo_pqrf,
         p."IdUsuarioRegistro" AS id_usuario_registro,
         p."IdUsuarioResponsable" AS id_usuario_responsable,
+  (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
+   WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
         p."FechaCreacion" AS fecha_creacion,
         p."FechaActualizacion" AS fecha_actualizacion,
         TRIM(REPLACE(REPLACE(c."Nombre", CHR(13), ' '), CHR(10), ' ')) AS cliente,
@@ -772,6 +773,46 @@ def _pqrf_admin(db: Session, current: dict) -> None:
             detail="Acceso exclusivo al panel PQRF de SUPERADMIN.",
         )
 
+# Días calendario inclusivos según la fecha local de Colombia (UTC-5).
+# Cuenta el día de registro y el día de primera respuesta, incluidos domingos y festivos.
+_ZONA_HORARIA_PQRF = timezone(timedelta(hours=-5))
+
+
+def _dias_calendario_respuesta(inicio, respuesta) -> int | None:
+    if inicio is None or respuesta is None:
+        return None
+
+    def fecha_colombia(valor):
+        if isinstance(valor, datetime):
+            # Los timestamps sin zona se interpretan como hora local de Colombia.
+            if valor.tzinfo is None:
+                valor = valor.replace(tzinfo=_ZONA_HORARIA_PQRF)
+            return valor.astimezone(_ZONA_HORARIA_PQRF).date()
+        return valor
+
+    fecha_inicio = fecha_colombia(inicio)
+    fecha_respuesta = fecha_colombia(respuesta)
+    return max(1, (fecha_respuesta - fecha_inicio).days + 1)
+
+
+def _anexar_tiempo_respuesta(registro: dict) -> dict:
+    registro['dias_respuesta'] = _dias_calendario_respuesta(
+        registro.get('fecha_creacion'), registro.get('fecha_primera_respuesta'))
+    return registro
+
+
+@router.get('/general/catalogos/clientes')
+def pqrf_general_clientes(
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    _pqrf_admin(db, current)
+    filas = db.execute(text('''SELECT "IdCliente" AS id,
+        TRIM(REPLACE(REPLACE("Nombre", CHR(13), ' '), CHR(10), ' ')) AS nombre
+        FROM public."Cliente" WHERE "Activo" = TRUE
+        ORDER BY "Nombre", "IdCliente"''')).mappings().all()
+    return [dict(fila) for fila in filas]
+
+
 _PQRF_GENERAL_FROM = '''
  FROM public."PQRF" p
  JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
@@ -783,6 +824,8 @@ _PQRF_GENERAL_FROM = '''
 '''
 _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."FechaCreacion" AS fecha_creacion, p."FechaActualizacion" AS fecha_actualizacion,
+ (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
+  WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
  p."Estado" AS estado, p."NombreRemitente" AS nombre_remitente,
  p."CorreoRemitente" AS correo_remitente, p."DescripcionPQRF" AS descripcion_pqrf,
  p."IdCliente" AS id_cliente, c."Nombre" AS cliente,
@@ -825,7 +868,7 @@ def _pqrf_general_row(row):
     for key in ('id_usuario_registro', 'id_usuario_responsable'):
         if data.get(key) is not None:
             data[key] = str(data[key])
-    return data
+    return _anexar_tiempo_respuesta(data)
 
 
 @router.get('/general')
@@ -873,10 +916,18 @@ def pqrf_general_indicadores(
       COUNT(*) FILTER (WHERE p."Estado" = 'RESPONDIDA') AS respondidas,
       COUNT(*) FILTER (WHERE p."Estado" = 'CERRADA') AS cerradas ''' + base + '''
       GROUP BY DATE_TRUNC('month', p."FechaPQRF") ORDER BY DATE_TRUNC('month', p."FechaPQRF")'''
-    return {'total': sum(counts.values()), 'totales': counts,
+    tiempos = db.execute(text('''SELECT p."FechaCreacion" AS fecha_creacion,
+        (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
+         WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta
+        ''' + base), params).mappings().all()
+    dias = [_dias_calendario_respuesta(r['fecha_creacion'], r['fecha_primera_respuesta'])
+            for r in tiempos if r['fecha_primera_respuesta'] is not None]
+    return {'cantidad_con_respuesta': len(dias),
+            'promedio_dias_respuesta': round(sum(dias) / len(dias), 2) if dias else None,
+            'total': sum(counts.values()), 'totales': counts,
             'tipos': grouped('t."NombreTipo"', 'tipo'),
             'procesos': grouped('pr."NombreProceso"', 'proceso'),
-            'clientes': grouped('c."Nombre"', 'cliente', 'LIMIT 15'),
+            'clientes': grouped('c."Nombre"', 'cliente'),
             'mensual': [dict(r) for r in db.execute(text(monthly_sql), params).mappings().all()]}
 
 
