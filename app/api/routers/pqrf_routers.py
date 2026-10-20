@@ -1,6 +1,7 @@
 """API de PQRF - Fase 1: catálogos. Desarrollo exclusivo en QA."""
 
 import re
+from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -747,3 +748,161 @@ def cerrar_pqrf(
         raise
 
     return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente en QA."}
+
+# Consultas globales PQRF para usuarios con rol SUPERADMIN (IdRol 5).
+# Se valida contra UsuarioRoles y Roles en la BD QA, no por nombre ni UUID fijo.
+# Solo lectura: no modifica las reglas operativas de PQRF.
+ROL_SUPERADMIN_PQRF = 5
+
+
+def _pqrf_admin(db: Session, current: dict) -> None:
+    _validar_acceso(db, current)
+    usuario_id = _usuario_actual_pqrf(current)
+    autorizado = db.execute(text('''
+        SELECT 1
+        FROM public."UsuarioRoles" ur
+        JOIN public."Roles" r ON r."IdRol" = ur."IdRol"
+        WHERE ur."IdUsuario" = :usuario
+          AND r."IdRol" = :rol
+        LIMIT 1
+    '''), {"usuario": usuario_id, "rol": ROL_SUPERADMIN_PQRF}).scalar_one_or_none()
+    if autorizado is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso exclusivo al panel PQRF de SUPERADMIN.",
+        )
+
+_PQRF_GENERAL_FROM = '''
+ FROM public."PQRF" p
+ JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
+ JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
+ JOIN public."ProcesoPQRF" pr ON pr."IdProcesoPQRF" = p."IdProcesoPQRF"
+ JOIN public."CorreoPQRF" co ON co."IdCorreoPQRF" = p."IdCorreoPQRF"
+ JOIN public."Usuario" ur ON ur."IdUsuario" = p."IdUsuarioRegistro"
+ LEFT JOIN public."Usuario" ua ON ua."IdUsuario" = p."IdUsuarioResponsable"
+'''
+_PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
+ p."FechaCreacion" AS fecha_creacion, p."FechaActualizacion" AS fecha_actualizacion,
+ p."Estado" AS estado, p."NombreRemitente" AS nombre_remitente,
+ p."CorreoRemitente" AS correo_remitente, p."DescripcionPQRF" AS descripcion_pqrf,
+ p."IdCliente" AS id_cliente, c."Nombre" AS cliente,
+ p."IdTipoPQRF" AS id_tipo_pqrf, t."NombreTipo" AS tipo_pqrf,
+ p."IdProcesoPQRF" AS id_proceso_pqrf, pr."NombreProceso" AS proceso,
+ co."Correo" AS correo_destinatario,
+ ur."NombreUsuario" AS usuario_registro, ua."NombreUsuario" AS usuario_responsable,
+ p."IdUsuarioRegistro" AS id_usuario_registro,
+ p."IdUsuarioResponsable" AS id_usuario_responsable'''
+
+
+def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta):
+    parts, params = [], {}
+    if len(busqueda) > 150 or (fecha_desde and fecha_hasta and fecha_desde > fecha_hasta):
+        raise HTTPException(status_code=422, detail='Filtros inválidos.')
+    if busqueda.strip():
+        parts.append('''(CAST(p."IdPQRF" AS TEXT) ILIKE :q OR
+          p."NombreRemitente" ILIKE :q OR c."Nombre" ILIKE :q OR
+          ur."NombreUsuario" ILIKE :q OR COALESCE(ua."NombreUsuario", '') ILIKE :q)''')
+        params['q'] = '%' + busqueda.strip() + '%'
+    for key, column, value in (
+        ('proceso', 'p."IdProcesoPQRF"', id_proceso),
+        ('tipo', 'p."IdTipoPQRF"', id_tipo),
+        ('cliente', 'p."IdCliente"', id_cliente),
+    ):
+        if value is not None:
+            parts.append(column + ' = :' + key)
+            params[key] = value
+    if fecha_desde:
+        parts.append('p."FechaPQRF" >= :desde')
+        params['desde'] = fecha_desde
+    if fecha_hasta:
+        parts.append('p."FechaPQRF" < CAST(:hasta AS DATE) + INTERVAL \'1 day\'')
+        params['hasta'] = fecha_hasta
+    return ' AND '.join(parts) if parts else 'TRUE', params
+
+
+def _pqrf_general_row(row):
+    data = dict(row)
+    for key in ('id_usuario_registro', 'id_usuario_responsable'):
+        if data.get(key) is not None:
+            data[key] = str(data[key])
+    return data
+
+
+@router.get('/general')
+def pqrf_general(
+    busqueda: str = '', id_proceso: int | None = None,
+    id_tipo: int | None = None, id_cliente: int | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    estado: str = '', pagina: int = 1, limite: int = 15,
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    _pqrf_admin(db, current)
+    if pagina < 1 or not 1 <= limite <= 100 or (estado and estado not in ('ABIERTA', 'RESPONDIDA', 'CERRADA')):
+        raise HTTPException(status_code=422, detail='Estado o paginación inválidos.')
+    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta)
+    if estado:
+        where += ' AND p."Estado" = :estado'
+        params['estado'] = estado
+    total = db.execute(text('SELECT COUNT(*) ' + _PQRF_GENERAL_FROM + ' WHERE ' + where), params).scalar_one()
+    rows = db.execute(text('SELECT ' + _PQRF_GENERAL_SELECT + _PQRF_GENERAL_FROM +
+        ' WHERE ' + where + ' ORDER BY p."FechaCreacion" DESC, p."IdPQRF" DESC LIMIT :limite OFFSET :offset'),
+        {**params, 'limite': limite, 'offset': (pagina - 1) * limite}).mappings().all()
+    return {'registros': [_pqrf_general_row(r) for r in rows], 'total': total,
+            'pagina': pagina, 'paginas': max(1, (total + limite - 1) // limite)}
+
+
+@router.get('/general/indicadores')
+def pqrf_general_indicadores(
+    busqueda: str = '', id_proceso: int | None = None,
+    id_tipo: int | None = None, id_cliente: int | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    _pqrf_admin(db, current)
+    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta)
+    base = _PQRF_GENERAL_FROM + ' WHERE ' + where
+    def grouped(column, label, limit=''):
+        sql = 'SELECT ' + column + ' AS nombre, COUNT(*) AS total ' + base + ' GROUP BY ' + column + ' ORDER BY total DESC ' + limit
+        return [dict(r) for r in db.execute(text(sql), params).mappings().all()]
+    estados = grouped('p."Estado"', 'estado')
+    counts = {'ABIERTA': 0, 'RESPONDIDA': 0, 'CERRADA': 0}
+    counts.update({r['nombre']: r['total'] for r in estados})
+    monthly_sql = '''SELECT TO_CHAR(DATE_TRUNC('month', p."FechaPQRF"), 'YYYY-MM') AS mes,
+      COUNT(*) AS total,
+      COUNT(*) FILTER (WHERE p."Estado" = 'ABIERTA') AS abiertas,
+      COUNT(*) FILTER (WHERE p."Estado" = 'RESPONDIDA') AS respondidas,
+      COUNT(*) FILTER (WHERE p."Estado" = 'CERRADA') AS cerradas ''' + base + '''
+      GROUP BY DATE_TRUNC('month', p."FechaPQRF") ORDER BY DATE_TRUNC('month', p."FechaPQRF")'''
+    return {'total': sum(counts.values()), 'totales': counts,
+            'tipos': grouped('t."NombreTipo"', 'tipo'),
+            'procesos': grouped('pr."NombreProceso"', 'proceso'),
+            'clientes': grouped('c."Nombre"', 'cliente', 'LIMIT 15'),
+            'mensual': [dict(r) for r in db.execute(text(monthly_sql), params).mappings().all()]}
+
+
+@router.get('/general/{id_pqrf}')
+def pqrf_general_detalle(
+    id_pqrf: int, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _pqrf_admin(db, current)
+    if id_pqrf <= 0:
+        raise HTTPException(status_code=422, detail='Identificador inválido.')
+    row = db.execute(text('SELECT ' + _PQRF_GENERAL_SELECT + _PQRF_GENERAL_FROM +
+        ' WHERE p."IdPQRF" = :id'), {'id': id_pqrf}).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail='PQRF no encontrada.')
+    gestiones = db.execute(text('''SELECT g."IdGestionPQRF" AS id_gestion,
+      g."AnalisisGestion" AS analisis_gestion, g."RespuestaPQRF" AS respuesta_pqrf,
+      g."AccionesRealizadas" AS acciones_realizadas, g."FechaGestion" AS fecha_gestion,
+      u."NombreUsuario" AS usuario_gestion
+      FROM public."GestionPQRF" g JOIN public."Usuario" u ON u."IdUsuario" = g."IdUsuarioGestion"
+      WHERE g."IdPQRF" = :id ORDER BY g."FechaGestion", g."IdGestionPQRF"'''), {'id': id_pqrf}).mappings().all()
+    historial = db.execute(text('''SELECT h."IdHistorialPQRF" AS id_historial,
+      h."TipoMovimiento" AS tipo_movimiento, h."EstadoAnterior" AS estado_anterior,
+      h."EstadoNuevo" AS estado_nuevo, h."Observacion" AS observacion,
+      h."FechaMovimiento" AS fecha_movimiento, u."NombreUsuario" AS usuario
+      FROM public."HistorialPQRF" h JOIN public."Usuario" u ON u."IdUsuario" = h."IdUsuario"
+      WHERE h."IdPQRF" = :id ORDER BY h."FechaMovimiento", h."IdHistorialPQRF"'''), {'id': id_pqrf}).mappings().all()
+    return {'pqrf': _pqrf_general_row(row), 'gestiones': [dict(g) for g in gestiones],
+            'historial': [dict(h) for h in historial]}
