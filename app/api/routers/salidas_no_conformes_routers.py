@@ -131,7 +131,8 @@ def listar_responsables_snc(
         text('''
             SELECT "IdResponsableSNC" AS id,
                    "NombreResponsable" AS nombre,
-                   "IdUsuario" AS id_usuario
+                   "IdUsuario" AS id_usuario,
+                   "IdCorreoSNC" AS id_correo_snc
             FROM public."ResponsableSNC"
             WHERE "Activo" = TRUE
             ORDER BY "OrdenVisualizacion" ASC
@@ -142,6 +143,7 @@ def listar_responsables_snc(
             "id": fila["id"],
             "nombre": fila["nombre"],
             "id_usuario": str(fila["id_usuario"]) if fila["id_usuario"] else None,
+            "id_correo_snc": fila["id_correo_snc"],
         }
         for fila in filas
     ]
@@ -151,13 +153,13 @@ class CrearSNC(BaseModel):
     fecha_snc: date
     id_proceso_snc: int = Field(gt=0)
     descripcion: str = Field(min_length=1, max_length=20000)
-    impacto: str = Field(min_length=1, max_length=20000)
+    impacto: str | None = Field(default=None, max_length=20000)  # Compatibilidad con registros anteriores
     id_area_responsable_snc: int = Field(gt=0)
     id_responsable_snc: int = Field(gt=0)
     id_correo_remitente: int = Field(gt=0)
     id_correo_destinatario: int = Field(gt=0)
 
-    @field_validator("descripcion", "impacto")
+    @field_validator("descripcion")
     @classmethod
     def texto_no_vacio(cls, valor: str) -> str:
         valor = valor.strip()
@@ -266,7 +268,7 @@ def registrar_snc(
                 'creador': id_creador,
                 'proceso': datos.id_proceso_snc,
                 'descripcion': datos.descripcion,
-                'impacto': datos.impacto,
+                'impacto': (datos.impacto or '').strip(),  # Columna histórica conservada; formulario ya no la solicita
                 'area': datos.id_area_responsable_snc,
                 'area_origen': id_area_origen,
                 'responsable': datos.id_responsable_snc,
