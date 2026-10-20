@@ -27,14 +27,17 @@ from infrastructure.security.auth_dependencies import get_current_user
 router = APIRouter(prefix="/api/salidas-no-conformes", tags=["Salidas No Conformes"])
 
 
-def _verificar_base_qa(db: Session) -> None:
-    """Impide consultar estos endpoints fuera de la BD QA durante desarrollo."""
+def _ambiente_snc(db: Session) -> str:
+    """Determina el ambiente desde la BD real, sin depender del .env del servidor."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-    if nombre_bd != "LA_PERFECCION_QA":
+    ambientes = {"LA_PERFECCION_QA": "qa", "la_perfeccion": "prod"}
+    ambiente = ambientes.get(nombre_bd)
+    if ambiente is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Módulo SNC en desarrollo: conexión distinta de LA_PERFECCION_QA.",
+            detail="Módulo SNC no habilitado para esta base de datos.",
         )
+    return ambiente
 
 
 def _validar_acceso(db: Session, current: dict) -> None:
@@ -43,7 +46,7 @@ def _validar_acceso(db: Session, current: dict) -> None:
     Las restricciones por creador/responsable se aplican en cada operación.
     El panel general conserva su comprobación exclusiva de SUPERADMIN.
     """
-    _verificar_base_qa(db)
+    _ambiente_snc(db)
     usuario = current.get("usuario") if isinstance(current, dict) else None
     if usuario is None:
         raise HTTPException(
@@ -186,7 +189,7 @@ def registrar_snc(
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
-    # Registra una SNC y su historial en una transacción; solo en QA.
+    # Registra una SNC y su historial en una transacción.
     _validar_acceso(db, current)
     try:
         id_creador = UUID(str(current["usuario"].IdUsuario))
@@ -319,7 +322,7 @@ def registrar_snc(
         'id_responsable_snc': datos.id_responsable_snc,
         'id_usuario_responsable': str(id_usuario_responsable) if id_usuario_responsable else None,
         'asignacion_pendiente': id_usuario_responsable is None,
-        'mensaje': 'SNC registrada correctamente en QA.',
+        'mensaje': 'SNC registrada correctamente.',
     }
 
 
@@ -498,7 +501,7 @@ def responder_snc(
     except Exception:
         db.rollback()
         raise
-    return {"id": id_snc, "estado": "RESPONDIDO", "mensaje": "Respuesta registrada correctamente en QA."}
+    return {"id": id_snc, "estado": "RESPONDIDO", "mensaje": "Respuesta registrada correctamente."}
 
 
 @router.get("/{id_snc}/respuesta")
@@ -615,7 +618,7 @@ def cerrar_snc(
     return {
         "id": id_snc,
         "estado": "CERRADO",
-        "mensaje": "Salida no conforme cerrada correctamente en QA.",
+        "mensaje": "Salida no conforme cerrada correctamente.",
     }
 
 
@@ -866,7 +869,7 @@ def detalle_snc_general(id_snc: int, db: Session = Depends(get_db),
 
 
 # -----------------------------------------------------------------------------
-# EVIDENCIAS SNC - QA. No modifica el mecanismo documental de Retiros.
+# EVIDENCIAS SNC. No modifica el mecanismo documental de Retiros.
 # El frontend debe llamar a /{id_snc}/responder-con-evidencias usando FormData.
 # -----------------------------------------------------------------------------
 _EXT_SNC = {
@@ -886,12 +889,25 @@ _MAX_VIDEO_SNC = 100 * 1024 * 1024
 _MAX_TOTAL_SNC = 150 * 1024 * 1024
 
 
-def _storage_snc_qa() -> Path:
-    # Ruta independiente del backend, de Retiros y del frontend.
-    # Sobrescribible mediante variable de entorno local (NO copiar .env a PROD).
-    raiz = Path(os.environ.get(
-        "SNC_STORAGE_ROOT", "C:/LaPerfeccionStorage/calidad/qa/snc"
-    )).expanduser().resolve()
+def _storage_snc(db: Session) -> Path:
+    """Separa físicamente evidencias QA y PROD según la BD conectada.
+
+    SNC_STORAGE_ROOT conserva compatibilidad con la configuración local de QA.
+    En producción solo se utiliza SNC_STORAGE_ROOT_PROD (o la ruta PROD).
+    """
+    ambiente = _ambiente_snc(db)
+    if ambiente == "prod":
+        configuracion = os.environ.get("SNC_STORAGE_ROOT_PROD")
+        predeterminada = "C:/LaPerfeccionStorage/calidad/prod/snc"
+    else:
+        configuracion = os.environ.get("SNC_STORAGE_ROOT_QA") or os.environ.get("SNC_STORAGE_ROOT")
+        predeterminada = "C:/LaPerfeccionStorage/calidad/qa/snc"
+    raiz = Path(configuracion or predeterminada).expanduser().resolve()
+    # Impide usar por error la carpeta de un ambiente en el otro.
+    otra = Path("C:/LaPerfeccionStorage/calidad/qa/snc" if ambiente == "prod"
+                else "C:/LaPerfeccionStorage/calidad/prod/snc").resolve()
+    if raiz == otra:
+        raise HTTPException(503, "La carpeta SNC configurada corresponde al otro ambiente.")
     return raiz
 
 
@@ -1023,7 +1039,7 @@ async def responder_snc_con_evidencias(
     archivos = archivos or []
     if len(archivos) > _MAX_ARCHIVOS_SNC:
         raise HTTPException(422, f"Máximo {_MAX_ARCHIVOS_SNC} evidencias por respuesta.")
-    carpeta = _storage_snc_qa() / str(id_snc)
+    carpeta = _storage_snc(db) / str(id_snc)
     guardados = []
     try:
         # Primero validar y escribir archivos, sin cambiar aún el estado de SNC.
@@ -1077,7 +1093,7 @@ async def responder_snc_con_evidencias(
         '''), {"id": id_snc})
         db.commit()
         return {"id": id_snc, "id_gestion": id_gestion, "estado": "RESPONDIDO",
-                "evidencias": len(guardados), "mensaje": "Respuesta y evidencias registradas en QA."}
+                "evidencias": len(guardados), "mensaje": "Respuesta y evidencias registradas correctamente."}
     except BaseException:
         db.rollback()
         for meta in guardados:
@@ -1122,7 +1138,7 @@ def descargar_evidencia_snc(
     if not fila:
         raise HTTPException(404, "Evidencia no encontrada.")
     _autorizar_evidencia_snc(db, current, fila["id_snc"])
-    raiz = _storage_snc_qa()
+    raiz = _storage_snc(db)
     # Se reconstruye la ruta desde IDs internos, nunca desde una ruta solicitada
     # por el cliente o una ruta arbitraria de base de datos.
     ruta = (raiz / str(fila["id_snc"]) / fila["interno"]).resolve()
