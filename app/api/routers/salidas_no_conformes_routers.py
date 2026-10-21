@@ -4,6 +4,12 @@ from datetime import date, datetime, timezone
 from uuid import UUID
 import unicodedata
 import os
+import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
+from html import escape
+from urllib.parse import urlparse
 import uuid
 import zipfile
 from pathlib import Path
@@ -11,7 +17,7 @@ from pathlib import Path
 from fastapi import File, Form, UploadFile
 from fastapi.responses import FileResponse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +28,118 @@ from infrastructure.security.auth_dependencies import get_current_user
 
 
 router = APIRouter(prefix="/api/salidas-no-conformes", tags=["Salidas No Conformes"])
+
+_logger_snc = logging.getLogger(__name__)
+
+def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripcion: str, fecha: str, ambiente: str) -> None:
+    """Notifica después del commit. Un error SMTP nunca revierte la SNC."""
+    prefijo = "SNC_MAIL_QA" if ambiente == "qa" else "SNC_MAIL_PROD"
+    # Configuración exclusiva SNC por ambiente. En QA, mientras se habilita
+    # el buzón de Calidad, se permite reutilizar SMTP de Nómina.
+    # Producción NUNCA hereda las credenciales SMTP genéricas.
+    permitir_smtp_compartido = ambiente == "qa" and os.getenv(
+        "SNC_QA_USAR_SMTP_COMPARTIDO", "true"
+    ).strip().lower() in ("true", "1", "yes", "si")
+
+    def configuracion(campo: str, compartido: str = "") -> str:
+        valor = os.getenv(f"{prefijo}_{campo}", "").strip()
+        if not valor and permitir_smtp_compartido and compartido:
+            valor = os.getenv(compartido, "").strip()
+        return valor
+
+    servidor = configuracion("HOST", "SMTP_HOST")
+    remitente = configuracion("FROM", "SMTP_FROM")
+    usuario = configuracion("USER", "SMTP_USER")
+    clave = configuracion("PASSWORD", "SMTP_PASSWORD")
+    if not servidor or not remitente:
+        _logger_snc.warning("SNC %s: notificación no enviada; SMTP %s sin configurar", id_snc, ambiente)
+        return
+    try:
+        puerto = int(configuracion("PORT", "SMTP_PORT") or "587")
+        mensaje = EmailMessage()
+        mensaje["From"] = remitente
+        mensaje["To"] = destinatario
+        mensaje["Subject"] = f"Nueva Salida No Conforme asignada - SNC N.º {id_snc}"
+        # El destino del enlace depende del ambiente detectado desde la BD.
+        # Se puede personalizar sin tocar el código mediante SNC_APP_URL_QA / PROD.
+        url_predeterminada = (
+            "https://qa.laperfeccion.app" if ambiente == "qa"
+            else "https://laperfeccion.app"
+        )
+        variable_url = "SNC_APP_URL_QA" if ambiente == "qa" else "SNC_APP_URL_PROD"
+        url_app = os.getenv(variable_url, "").strip().rstrip("/") or url_predeterminada
+        url_partes = urlparse(url_app)
+        if (
+            url_partes.scheme != "https" or not url_partes.hostname
+            or url_partes.username or url_partes.password
+            or url_partes.query or url_partes.fragment
+        ):
+            _logger_snc.warning("SNC %s: URL de aplicativo inválida; se usa la predeterminada", id_snc)
+            url_app = url_predeterminada
+
+        # Enlaces del correo: abrir directamente el acceso corporativo.
+        # Evita duplicar /login cuando la variable de entorno ya lo incluye.
+        if urlparse(url_app).path.rstrip("/") != "/login":
+            url_app = url_app.rstrip("/") + "/login"
+
+        mensaje.set_content(
+            f"Hola {responsable},\n\n"
+            f"Se te ha asignado la Salida No Conforme N.º {id_snc}.\n"
+            f"Fecha de la novedad: {fecha}\n"
+            f"Descripción: {descripcion[:1500]}\n\n"
+            "Para consultar y gestionar el caso, ingresa al aplicativo La Perfección "
+            "y abre Salidas No Conformes > SNC asignadas.\n"
+            f"Ingresar al aplicativo: {url_app}\n\n"
+            "Este es un mensaje automático.\n"
+        )
+        nombre_html = escape(responsable)
+        descripcion_html = escape(descripcion[:1500]).replace("\n", "<br>")
+        fecha_html = escape(fecha)
+        url_html = escape(url_app, quote=True)
+        mensaje.add_alternative(f"""\
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:24px;background:#f4f6f8;font-family:Arial,sans-serif;color:#263238;">
+  <table role="presentation" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;margin:auto;background:#ffffff;border:1px solid #e2e7e9;border-radius:8px;">
+    <tr><td style="padding:28px;">
+      <h2 style="color:#087653;margin:0 0 8px;">Nueva Salida No Conforme asignada</h2>
+      <p style="color:#607078;margin:0 0 24px;">SNC N.º {id_snc} · La Perfección</p>
+      <p>Hola <strong>{nombre_html}</strong>,</p>
+      <p>Se te ha asignado la Salida No Conforme N.º <strong>{id_snc}</strong>.</p>
+      <p><strong>Fecha de la novedad:</strong> {fecha_html}</p>
+      <p><strong>Descripción:</strong> {descripcion_html}</p>
+      <p>Para consultar y gestionar el caso, ingresa al aplicativo y abre
+      <strong>Salidas No Conformes &gt; SNC asignadas</strong>.</p>
+      <p style="margin:28px 0;text-align:center;">
+        <a href="{url_html}" style="background:#087653;color:#ffffff;text-decoration:none;padding:14px 24px;border-radius:5px;font-weight:bold;display:inline-block;">Ingresar al aplicativo</a>
+      </p>
+      <p style="font-size:12px;color:#65747b;">Si el botón no funciona, copia esta dirección en tu navegador:<br>
+        <a href="{url_html}" style="color:#087653;">{url_html}</a>
+      </p>
+      <p style="font-size:12px;color:#65747b;margin-top:24px;">Este es un mensaje automático.</p>
+    </td></tr>
+  </table>
+</body>
+</html>""", subtype="html")
+        contexto = ssl.create_default_context()
+        if puerto == 465:
+            with smtplib.SMTP_SSL(servidor, puerto, timeout=15, context=contexto) as smtp:
+                if usuario and clave:
+                    smtp.login(usuario, clave)
+                smtp.send_message(mensaje)
+        else:
+            with smtplib.SMTP(servidor, puerto, timeout=15) as smtp:
+                usar_tls = configuracion("USE_TLS", "SMTP_USE_TLS").lower()
+                if usar_tls not in ("false", "0", "no"):
+                    smtp.starttls(context=contexto)
+                if usuario and clave:
+                    smtp.login(usuario, clave)
+                smtp.send_message(mensaje)
+        _logger_snc.info("SNC %s: notificación SMTP aceptada para envío", id_snc)
+    except Exception:
+        _logger_snc.exception("SNC %s: fallo de notificación por correo", id_snc)
+
 
 
 def _ambiente_snc(db: Session) -> str:
@@ -183,6 +301,7 @@ class CrearSNC(BaseModel):
 @router.post("", status_code=status.HTTP_201_CREATED)
 def registrar_snc(
     datos: CrearSNC,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
@@ -211,8 +330,13 @@ def registrar_snc(
 
     responsable = db.execute(
         text('''
-            SELECT r."IdUsuario" AS id_usuario
+            SELECT r."IdUsuario" AS id_usuario,
+                   r."NombreResponsable" AS nombre_responsable,
+                   c."Correo" AS correo_responsable
             FROM public."ResponsableSNC" r
+            LEFT JOIN public."CorreoSNC" c
+              ON c."IdCorreoSNC" = r."IdCorreoSNC"
+             AND c."Activo" = TRUE
             WHERE r."IdResponsableSNC" = :id AND r."Activo" = TRUE
             FOR UPDATE OF r
         '''),
@@ -260,6 +384,7 @@ def registrar_snc(
             detail='Tu usuario tiene más de un área de trabajo activa. Solicita corregir la asignación antes de registrar la SNC.',
         )
     id_area_origen = areas_origen[0]
+    ambiente_notificacion = _ambiente_snc(db)
 
     try:
         id_snc = db.execute(
@@ -312,6 +437,17 @@ def registrar_snc(
     except Exception:
         db.rollback()
         raise
+
+    # La dirección procede de la relación vigente ResponsableSNC -> CorreoSNC,
+    # no de un correo arbitrario enviado por el navegador.
+    if responsable["correo_responsable"]:
+        background_tasks.add_task(
+            _enviar_aviso_snc, id_snc, responsable["correo_responsable"],
+            responsable["nombre_responsable"], datos.descripcion,
+            datos.fecha_snc.isoformat(), ambiente_notificacion,
+        )
+    else:
+        _logger_snc.warning("SNC %s: responsable sin correo activo vinculado", id_snc)
 
     return {
         'id': id_snc,
