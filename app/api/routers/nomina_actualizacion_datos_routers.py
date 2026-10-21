@@ -26,6 +26,7 @@ class ActualizacionDatosRequest(BaseModel):
     NumeroWhatsapp: Optional[str] = None
     IdTipoEps: Optional[int] = None
     IdFondoPensiones: Optional[int] = None
+    IdCargo: Optional[int] = None
     UsuarioActualizacion: str
 
 
@@ -162,9 +163,17 @@ def obtener_catalogos_actualizacion_datos(
             """)
         ).mappings().all()
 
+        cargos = db.execute(
+            text('''SELECT "IdCargo", "NombreCargo"
+                     FROM public."Cargo"
+                     WHERE "Activo" = TRUE
+                     ORDER BY "NombreCargo", "IdCargo";''')
+        ).mappings().all()
+
         return {
             "success": True,
             "data": {
+                "Cargos": [dict(cargo) for cargo in cargos],
                 "Localidades": [
                     dict(localidad)
                     for localidad in localidades
@@ -340,7 +349,16 @@ def obtener_detalle_trabajador_actualizacion_datos(
                     fp."Nombre" AS "FondoPension",
 
                     rp."IdEstadoProceso",
-                    ep."Nombre" AS "EstadoProceso"
+                    ep."Nombre" AS "EstadoProceso",
+                    (SELECT COUNT(*) FROM public."AsignacionCargoCliente" acc
+                     WHERE acc."IdRegistroPersonal" = rp."IdRegistroPersonal") AS "CantidadAsignacionesCargo",
+                    (SELECT acc."IdCargo" FROM public."AsignacionCargoCliente" acc
+                     WHERE acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                     ORDER BY acc."IdAsignacionCargoCliente" DESC LIMIT 1) AS "IdCargo",
+                    (SELECT c."NombreCargo" FROM public."AsignacionCargoCliente" acc
+                     JOIN public."Cargo" c ON c."IdCargo" = acc."IdCargo"
+                     WHERE acc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                     ORDER BY acc."IdAsignacionCargoCliente" DESC LIMIT 1) AS "NombreCargo"
 
                 FROM public."RegistroPersonal" rp
 
@@ -514,6 +532,8 @@ def actualizar_datos_trabajador(
         | set(campos_datos_adicionales.keys())
     )
 
+    campos_permitidos.add("IdCargo")
+
     campos_no_permitidos = campos_enviados - campos_permitidos
 
     if campos_no_permitidos:
@@ -673,6 +693,52 @@ def actualizar_datos_trabajador(
                     ),
                 )
 
+        cambios = []
+
+        if "IdCargo" in campos_enviados:
+            if payload.IdCargo is None:
+                raise HTTPException(status_code=400, detail="Seleccione un cargo válido.")
+            cargo_valido = db.execute(
+                text('''SELECT 1 FROM public."Cargo"
+                        WHERE "IdCargo" = :id_cargo AND "Activo" = TRUE LIMIT 1;'''),
+                {"id_cargo": payload.IdCargo},
+            ).first()
+            if not cargo_valido:
+                raise HTTPException(status_code=400, detail="El cargo seleccionado no existe o está inactivo.")
+            asignaciones = db.execute(
+                text('''SELECT "IdAsignacionCargoCliente", "IdCargo"
+                        FROM public."AsignacionCargoCliente"
+                        WHERE "IdRegistroPersonal" = :id_registro_personal
+                        FOR UPDATE;'''),
+                {"id_registro_personal": id_registro_personal},
+            ).mappings().all()
+            if len(asignaciones) != 1:
+                raise HTTPException(status_code=409, detail="El trabajador no tiene una asignación de cargo única. Requiere revisión.")
+            asignacion = asignaciones[0]
+            if asignacion["IdCargo"] != payload.IdCargo:
+                actualizado = db.execute(
+                    text('''UPDATE public."AsignacionCargoCliente"
+                            SET "IdCargo" = :id_cargo
+                            WHERE "IdAsignacionCargoCliente" = :id_asignacion
+                              AND "IdRegistroPersonal" = :id_registro_personal
+                              AND "IdCargo" = :id_cargo_anterior
+                            RETURNING "IdAsignacionCargoCliente";'''),
+                    {
+                        "id_cargo": payload.IdCargo,
+                        "id_asignacion": asignacion["IdAsignacionCargoCliente"],
+                        "id_registro_personal": id_registro_personal,
+                        "id_cargo_anterior": asignacion["IdCargo"],
+                    },
+                ).first()
+                if not actualizado:
+                    raise HTTPException(status_code=409, detail="La asignación cambió durante la actualización. Intente nuevamente.")
+                cambios.append({
+                    "CodigoCampo": "CARGO",
+                    "NombreCampo": "Cargo",
+                    "ValorAnterior": asignacion["IdCargo"],
+                    "ValorNuevo": payload.IdCargo,
+                })
+
         valores_registro_personal = {
             "Nombres": payload.Nombres.strip() if payload.Nombres is not None else None,
             "Apellidos": payload.Apellidos.strip() if payload.Apellidos is not None else None,
@@ -690,7 +756,6 @@ def actualizar_datos_trabajador(
             "IdLocalidad": payload.IdLocalidad,
         }
 
-        cambios = []
         cambios_registro_personal = {}
 
         for campo, configuracion in campos_registro_personal.items():
