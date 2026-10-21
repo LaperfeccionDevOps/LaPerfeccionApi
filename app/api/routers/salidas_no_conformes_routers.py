@@ -34,11 +34,14 @@ _logger_snc = logging.getLogger(__name__)
 def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripcion: str, fecha: str, ambiente: str) -> None:
     """Notifica después del commit. Un error SMTP nunca revierte la SNC."""
     prefijo = "SNC_MAIL_QA" if ambiente == "qa" else "SNC_MAIL_PROD"
-    # Configuración exclusiva SNC por ambiente. En QA, mientras se habilita
-    # el buzón de Calidad, se permite reutilizar SMTP de Nómina.
-    # Producción NUNCA hereda las credenciales SMTP genéricas.
-    permitir_smtp_compartido = ambiente == "qa" and os.getenv(
-        "SNC_QA_USAR_SMTP_COMPARTIDO", "true"
+    # Por defecto producción mantiene su SMTP exclusivo. Solo el administrador
+    # puede autorizar explícitamente reutilizar el SMTP general en PROD.
+    variable_compartido = (
+        "SNC_QA_USAR_SMTP_COMPARTIDO" if ambiente == "qa"
+        else "SNC_PROD_USAR_SMTP_COMPARTIDO"
+    )
+    permitir_smtp_compartido = os.getenv(
+        variable_compartido, "true" if ambiente == "qa" else "false"
     ).strip().lower() in ("true", "1", "yes", "si")
 
     def configuracion(campo: str, compartido: str = "") -> str:
@@ -52,7 +55,21 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
     usuario = configuracion("USER", "SMTP_USER")
     clave = configuracion("PASSWORD", "SMTP_PASSWORD")
     if not servidor or not remitente:
-        _logger_snc.warning("SNC %s: notificación no enviada; SMTP %s sin configurar", id_snc, ambiente)
+        faltantes = [campo for campo, valor in (("HOST", servidor), ("FROM", remitente)) if not valor]
+        _logger_snc.warning(
+            "SNC %s: correo NO enviado (%s). Faltan variables %s_%s. "
+            "SMTP compartido habilitado: %s",
+            id_snc, ambiente, prefijo, ", ".join(faltantes), permitir_smtp_compartido,
+        )
+        return
+    if bool(usuario) != bool(clave):
+        _logger_snc.error(
+            "SNC %s: correo NO enviado (%s); SMTP USER/PASSWORD incompletos",
+            id_snc, ambiente,
+        )
+        return
+    if not destinatario or "@" not in destinatario or "\n" in destinatario or "\r" in destinatario:
+        _logger_snc.error("SNC %s: correo NO enviado; destinatario inválido", id_snc)
         return
     try:
         puerto = int(configuracion("PORT", "SMTP_PORT") or "587")
@@ -136,9 +153,21 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
                 if usuario and clave:
                     smtp.login(usuario, clave)
                 smtp.send_message(mensaje)
-        _logger_snc.info("SNC %s: notificación SMTP aceptada para envío", id_snc)
+        _logger_snc.info(
+            "SNC %s: servidor SMTP aceptó la notificación (%s); "
+            "la entrega al buzón aún depende del proveedor",
+            id_snc, ambiente,
+        )
+    except (smtplib.SMTPException, OSError, ValueError) as exc:
+        # No imprimir la excepción completa: algunos proveedores incluyen
+        # direcciones u otros datos en sus mensajes de error.
+        _logger_snc.error(
+            "SNC %s: fallo SMTP (%s), tipo=%s. Revisar configuración, "
+            "autenticación, TLS, conectividad y registros del proveedor.",
+            id_snc, ambiente, type(exc).__name__,
+        )
     except Exception:
-        _logger_snc.exception("SNC %s: fallo de notificación por correo", id_snc)
+        _logger_snc.exception("SNC %s: error inesperado preparando la notificación", id_snc)
 
 
 
@@ -447,7 +476,12 @@ def registrar_snc(
             datos.fecha_snc.isoformat(), ambiente_notificacion,
         )
     else:
-        _logger_snc.warning("SNC %s: responsable sin correo activo vinculado", id_snc)
+        _logger_snc.warning(
+            "SNC %s: aviso NO programado; responsable %s sin correo activo vinculado "
+            "(el correo destinatario seleccionado en el formulario no se usa "
+            "para el aviso de asignación)",
+            id_snc, datos.id_responsable_snc,
+        )
 
     return {
         'id': id_snc,
