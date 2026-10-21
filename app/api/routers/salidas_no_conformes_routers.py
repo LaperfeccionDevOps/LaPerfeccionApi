@@ -34,14 +34,16 @@ _logger_snc = logging.getLogger(__name__)
 def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripcion: str, fecha: str, ambiente: str) -> None:
     """Notifica después del commit. Un error SMTP nunca revierte la SNC."""
     prefijo = "SNC_MAIL_QA" if ambiente == "qa" else "SNC_MAIL_PROD"
-    # Por defecto producción mantiene su SMTP exclusivo. Solo el administrador
-    # puede autorizar explícitamente reutilizar el SMTP general en PROD.
+    # SNC reutiliza por defecto el SMTP general ya configurado en el backend,
+    # tanto en QA como en PROD, sin modificarlo ni afectar a Nómina o RRLL.
+    # Si existen variables SNC_MAIL_PROD_*, estas tienen prioridad.
+    # Se puede deshabilitar el fallback con SNC_PROD_USAR_SMTP_COMPARTIDO=false.
     variable_compartido = (
         "SNC_QA_USAR_SMTP_COMPARTIDO" if ambiente == "qa"
         else "SNC_PROD_USAR_SMTP_COMPARTIDO"
     )
     permitir_smtp_compartido = os.getenv(
-        variable_compartido, "true" if ambiente == "qa" else "false"
+        variable_compartido, "true"
     ).strip().lower() in ("true", "1", "yes", "si")
 
     def configuracion(campo: str, compartido: str = "") -> str:
