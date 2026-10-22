@@ -518,6 +518,7 @@ _CONSULTA_SNC = '''
         p."NombreProceso" AS proceso,
         a."NombreArea" AS area_responsable,
         r."NombreResponsable" AS responsable,
+        uc."NombreUsuario" AS creado_por,
         cr."Correo" AS correo_remitente,
         cd."Correo" AS correo_destinatario
     FROM public."SalidaNoConforme" s
@@ -526,6 +527,8 @@ _CONSULTA_SNC = '''
         ON a."IdAreaResponsableSNC" = s."IdAreaResponsableSNC"
     INNER JOIN public."ResponsableSNC" r
         ON r."IdResponsableSNC" = s."IdResponsableSNC"
+    LEFT JOIN public."Usuario" uc
+        ON uc."IdUsuario" = s."IdUsuarioCreador"
     INNER JOIN public."CorreoSNC" cr
         ON cr."IdCorreoSNC" = s."IdCorreoRemitente"
     INNER JOIN public."CorreoSNC" cd
