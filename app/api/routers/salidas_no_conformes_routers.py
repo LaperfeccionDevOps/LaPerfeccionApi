@@ -575,6 +575,24 @@ def mis_snc_registradas(
     )
 
 
+
+# Contador personal para el menú lateral. No incluye SNC respondidas ni cerradas.
+@router.get("/pendientes/contador")
+def contador_snc_pendientes(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    total = db.execute(text("""
+        SELECT COUNT(*)
+        FROM public."SalidaNoConforme"
+        WHERE "IdUsuarioResponsable" = :usuario
+          AND "Estado" IN ('ABIERTO', 'EN_GESTION')
+    """), {"usuario": usuario}).scalar_one()
+    return {"pendientes": int(total)}
+
+
 @router.get("/mis-asignadas")
 def mis_snc_asignadas(
     limite: int = 50,
