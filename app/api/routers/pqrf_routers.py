@@ -1,5 +1,6 @@
-"""API de PQRF - Fase 1: catálogos. Desarrollo exclusivo en QA."""
+"""API de PQRF: operaciones autorizadas en bases de datos configuradas."""
 
+import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
@@ -18,17 +19,21 @@ router = APIRouter(prefix="/api/pqrf", tags=["PQRF"])
 
 
 def _validar_acceso(db: Session, current: dict) -> None:
-    """Permite acceso únicamente a usuarios activos y a la BD QA."""
+    """Valida sesión activa y base de datos explícitamente autorizada."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-
-    if nombre_bd != "LA_PERFECCION_QA":
+    # QA está autorizado por defecto. Para producción, configurar
+    # PQRF_BASES_PERMITIDAS con el nombre REAL de la BD de producción.
+    bases_configuradas = os.getenv("PQRF_BASES_PERMITIDAS", "LA_PERFECCION_QA")
+    bases_permitidas = {
+        nombre.strip() for nombre in bases_configuradas.split(",") if nombre.strip()
+    }
+    if nombre_bd not in bases_permitidas:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="PQRF en desarrollo: conexión distinta de LA_PERFECCION_QA.",
+            detail="PQRF no habilitado para la base de datos configurada.",
         )
 
     usuario = current.get("usuario") if isinstance(current, dict) else None
-
     if usuario is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -223,7 +228,7 @@ def registrar_pqrf(
     '''), {'proceso': datos.id_proceso_pqrf}).scalar_one_or_none()
     # Evita registrar solicitudes sin destino gestionable por error de parametrización.
     if responsable_proceso is None:
-        raise HTTPException(status_code=409, detail='El proceso no tiene un responsable activo configurado en QA.')
+        raise HTTPException(status_code=409, detail='El proceso no tiene un responsable activo configurado.')
 
     try:
         id_pqrf = db.execute(text('''
@@ -269,7 +274,7 @@ def registrar_pqrf(
         'estado': 'ABIERTA',
         'id_usuario_responsable': str(responsable_proceso),
         'asignacion_pendiente': False,
-        'mensaje': 'PQRF registrada correctamente en QA.',
+        'mensaje': 'PQRF registrada correctamente.',
     }
 
 # Fase 3: consultas personales. El usuario se obtiene únicamente de la sesión.
@@ -506,7 +511,7 @@ def reasignar_pqrf(
         raise
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Restricción de base de datos al reasignar. Verifique TipoMovimiento en QA.") from exc
+        raise HTTPException(status_code=409, detail="Restricción de base de datos al reasignar. Verifique TipoMovimiento.") from exc
     except Exception:
         db.rollback()
         raise
@@ -515,7 +520,7 @@ def reasignar_pqrf(
         "id": id_pqrf, "estado": "ABIERTA",
         "id_usuario_responsable": str(datos.id_usuario_destino),
         "usuario_responsable": destino["nombre"],
-        "mensaje": "PQRF reasignada correctamente en QA.",
+        "mensaje": "PQRF reasignada correctamente.",
     }
 
 
@@ -614,7 +619,7 @@ def responder_pqrf(
         "id": id_pqrf,
         "id_gestion": id_gestion,
         "estado": "RESPONDIDA",
-        "mensaje": "PQRF respondida correctamente en QA.",
+        "mensaje": "PQRF respondida correctamente.",
     }
 
 # Fase 5: consulta de respuesta, trazabilidad y cierre por quien registró la PQRF.
@@ -766,10 +771,10 @@ def cerrar_pqrf(
         db.rollback()
         raise
 
-    return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente en QA."}
+    return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente."}
 
 # Consultas globales PQRF para usuarios con rol SUPERADMIN (IdRol 5).
-# Se valida contra UsuarioRoles y Roles en la BD QA, no por nombre ni UUID fijo.
+# Se valida contra UsuarioRoles y Roles en la BD actual, no por nombre ni UUID fijo.
 # Solo lectura: no modifica las reglas operativas de PQRF.
 ROL_SUPERADMIN_PQRF = 5
 
