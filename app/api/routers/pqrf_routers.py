@@ -374,6 +374,24 @@ def mis_pqrf_registradas(
     )
 
 
+
+# Contador personal para el menú lateral. Solo PQRF abiertas y asignadas al usuario autenticado.
+@router.get("/pendientes/contador")
+def contador_pqrf_pendientes(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    usuario = _usuario_actual_pqrf(current)
+    total = db.execute(text("""
+        SELECT COUNT(*)
+        FROM public."PQRF"
+        WHERE "IdUsuarioResponsable" = :usuario
+          AND "Estado" = 'ABIERTA'
+    """), {"usuario": usuario}).scalar_one()
+    return {"pendientes": int(total)}
+
+
 @router.get("/mis-asignadas")
 def mis_pqrf_asignadas(
     limite: int = 50,
