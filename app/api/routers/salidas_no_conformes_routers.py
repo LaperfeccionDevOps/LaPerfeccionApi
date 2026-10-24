@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api/salidas-no-conformes", tags=["Salidas No Conform
 
 _logger_snc = logging.getLogger(__name__)
 
-def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripcion: str, fecha: str, ambiente: str) -> None:
+def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripcion: str, fecha: str, ambiente: str, *, devolucion: bool = False) -> None:
     """Notifica después del commit. Un error SMTP nunca revierte la SNC."""
     prefijo = "SNC_MAIL_QA" if ambiente == "qa" else "SNC_MAIL_PROD"
     # SNC reutiliza por defecto el SMTP general ya configurado en el backend,
@@ -78,7 +78,8 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
         mensaje = EmailMessage()
         mensaje["From"] = remitente
         mensaje["To"] = destinatario
-        mensaje["Subject"] = f"Nueva Salida No Conforme asignada - SNC N.º {id_snc}"
+        mensaje["Subject"] = (f"Salida No Conforme devuelta para corrección - SNC N.º {id_snc}"
+                              if devolucion else f"Nueva Salida No Conforme asignada - SNC N.º {id_snc}")
         # El destino del enlace depende del ambiente detectado desde la BD.
         # Se puede personalizar sin tocar el código mediante SNC_APP_URL_QA / PROD.
         url_predeterminada = (
@@ -103,9 +104,9 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
 
         mensaje.set_content(
             f"Hola {responsable},\n\n"
-            f"Se te ha asignado la Salida No Conforme N.º {id_snc}.\n"
+            f"{'Se te ha devuelto para corrección' if devolucion else 'Se te ha asignado'} la Salida No Conforme N.º {id_snc}.\n"
             f"Fecha de la novedad: {fecha}\n"
-            f"Descripción: {descripcion[:1500]}\n\n"
+            f"{'Motivo de devolución' if devolucion else 'Descripción'}: {descripcion[:1500]}\n\n"
             "Para consultar y gestionar el caso, ingresa al aplicativo La Perfección "
             "y abre Salidas No Conformes > SNC asignadas.\n"
             f"Ingresar al aplicativo: {url_app}\n\n"
@@ -122,12 +123,12 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
 <body style="margin:0;padding:24px;background:#f4f6f8;font-family:Arial,sans-serif;color:#263238;">
   <table role="presentation" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;margin:auto;background:#ffffff;border:1px solid #e2e7e9;border-radius:8px;">
     <tr><td style="padding:28px;">
-      <h2 style="color:#087653;margin:0 0 8px;">Nueva Salida No Conforme asignada</h2>
+      <h2 style="color:#087653;margin:0 0 8px;">{"Salida No Conforme devuelta para corrección" if devolucion else "Nueva Salida No Conforme asignada"}</h2>
       <p style="color:#607078;margin:0 0 24px;">SNC N.º {id_snc} · La Perfección</p>
       <p>Hola <strong>{nombre_html}</strong>,</p>
-      <p>Se te ha asignado la Salida No Conforme N.º <strong>{id_snc}</strong>.</p>
+      <p>{"Se te ha devuelto para corrección" if devolucion else "Se te ha asignado"} la Salida No Conforme N.º <strong>{id_snc}</strong>.</p>
       <p><strong>Fecha de la novedad:</strong> {fecha_html}</p>
-      <p><strong>Descripción:</strong> {descripcion_html}</p>
+      <p><strong>{"Motivo de devolución" if devolucion else "Descripción"}:</strong> {descripcion_html}</p>
       <p>Para consultar y gestionar el caso, ingresa al aplicativo y abre
       <strong>Salidas No Conformes &gt; SNC asignadas</strong>.</p>
       <p style="margin:28px 0;text-align:center;">
@@ -171,6 +172,10 @@ def _enviar_aviso_snc(id_snc: int, destinatario: str, responsable: str, descripc
     except Exception:
         _logger_snc.exception("SNC %s: error inesperado preparando la notificación", id_snc)
 
+
+
+def _enviar_aviso_devolucion_snc(id_snc: int, destinatario: str, responsable: str, motivo: str, ambiente: str) -> None:
+    _enviar_aviso_snc(id_snc, destinatario, responsable, motivo, "", ambiente, devolucion=True)
 
 
 def _ambiente_snc(db: Session) -> str:
@@ -317,8 +322,9 @@ class CrearSNC(BaseModel):
     impacto: str | None = Field(default=None, max_length=20000)  # Compatibilidad con registros anteriores
     id_area_responsable_snc: int = Field(gt=0)
     id_responsable_snc: int = Field(gt=0)
-    id_correo_remitente: int = Field(gt=0)
-    id_correo_destinatario: int = Field(gt=0)
+    # Campos históricos opcionales para clientes anteriores; no determinan el aviso.
+    id_correo_remitente: int | None = Field(default=None, gt=0)
+    id_correo_destinatario: int | None = Field(default=None, gt=0)
 
     @field_validator("descripcion")
     @classmethod
@@ -348,8 +354,6 @@ def registrar_snc(
     for tabla, columna, identificador, etiqueta in (
         ('ProcesoSNC', 'IdProcesoSNC', datos.id_proceso_snc, 'Proceso'),
         ('AreaResponsableSNC', 'IdAreaResponsableSNC', datos.id_area_responsable_snc, 'Área'),
-        ('CorreoSNC', 'IdCorreoSNC', datos.id_correo_remitente, 'Correo remitente'),
-        ('CorreoSNC', 'IdCorreoSNC', datos.id_correo_destinatario, 'Correo destinatario'),
     ):
         # tabla/columna provienen de constantes del servidor, no del usuario.
         existe = db.execute(
@@ -363,7 +367,8 @@ def registrar_snc(
         text('''
             SELECT r."IdUsuario" AS id_usuario,
                    r."NombreResponsable" AS nombre_responsable,
-                   c."Correo" AS correo_responsable
+                   c."Correo" AS correo_responsable,
+                   c."IdCorreoSNC" AS id_correo_responsable
             FROM public."ResponsableSNC" r
             LEFT JOIN public."CorreoSNC" c
               ON c."IdCorreoSNC" = r."IdCorreoSNC"
@@ -375,6 +380,13 @@ def registrar_snc(
     ).mappings().first()
     if responsable is None:
         raise HTTPException(status_code=422, detail='Responsable no existe o está inactivo.')
+
+    # El responsable define el correo válido, independientemente de IDs
+    # históricos proporcionados por el navegador. Se conservan las dos columnas
+    # existentes sin modificar la estructura de PostgreSQL.
+    id_correo_responsable = responsable['id_correo_responsable']
+    if id_correo_responsable is None:
+        raise HTTPException(status_code=422, detail='El responsable no tiene un correo activo asociado.')
 
     id_usuario_responsable = responsable['id_usuario']
     if id_usuario_responsable is not None:
@@ -441,8 +453,8 @@ def registrar_snc(
                 'area_origen': id_area_origen,
                 'responsable': datos.id_responsable_snc,
                 'usuario_responsable': id_usuario_responsable,
-                'remitente': datos.id_correo_remitente,
-                'destinatario': datos.id_correo_destinatario,
+                'remitente': id_correo_responsable,
+                'destinatario': id_correo_responsable,
             },
         ).scalar_one()
 
@@ -476,13 +488,6 @@ def registrar_snc(
             _enviar_aviso_snc, id_snc, responsable["correo_responsable"],
             responsable["nombre_responsable"], datos.descripcion,
             datos.fecha_snc.isoformat(), ambiente_notificacion,
-        )
-    else:
-        _logger_snc.warning(
-            "SNC %s: aviso NO programado; responsable %s sin correo activo vinculado "
-            "(el correo destinatario seleccionado en el formulario no se usa "
-            "para el aviso de asignación)",
-            id_snc, datos.id_responsable_snc,
         )
 
     return {
@@ -588,7 +593,7 @@ def contador_snc_pendientes(
         SELECT COUNT(*)
         FROM public."SalidaNoConforme"
         WHERE "IdUsuarioResponsable" = :usuario
-          AND "Estado" IN ('ABIERTO', 'EN_GESTION')
+          AND "Estado" IN ('ABIERTO', 'EN_GESTION', 'DEVUELTO')
     """), {"usuario": usuario}).scalar_one()
     return {"pendientes": int(total)}
 
@@ -647,7 +652,7 @@ def responder_snc(
             raise HTTPException(status_code=404, detail="La SNC no existe.")
         if snc["responsable"] != id_usuario:
             raise HTTPException(status_code=403, detail="Solo el responsable asignado puede responder esta SNC.")
-        if snc["estado"] not in ("ABIERTO", "EN_GESTION"):
+        if snc["estado"] not in ("ABIERTO", "EN_GESTION", "DEVUELTO"):
             raise HTTPException(status_code=409, detail="Esta SNC no admite una nueva respuesta en su estado actual.")
 
         # Aprovecha las tablas de gestión e historial existentes.
@@ -712,7 +717,8 @@ def consultar_respuesta_snc(
     if id_usuario not in (snc["creador"], snc["responsable"]):
         raise HTTPException(status_code=403, detail="No tiene acceso a esta SNC.")
     fila = db.execute(text('''
-        SELECT "DescripcionGestion" AS analisis_causa,
+        SELECT "IdGestionSalidaNoConforme" AS id_gestion,
+               "DescripcionGestion" AS analisis_causa,
                "AccionCorrectiva" AS plan_accion,
                "FechaGestion" AS fecha_respuesta
         FROM public."GestionSalidaNoConforme"
@@ -722,6 +728,127 @@ def consultar_respuesta_snc(
         LIMIT 1
     '''), {"id": id_snc}).mappings().first()
     return dict(fila) if fila else None
+
+
+class DevolverSNC(BaseModel):
+    motivo: str = Field(min_length=1, max_length=5000)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo(cls, valor: str) -> str:
+        valor = valor.strip()
+        if not valor:
+            raise ValueError("El motivo de devolución es obligatorio.")
+        return valor
+
+
+@router.post("/{id_snc}/devolver")
+def devolver_snc(
+    id_snc: int,
+    datos: DevolverSNC,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    """Solo el creador devuelve una respuesta; preserva gestiones y adjuntos."""
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    if id_snc <= 0:
+        raise HTTPException(422, "Número de SNC inválido.")
+    try:
+        snc = db.execute(text("""
+            SELECT s."IdUsuarioCreador" AS creador,
+                   s."Estado" AS estado,
+                   s."Descripcion" AS descripcion,
+                   s."FechaSNC" AS fecha_snc,
+                   r."NombreResponsable" AS responsable,
+                   c."Correo" AS correo
+            FROM public."SalidaNoConforme" s
+            LEFT JOIN public."ResponsableSNC" r
+              ON r."IdResponsableSNC" = s."IdResponsableSNC"
+            LEFT JOIN public."CorreoSNC" c
+              ON c."IdCorreoSNC" = s."IdCorreoDestinatario"
+            WHERE s."IdSalidaNoConforme" = :id
+            FOR UPDATE OF s
+        """), {"id": id_snc}).mappings().first()
+        if snc is None:
+            raise HTTPException(404, "La SNC no existe.")
+        if snc["creador"] != usuario:
+            raise HTTPException(403, "Solo el creador puede devolver la SNC.")
+        if snc["estado"] != "RESPONDIDO":
+            raise HTTPException(409, "Solo se puede devolver una SNC en estado RESPONDIDO.")
+        respuesta = db.execute(text("""
+            SELECT 1 FROM public."GestionSalidaNoConforme"
+            WHERE "IdSalidaNoConforme" = :id
+              AND "EstadoResultante" = 'RESPONDIDO' AND "Activo" = TRUE
+            LIMIT 1
+        """), {"id": id_snc}).scalar_one_or_none()
+        if respuesta is None:
+            raise HTTPException(409, "La SNC no tiene respuesta para devolver.")
+        db.execute(text("""
+            INSERT INTO public."HistorialSalidaNoConforme" (
+                "IdSalidaNoConforme", "IdUsuarioAccion", "TipoAccion",
+                "EstadoAnterior", "EstadoNuevo", "Observacion", "FechaAccion"
+            ) VALUES (:id, :usuario, 'DEVOLUCION', 'RESPONDIDO', 'DEVUELTO',
+                      :motivo, CURRENT_TIMESTAMP)
+        """), {"id": id_snc, "usuario": usuario, "motivo": datos.motivo})
+        db.execute(text("""
+            UPDATE public."SalidaNoConforme"
+            SET "Estado" = 'DEVUELTO', "FechaActualizacion" = CURRENT_TIMESTAMP
+            WHERE "IdSalidaNoConforme" = :id
+        """), {"id": id_snc})
+        ambiente = _ambiente_snc(db)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "No se pudo registrar la devolución por una restricción de datos.") from exc
+    except Exception:
+        db.rollback()
+        raise
+    # Notificación específica después del commit, sin alterar correos de creación.
+    if snc["correo"]:
+        background_tasks.add_task(
+            _enviar_aviso_devolucion_snc, id_snc, snc["correo"],
+            snc["responsable"] or "responsable", datos.motivo, ambiente,
+        )
+    return {"id": id_snc, "estado": "DEVUELTO", "motivo": datos.motivo,
+            "mensaje": "SNC devuelta al responsable correctamente."}
+
+
+@router.get("/{id_snc}/devoluciones")
+def consultar_devoluciones_snc(
+    id_snc: int,
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    """Historial de motivos, visible únicamente para creador y responsable."""
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    snc = db.execute(text("""
+        SELECT "IdUsuarioCreador" AS creador, "IdUsuarioResponsable" AS responsable,
+               "Estado" AS estado
+        FROM public."SalidaNoConforme" WHERE "IdSalidaNoConforme" = :id
+    """), {"id": id_snc}).mappings().first()
+    if not snc:
+        raise HTTPException(404, "La SNC no existe.")
+    if usuario not in (snc["creador"], snc["responsable"]):
+        raise HTTPException(403, "No tiene acceso a esta SNC.")
+    filas = db.execute(text("""
+        SELECT h."IdHistorialSalidaNoConforme" AS id,
+               h."Observacion" AS motivo, h."FechaAccion" AS fecha,
+               h."IdUsuarioAccion" AS id_usuario,
+               u."NombreUsuario" AS usuario
+        FROM public."HistorialSalidaNoConforme" h
+        LEFT JOIN public."Usuario" u ON u."IdUsuario" = h."IdUsuarioAccion"
+        WHERE h."IdSalidaNoConforme" = :id AND h."TipoAccion" = 'DEVOLUCION'
+        ORDER BY h."FechaAccion" DESC, h."IdHistorialSalidaNoConforme" DESC
+    """), {"id": id_snc}).mappings().all()
+    return {"id": id_snc, "estado": snc["estado"],
+            "devoluciones": [{**dict(f), "id_usuario": str(f["id_usuario"])} for f in filas],
+            "motivo_actual": filas[0]["motivo"] if snc["estado"] == "DEVUELTO" and filas else None}
 
 
 # Fase 5: cierre definitivo exclusivo del creador, después de la respuesta.
@@ -884,7 +1011,7 @@ def _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo
     partes = []
     parametros = {}
     if estado:
-        if estado not in ('ABIERTO', 'RESPONDIDO', 'CERRADO'):
+        if estado not in ('ABIERTO', 'EN_GESTION', 'RESPONDIDO', 'DEVUELTO', 'CERRADO', 'CANCELADO'):
             raise HTTPException(status_code=422, detail="Estado SNC inválido.")
         partes.append('s."Estado" = :estado')
         parametros['estado'] = estado
@@ -970,6 +1097,7 @@ def indicadores_snc_general(
                COUNT(*) AS total,
                COUNT(*) FILTER (WHERE estado = 'ABIERTO') AS abiertos,
                COUNT(*) FILTER (WHERE estado = 'RESPONDIDO') AS respondidos,
+                COUNT(*) FILTER (WHERE estado = 'DEVUELTO') AS devueltos,
                COUNT(*) FILTER (WHERE estado = 'CERRADO') AS cerrados,
                COUNT(*) FILTER (WHERE id_area_origen_snc IS NOT NULL AND id_area_origen_snc <> id_area_responsable_snc AND (CAST(:area_scope AS BIGINT) IS NULL OR id_area_origen_snc = :area_scope)) AS emitidas,
                COUNT(*) FILTER (WHERE id_area_origen_snc IS DISTINCT FROM id_area_responsable_snc AND (CAST(:area_scope AS BIGINT) IS NULL OR id_area_responsable_snc = :area_scope)) AS recibidas,
@@ -1019,13 +1147,14 @@ def indicadores_snc_general(
                COUNT(*) FILTER (WHERE tipo = 'RECIBIDAS') AS recibidas,
                COUNT(*) FILTER (WHERE estado = 'ABIERTO') AS abiertas,
                COUNT(*) FILTER (WHERE estado = 'RESPONDIDO') AS respondidas,
+                COUNT(*) FILTER (WHERE estado = 'DEVUELTO') AS devueltas,
                COUNT(*) FILTER (WHERE estado = 'CERRADO') AS cerradas
         FROM relaciones GROUP BY area ORDER BY COUNT(*) DESC, area
     '''), global_params).mappings().all()
     return {
         'grupos': [dict(f) for f in filas],
         'totales': {e: sum(f['total'] for f in filas if f['estado'] == e)
-                    for e in ('ABIERTO', 'RESPONDIDO', 'CERRADO')},
+                    for e in ('ABIERTO', 'RESPONDIDO', 'DEVUELTO', 'CERRADO')},
         'mensual': [dict(f) for f in meses],
         'resumen': dict(resumen), 'desglose': dict(desglose),
         'ranking': [dict(f) for f in ranking],
@@ -1224,7 +1353,7 @@ async def responder_snc_con_evidencias(
         raise HTTPException(404, "La SNC no existe.")
     if previa["responsable"] != usuario:
         raise HTTPException(403, "Solo el responsable asignado puede responder.")
-    if previa["estado"] not in ("ABIERTO", "EN_GESTION"):
+    if previa["estado"] not in ("ABIERTO", "EN_GESTION", "DEVUELTO"):
         raise HTTPException(409, "La SNC no admite respuestas en su estado actual.")
     archivos = archivos or []
     if len(archivos) > _MAX_ARCHIVOS_SNC:
@@ -1249,7 +1378,7 @@ async def responder_snc_con_evidencias(
             raise HTTPException(404, "La SNC no existe.")
         if snc["responsable"] != usuario:
             raise HTTPException(403, "Solo el responsable asignado puede responder.")
-        if snc["estado"] not in ("ABIERTO", "EN_GESTION"):
+        if snc["estado"] not in ("ABIERTO", "EN_GESTION", "DEVUELTO"):
             raise HTTPException(409, "La SNC no admite respuestas en su estado actual.")
         id_gestion = db.execute(text('''
             INSERT INTO public."GestionSalidaNoConforme" (
@@ -1298,7 +1427,8 @@ def listar_evidencias_snc(
 ):
     _autorizar_evidencia_snc(db, current, id_snc)
     filas = db.execute(text('''
-        SELECT a."IdAdjuntoSNC" AS id, a."NombreOriginal" AS nombre,
+        SELECT a."IdAdjuntoSNC" AS id, a."IdGestionSalidaNoConforme" AS id_gestion,
+               g."FechaGestion" AS fecha_respuesta, a."NombreOriginal" AS nombre,
                a."TipoMime" AS tipo_mime, a."TamanoBytes" AS tamano_bytes,
                a."FechaCreacion" AS fecha_creacion
         FROM public."GestionSalidaNoConformeAdjunto" a
