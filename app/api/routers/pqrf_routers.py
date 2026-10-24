@@ -161,6 +161,7 @@ def listar_responsables(
 class CrearPQRF(BaseModel):
     id_tipo_pqrf: int = Field(gt=0)
     correo_remitente: str = Field(min_length=3, max_length=180)
+    correo_respuesta_cliente: str = Field(min_length=3, max_length=180)
     nombre_remitente: str = Field(min_length=1, max_length=200)
     id_cliente: int = Field(gt=0)
     descripcion_pqrf: str = Field(min_length=1, max_length=20000)
@@ -168,7 +169,7 @@ class CrearPQRF(BaseModel):
     id_correo_pqrf: int = Field(gt=0)
     id_usuario_responsable: UUID | None = None
 
-    @field_validator('correo_remitente', 'nombre_remitente', 'descripcion_pqrf')
+    @field_validator('correo_remitente', 'correo_respuesta_cliente', 'nombre_remitente', 'descripcion_pqrf')
     @classmethod
     def no_vacio(cls, valor: str) -> str:
         valor = valor.strip()
@@ -176,7 +177,7 @@ class CrearPQRF(BaseModel):
             raise ValueError('Este campo no puede estar vacío.')
         return valor
 
-    @field_validator('correo_remitente')
+    @field_validator('correo_remitente', 'correo_respuesta_cliente')
     @classmethod
     def correo_valido(cls, valor: str) -> str:
         if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', valor):
@@ -228,16 +229,17 @@ def registrar_pqrf(
     try:
         id_pqrf = db.execute(text('''
             INSERT INTO public."PQRF" (
-                "IdTipoPQRF", "CorreoRemitente", "NombreRemitente",
+                "IdTipoPQRF", "CorreoRemitente", "CorreoRespuestaCliente", "NombreRemitente",
                 "IdCliente", "DescripcionPQRF", "IdProcesoPQRF",
                 "IdCorreoPQRF", "IdUsuarioRegistro", "IdUsuarioResponsable", "Estado"
             ) VALUES (
-                :tipo, :correo, :nombre, :cliente, :descripcion,
+                :tipo, :correo, :correo_respuesta, :nombre, :cliente, :descripcion,
                 :proceso, :destinatario, :registrador, :responsable, 'ABIERTA'
             ) RETURNING "IdPQRF"
         '''), {
             'tipo': datos.id_tipo_pqrf,
             'correo': datos.correo_remitente,
+            'correo_respuesta': datos.correo_respuesta_cliente,
             'nombre': datos.nombre_remitente,
             'cliente': datos.id_cliente,
             'descripcion': datos.descripcion_pqrf,
@@ -287,6 +289,7 @@ _CONSULTA_PERSONAL_PQRF = """
         p."Estado" AS estado,
         p."NombreRemitente" AS nombre_remitente,
         p."CorreoRemitente" AS correo_remitente,
+        p."CorreoRespuestaCliente" AS correo_respuesta_cliente,
         p."DescripcionPQRF" AS descripcion_pqrf,
         p."IdCliente" AS id_cliente,
         p."IdTipoPQRF" AS id_tipo_pqrf,
@@ -845,7 +848,8 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
   WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
  p."Estado" AS estado, p."NombreRemitente" AS nombre_remitente,
- p."CorreoRemitente" AS correo_remitente, p."DescripcionPQRF" AS descripcion_pqrf,
+ p."CorreoRemitente" AS correo_remitente,
+        p."CorreoRespuestaCliente" AS correo_respuesta_cliente, p."DescripcionPQRF" AS descripcion_pqrf,
  p."IdCliente" AS id_cliente, c."Nombre" AS cliente,
  p."IdTipoPQRF" AS id_tipo_pqrf, t."NombreTipo" AS tipo_pqrf,
  p."IdProcesoPQRF" AS id_proceso_pqrf, pr."NombreProceso" AS proceso,
