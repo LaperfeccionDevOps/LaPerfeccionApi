@@ -234,7 +234,7 @@ def listar_areas_snc(
             SELECT "IdAreaResponsableSNC" AS id, "NombreArea" AS nombre
             FROM public."AreaResponsableSNC"
             WHERE "Activo" = TRUE
-            ORDER BY "NombreArea" ASC
+            ORDER BY "OrdenVisualizacion" ASC NULLS LAST, "IdAreaResponsableSNC" ASC
         ''')
     ).mappings().all()
     return [{"id": fila["id"], "nombre": fila["nombre"]} for fila in filas]
@@ -288,14 +288,25 @@ def listar_responsables_snc(
             SELECT r."IdResponsableSNC" AS id,
                    r."NombreResponsable" AS nombre,
                    r."IdUsuario" AS id_usuario,
+                   ar."IdAreaResponsableSNC" AS id_area_responsable_snc,
                    r."IdCorreoSNC" AS id_correo_snc,
                    c."Correo" AS correo
-            FROM public."ResponsableSNC" r
+            FROM public."AreaResponsableGestionSNC" ar
+            INNER JOIN public."AreaResponsableSNC" a
+                ON a."IdAreaResponsableSNC" = ar."IdAreaResponsableSNC"
+               AND a."Activo" = TRUE
+            INNER JOIN public."ResponsableSNC" r
+                ON r."IdResponsableSNC" = ar."IdResponsableSNC"
+               AND r."Activo" = TRUE
+            LEFT JOIN public."Usuario" u
+                ON u."IdUsuario" = r."IdUsuario"
             LEFT JOIN public."CorreoSNC" c
                 ON c."IdCorreoSNC" = r."IdCorreoSNC"
                AND c."Activo" = TRUE
-            WHERE r."Activo" = TRUE
-            ORDER BY r."OrdenVisualizacion" ASC
+            WHERE ar."Activo" = TRUE
+              AND (r."IdUsuario" IS NULL OR UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO')
+            ORDER BY a."OrdenVisualizacion" ASC NULLS LAST,
+                     ar."OrdenVisualizacion" ASC, r."OrdenVisualizacion" ASC
         ''')
     ).mappings().all()
     return [
@@ -303,6 +314,7 @@ def listar_responsables_snc(
             "id": fila["id"],
             "nombre": fila["nombre"],
             "id_usuario": str(fila["id_usuario"]) if fila["id_usuario"] else None,
+            "id_area_responsable_snc": fila["id_area_responsable_snc"],
             "id_correo_snc": fila["id_correo_snc"] if fila["correo"] else None,
             "correo": fila["correo"],
         }
@@ -375,6 +387,22 @@ def registrar_snc(
     ).mappings().first()
     if responsable is None:
         raise HTTPException(status_code=422, detail='Responsable no existe o está inactivo.')
+
+    # La asignación debe pertenecer al área escogida, incluso si el cliente
+    # manipula el formulario. Una relación inactiva no puede recibir SNC nuevas.
+    relacion = db.execute(
+        text('''
+            SELECT 1
+            FROM public."AreaResponsableGestionSNC"
+            WHERE "IdAreaResponsableSNC" = :area
+              AND "IdResponsableSNC" = :responsable
+              AND "Activo" = TRUE
+            LIMIT 1
+        '''),
+        {'area': datos.id_area_responsable_snc, 'responsable': datos.id_responsable_snc},
+    ).scalar_one_or_none()
+    if relacion is None:
+        raise HTTPException(status_code=422, detail='El responsable no está asociado al área seleccionada.')
 
     id_usuario_responsable = responsable['id_usuario']
     if id_usuario_responsable is not None:

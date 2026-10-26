@@ -2,9 +2,10 @@
 
 import re
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, Form, UploadFile, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -543,9 +544,12 @@ class ResponderPQRF(BaseModel):
 
 
 @router.post("/{id_pqrf}/responder")
-def responder_pqrf(
+async def responder_pqrf(
     id_pqrf: int,
-    datos: ResponderPQRF,
+    analisis_gestion: str = Form(default=""),
+    respuesta_pqrf: str = Form(default=""),
+    costo_reclamo: str | None = Form(default=None),
+    evidencia: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
@@ -557,9 +561,11 @@ def responder_pqrf(
     try:
         # Bloqueo de fila para impedir dos respuestas simultáneas.
         pqrf = db.execute(text('''
-            SELECT "Estado" AS estado,
-                   "IdUsuarioResponsable" AS responsable
-            FROM public."PQRF"
+            SELECT p."Estado" AS estado,
+                   p."IdUsuarioResponsable" AS responsable,
+                   UPPER(TRIM(t."NombreTipo")) AS tipo
+            FROM public."PQRF" p
+            JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
             WHERE "IdPQRF" = :id
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
@@ -571,19 +577,55 @@ def responder_pqrf(
         if pqrf["estado"] != "ABIERTA":
             raise HTTPException(status_code=409, detail="Solo se pueden responder PQRF en estado ABIERTA.")
 
+        tipo = pqrf["tipo"]
+        reclamo = tipo == "RECLAMO"
+        felicitacion = tipo in ("FELICITACIÓN", "FELICITACION")
+        if not felicitacion and (not analisis_gestion.strip() or not respuesta_pqrf.strip()):
+            raise HTTPException(status_code=422, detail="El análisis y la respuesta son obligatorios.")
+        costo = None
+        if reclamo:
+            try:
+                costo = Decimal(costo_reclamo or "")
+                if not costo.is_finite() or costo < 0 or costo != costo.to_integral_value() or costo > Decimal("999999999999.99"):
+                    raise ValueError()
+            except (InvalidOperation, ValueError):
+                raise HTTPException(status_code=422, detail="Indique un costo del reclamo válido en pesos colombianos.")
+        if (reclamo or felicitacion) and (evidencia is None or not evidencia.filename):
+            raise HTTPException(status_code=422, detail="Debe adjuntar evidencia para reclamos y felicitaciones.")
+        contenido = None
+        nombre_archivo = None
+        tipo_archivo = None
+        if evidencia is not None and evidencia.filename:
+            nombre_archivo = evidencia.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:200]
+            extension = nombre_archivo.rsplit(".", 1)[-1].lower() if "." in nombre_archivo else ""
+            if extension not in {"pdf", "png", "jpg", "jpeg", "doc", "docx"}:
+                raise HTTPException(status_code=422, detail="Formato de evidencia no permitido.")
+            contenido = await evidencia.read(10 * 1024 * 1024 + 1)
+            if not contenido or len(contenido) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=422, detail="La evidencia debe tener entre 1 byte y 10 MB.")
+            tipo_archivo = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "doc": "application/msword", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[extension]
+        analisis_final = "No aplica para felicitación" if felicitacion else analisis_gestion.strip()
+        respuesta_final = "Felicitación gestionada con evidencia adjunta" if felicitacion else respuesta_pqrf.strip()
+
         id_gestion = db.execute(text('''
             INSERT INTO public."GestionPQRF" (
                 "IdPQRF", "IdUsuarioGestion", "AnalisisGestion",
-                "RespuestaPQRF", "AccionesRealizadas"
+                "RespuestaPQRF", "AccionesRealizadas", "CostoReclamo",
+                "EvidenciaNombre", "EvidenciaTipo", "EvidenciaContenido"
             ) VALUES (
-                :id, :usuario, :analisis, :respuesta, :acciones
+                :id, :usuario, :analisis, :respuesta, :acciones, :costo,
+                :nombre_archivo, :tipo_archivo, :contenido
             ) RETURNING "IdGestionPQRF"
         '''), {
             "id": id_pqrf,
             "usuario": usuario,
-            "analisis": datos.analisis_gestion,
-            "respuesta": datos.respuesta_pqrf,
-            "acciones": datos.acciones_realizadas,
+            "analisis": analisis_final,
+            "respuesta": respuesta_final,
+            "acciones": None,
+            "costo": costo,
+            "nombre_archivo": nombre_archivo,
+            "tipo_archivo": tipo_archivo,
+            "contenido": contenido,
         }).scalar_one()
 
         db.execute(text('''
@@ -670,6 +712,9 @@ def consultar_respuesta_pqrf(
                g."AnalisisGestion" AS analisis_gestion,
                g."RespuestaPQRF" AS respuesta_pqrf,
                g."AccionesRealizadas" AS acciones_realizadas,
+               g."CostoReclamo" AS costo_reclamo,
+               g."EvidenciaNombre" AS nombre_evidencia,
+               (g."EvidenciaContenido" IS NOT NULL) AS tiene_evidencia,
                g."FechaGestion" AS fecha_gestion
         FROM public."GestionPQRF" g
         JOIN public."Usuario" u ON u."IdUsuario" = g."IdUsuarioGestion"
@@ -677,6 +722,26 @@ def consultar_respuesta_pqrf(
         ORDER BY g."FechaGestion" DESC, g."IdGestionPQRF" DESC
     '''), {"id": id_pqrf}).mappings().all()
     return [dict(fila) for fila in filas]
+
+
+@router.get("/{id_pqrf}/gestiones/{id_gestion}/evidencia")
+def descargar_evidencia_pqrf(
+    id_pqrf: int, id_gestion: int,
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    _pqrf_visible_para_usuario(db, id_pqrf, _usuario_actual_pqrf(current))
+    archivo = db.execute(text('''SELECT "EvidenciaNombre" AS nombre,
+        "EvidenciaTipo" AS tipo, "EvidenciaContenido" AS contenido
+        FROM public."GestionPQRF"
+        WHERE "IdPQRF" = :pqrf AND "IdGestionPQRF" = :gestion'''),
+        {"pqrf": id_pqrf, "gestion": id_gestion}).mappings().first()
+    if not archivo or archivo["contenido"] is None:
+        raise HTTPException(status_code=404, detail="Evidencia no encontrada.")
+    from urllib.parse import quote
+    return Response(content=bytes(archivo["contenido"]), media_type=archivo["tipo"] or "application/octet-stream",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(archivo['nombre'] or 'evidencia')}"})
 
 
 @router.get("/{id_pqrf}/historial")
