@@ -1,5 +1,6 @@
-"""API de PQRF - Fase 1: catálogos. Desarrollo exclusivo en QA."""
+"""API de PQRF: operaciones autorizadas en bases de datos configuradas."""
 
+import os
 import re
 import os
 import logging
@@ -123,17 +124,21 @@ def _programar_correo_pqrf(background_tasks: BackgroundTasks, id_pqrf: int, usua
 
 
 def _validar_acceso(db: Session, current: dict) -> None:
-    """Permite acceso únicamente a usuarios activos y a la BD QA."""
+    """Valida sesión activa y base de datos explícitamente autorizada."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-
-    if nombre_bd != "LA_PERFECCION_QA":
+    # QA está autorizado por defecto. Para producción, configurar
+    # PQRF_BASES_PERMITIDAS con el nombre REAL de la BD de producción.
+    bases_configuradas = os.getenv("PQRF_BASES_PERMITIDAS", "LA_PERFECCION_QA")
+    bases_permitidas = {
+        nombre.strip() for nombre in bases_configuradas.split(",") if nombre.strip()
+    }
+    if nombre_bd not in bases_permitidas:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="PQRF en desarrollo: conexión distinta de LA_PERFECCION_QA.",
+            detail="PQRF no habilitado para la base de datos configurada.",
         )
 
     usuario = current.get("usuario") if isinstance(current, dict) else None
-
     if usuario is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -291,6 +296,29 @@ class CrearPQRF(BaseModel):
         return valor
 
 
+def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
+    """Permiso dinámico: únicamente responsables de procesos activos."""
+    return db.execute(text('''
+        SELECT 1
+        FROM public."ResponsableProcesoPQRF" rp
+        JOIN public."ProcesoPQRF" p ON p."IdProcesoPQRF" = rp."IdProcesoPQRF"
+        JOIN public."Usuario" u ON u."IdUsuario" = rp."IdUsuarioResponsable"
+        WHERE rp."IdUsuarioResponsable" = :usuario
+          AND p."Activo" = TRUE
+          AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+        LIMIT 1
+    '''), {"usuario": usuario_id}).scalar_one_or_none() is not None
+
+
+@router.get("/permisos")
+def permisos_pqrf(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    return {"puede_crear": _puede_crear_pqrf(db, _usuario_actual_pqrf(current))}
+
+
 @router.post('', status_code=status.HTTP_201_CREATED)
 def registrar_pqrf(
     datos: CrearPQRF,
@@ -303,6 +331,9 @@ def registrar_pqrf(
         id_registrador = UUID(str(current['usuario'].IdUsuario))
     except (KeyError, AttributeError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=401, detail='Sesión sin usuario válido.') from exc
+
+    if not _puede_crear_pqrf(db, id_registrador):
+        raise HTTPException(status_code=403, detail="No tiene autorización para registrar nuevas PQRF.")
 
     catalogos = (
         ('TipoPQRF', 'IdTipoPQRF', datos.id_tipo_pqrf, 'Tipo de PQRF'),
@@ -345,7 +376,7 @@ def registrar_pqrf(
     '''), {'proceso': datos.id_proceso_pqrf}).scalar_one_or_none()
     # Evita registrar solicitudes sin destino gestionable por error de parametrización.
     if responsable_proceso is None:
-        raise HTTPException(status_code=409, detail='El proceso no tiene un responsable activo configurado en QA.')
+        raise HTTPException(status_code=409, detail='El proceso no tiene un responsable activo configurado.')
     # La notificación inicial se dirige al correo elegido manualmente en el formulario.
     # La asignación de gestión continúa correspondiendo al responsable del proceso.
     correo_seleccionado = db.execute(text('''
@@ -355,6 +386,7 @@ def registrar_pqrf(
     if not correo_seleccionado:
         raise HTTPException(status_code=422, detail="El correo destinatario no existe o está inactivo.")
     destinatario_inicial = {"nombre": "equipo destinatario", "correo": correo_seleccionado}
+
 
     try:
         id_pqrf = db.execute(text('''
@@ -408,7 +440,7 @@ def registrar_pqrf(
         'estado': 'ABIERTA',
         'id_usuario_responsable': str(responsable_proceso),
         'asignacion_pendiente': False,
-        'mensaje': 'PQRF registrada correctamente en QA.',
+        'mensaje': 'PQRF registrada correctamente.',
     }
 
 # Fase 3: consultas personales. El usuario se obtiene únicamente de la sesión.
@@ -651,7 +683,7 @@ def reasignar_pqrf(
         raise
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Restricción de base de datos al reasignar. Verifique TipoMovimiento en QA.") from exc
+        raise HTTPException(status_code=409, detail="Restricción de base de datos al reasignar. Verifique TipoMovimiento.") from exc
     except Exception:
         db.rollback()
         raise
@@ -668,7 +700,7 @@ def reasignar_pqrf(
         "id": id_pqrf, "estado": "ABIERTA",
         "id_usuario_responsable": str(datos.id_usuario_destino),
         "usuario_responsable": destino["nombre"],
-        "mensaje": "PQRF reasignada correctamente en QA.",
+        "mensaje": "PQRF reasignada correctamente.",
     }
 
 
@@ -807,7 +839,7 @@ async def responder_pqrf(
                    UPPER(TRIM(t."NombreTipo")) AS tipo
             FROM public."PQRF" p
             JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
-            WHERE "IdPQRF" = :id
+            WHERE p."IdPQRF" = :id
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
 
@@ -900,7 +932,7 @@ async def responder_pqrf(
         "id": id_pqrf,
         "id_gestion": id_gestion,
         "estado": "RESPONDIDA",
-        "mensaje": "PQRF respondida correctamente en QA.",
+        "mensaje": "PQRF respondida correctamente.",
     }
 
 # Fase 5: consulta de respuesta, trazabilidad y cierre por quien registró la PQRF.
@@ -1032,7 +1064,7 @@ def cerrar_pqrf(
                    t."NombreTipo" AS tipo_pqrf
             FROM public."PQRF" p
             JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
-            WHERE "IdPQRF" = :id
+            WHERE p."IdPQRF" = :id
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
         if pqrf is None:
@@ -1092,10 +1124,11 @@ def cerrar_pqrf(
         True,
     )
 
-    return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente en QA."}
+    return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente."}
+
 
 # Consultas globales PQRF para usuarios con rol SUPERADMIN (IdRol 5).
-# Se valida contra UsuarioRoles y Roles en la BD QA, no por nombre ni UUID fijo.
+# Se valida contra UsuarioRoles y Roles en la BD actual, no por nombre ni UUID fijo.
 # Solo lectura: no modifica las reglas operativas de PQRF.
 ROL_SUPERADMIN_PQRF = 5
 
