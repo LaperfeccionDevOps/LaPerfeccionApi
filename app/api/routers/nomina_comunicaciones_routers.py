@@ -36,7 +36,7 @@ def obtener_datos_trabajador(db: Session, id_retiro_laboral: int):
             ti."Codigo" AS "TipoDocumentoCodigo",
             ti."Descripcion" AS "TipoDocumentoNombre",
 
-            COALESCE(c."NombreCargo", acc_c."NombreCargo") AS "CargoNombre",
+            COALESCE(acc_c."NombreCargo", c."NombreCargo") AS "CargoNombre",
 
             fc."Nombre" AS "FondoCesantiasNombre",
             COALESCE(
