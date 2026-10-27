@@ -175,10 +175,11 @@ def listar_procesos(
 
     filas = db.execute(text("""
         SELECT
-            "IdProcesoPQRF" AS id,
-            "NombreProceso" AS nombre
-        FROM public."ProcesoPQRF"
-        WHERE "Activo" = TRUE
+            p."IdProcesoPQRF" AS id,
+            p."NombreProceso" AS nombre,
+            p."IdCorreoPQRF" AS id_correo_pqrf
+        FROM public."ProcesoPQRF" p
+        WHERE p."Activo" = TRUE
         ORDER BY "NombreProceso"
     """)).mappings().all()
 
@@ -316,6 +317,20 @@ def registrar_pqrf(
         ).scalar_one_or_none()
         if existe is None:
             raise HTTPException(status_code=422, detail=f'{etiqueta} no existe o está inactivo.')
+
+    # Validar en el servidor la correspondencia proceso-correo parametrizada.
+    # No confiar únicamente en la selección automática del frontend.
+    correo_configurado = db.execute(text('''
+        SELECT p."IdCorreoPQRF"
+        FROM public."ProcesoPQRF" p
+        JOIN public."CorreoPQRF" c ON c."IdCorreoPQRF" = p."IdCorreoPQRF"
+        WHERE p."IdProcesoPQRF" = :proceso
+          AND p."Activo" = TRUE AND c."Activo" = TRUE
+    '''), {'proceso': datos.id_proceso_pqrf}).scalar_one_or_none()
+    if correo_configurado is None:
+        raise HTTPException(status_code=409, detail='El proceso no tiene un correo activo configurado.')
+    if datos.id_correo_pqrf != correo_configurado:
+        raise HTTPException(status_code=422, detail='El correo destinatario no corresponde al proceso seleccionado.')
 
     # La asignación inicial se determina exclusivamente por el proceso elegido.
     # No se acepta un responsable arbitrario enviado por el cliente.
