@@ -1,11 +1,17 @@
 """API de PQRF - Fase 1: catálogos. Desarrollo exclusivo en QA."""
 
 import re
+import os
+import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
+from html import escape
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status, File, Form, UploadFile, Response
+from fastapi import APIRouter, Depends, HTTPException, status, File, Form, UploadFile, Response, BackgroundTasks
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +22,104 @@ from infrastructure.security.auth_dependencies import get_current_user
 
 
 router = APIRouter(prefix="/api/pqrf", tags=["PQRF"])
+
+
+_logger_pqrf = logging.getLogger(__name__)
+
+
+def _correo_usuario_pqrf(db: Session, id_usuario: UUID) -> dict:
+    # Obtiene destinatario desde la BD
+    fila = db.execute(text('''
+        SELECT "NombreUsuario" AS nombre, "CorreoCorporativo" AS correo
+        FROM public."Usuario" WHERE "IdUsuario" = :id
+    '''), {"id": id_usuario}).mappings().first()
+    return dict(fila) if fila else {"nombre": "Responsable", "correo": None}
+
+
+def _enviar_correo_pqrf(
+    id_pqrf: int, destinatario: str | None, asunto: str,
+    saludo: str, contenido: str, externo: bool = False,
+) -> None:
+    # Solo QA, tras commit
+    if not destinatario or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", destinatario):
+        _logger_pqrf.warning("PQRF %s: correo omitido; destinatario vacío o inválido", id_pqrf)
+        return
+    # PQRF QA usa su configuración propia cuando exista; mientras tanto reutiliza
+    # la cuenta institucional no.reply de SNC, sin alterar el servicio SNC.
+    # No utilizar el SMTP general de Nómina para notificaciones PQRF.
+    def config(campo: str) -> str:
+        return (os.getenv("PQRF_MAIL_QA_" + campo) or os.getenv("SNC_MAIL_PROD_" + campo) or "").strip()
+
+    host, remitente = config("HOST"), config("FROM")
+    usuario, clave = config("USER"), config("PASSWORD")
+    if not host or not remitente or bool(usuario) != bool(clave):
+        _logger_pqrf.error("PQRF %s: SMTP QA incompleto; no se envía correo", id_pqrf)
+        return
+    try:
+        puerto = int(config("PORT") or "587")
+        mensaje = EmailMessage()
+        mensaje["From"] = remitente
+        mensaje["To"] = destinatario
+        mensaje["Subject"] = asunto
+        encabezado = f"Hola {saludo},\n\n"
+        pie = "\n\nAtentamente,\nAseos La Perfección\nEste es un mensaje automático."
+        mensaje.set_content(encabezado + contenido + pie)
+        # Diseño sobrio, legible en Outlook y Gmail. No altera el contenido funcional.
+        asunto_seguro = escape(asunto)
+        saludo_seguro = escape(saludo)
+        contenido_seguro = escape(contenido).replace("\n", "<br>")
+        html = (
+            '<!doctype html><html lang="es"><head><meta charset="utf-8"></head>'
+            '<body style="margin:0;padding:24px 12px;background:#f3f5f7;'
+            'font-family:Arial,Helvetica,sans-serif;color:#263238;">'
+            '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+            'style="width:100%;max-width:600px;margin:0 auto;background:#ffffff;'
+            'border:1px solid #e4e9ed;border-collapse:collapse;">'
+            '<tr><td style="background:#087654;padding:16px 24px;'
+            'color:#ffffff;font-size:15px;font-weight:bold;letter-spacing:.2px;">'
+            'ASEOS LA PERFECCIÓN <span style="font-weight:normal;font-size:12px;">'
+            '| Gestión de PQRF</span></td></tr>'
+            '<tr><td style="padding:26px 24px 20px;">'
+            '<p style="margin:0 0 16px;color:#087654;font-size:17px;'
+            'font-weight:bold;line-height:1.4;">' + asunto_seguro + '</p>'
+            '<p style="margin:0 0 14px;font-size:14px;line-height:1.6;">'
+            'Hola ' + saludo_seguro + ',</p>'
+            '<div style="font-size:14px;line-height:1.75;color:#334155;">'
+            + contenido_seguro + '</div>'
+            '<p style="margin:24px 0 0;font-size:13px;line-height:1.6;">'
+            'Cordialmente,<br><strong>Aseos La Perfección</strong></p>'
+            '</td></tr>'
+            '<tr><td style="padding:14px 24px;border-top:1px solid #e4e9ed;'
+            'background:#fafbfc;color:#64748b;font-size:11px;line-height:1.5;">'
+            'Notificación automática del módulo PQRF. '
+            'Por favor, no respondas directamente a este mensaje.'
+            '</td></tr></table></body></html>'
+        )
+        mensaje.add_alternative(html, subtype="html")
+        contexto = ssl.create_default_context()
+        if puerto == 465:
+            with smtplib.SMTP_SSL(host, puerto, timeout=15, context=contexto) as smtp:
+                if usuario:
+                    smtp.login(usuario, clave)
+                smtp.send_message(mensaje)
+        else:
+            with smtplib.SMTP(host, puerto, timeout=15) as smtp:
+                if config("USE_TLS").lower() not in ("false", "0", "no"):
+                    smtp.starttls(context=contexto)
+                if usuario:
+                    smtp.login(usuario, clave)
+                smtp.send_message(mensaje)
+        _logger_pqrf.info("PQRF %s: SMTP aceptó correo %s; entrega final no confirmada", id_pqrf, "externo" if externo else "interno")
+    except (OSError, ValueError, smtplib.SMTPException) as exc:
+        _logger_pqrf.error("PQRF %s: error SMTP (%s); sin afectar registro", id_pqrf, type(exc).__name__)
+    except Exception as exc:
+        _logger_pqrf.error("PQRF %s: error inesperado de correo (%s)", id_pqrf, type(exc).__name__)
+
+
+def _programar_correo_pqrf(background_tasks: BackgroundTasks, id_pqrf: int, usuario: dict,
+                           asunto: str, contenido: str) -> None:
+    background_tasks.add_task(_enviar_correo_pqrf, id_pqrf, usuario.get("correo"),
+                              asunto, usuario.get("nombre") or "Responsable", contenido)
 
 
 def _validar_acceso(db: Session, current: dict) -> None:
@@ -189,6 +293,7 @@ class CrearPQRF(BaseModel):
 @router.post('', status_code=status.HTTP_201_CREATED)
 def registrar_pqrf(
     datos: CrearPQRF,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
@@ -226,6 +331,15 @@ def registrar_pqrf(
     # Evita registrar solicitudes sin destino gestionable por error de parametrización.
     if responsable_proceso is None:
         raise HTTPException(status_code=409, detail='El proceso no tiene un responsable activo configurado en QA.')
+    # La notificación inicial se dirige al correo elegido manualmente en el formulario.
+    # La asignación de gestión continúa correspondiendo al responsable del proceso.
+    correo_seleccionado = db.execute(text('''
+        SELECT "Correo" FROM public."CorreoPQRF"
+        WHERE "IdCorreoPQRF" = :id AND "Activo" = TRUE
+    '''), {"id": datos.id_correo_pqrf}).scalar_one_or_none()
+    if not correo_seleccionado:
+        raise HTTPException(status_code=422, detail="El correo destinatario no existe o está inactivo.")
+    destinatario_inicial = {"nombre": "equipo destinatario", "correo": correo_seleccionado}
 
     try:
         id_pqrf = db.execute(text('''
@@ -266,6 +380,13 @@ def registrar_pqrf(
     except Exception:
         db.rollback()
         raise
+
+    _programar_correo_pqrf(
+        background_tasks, id_pqrf, destinatario_inicial,
+        f"Nueva PQRF registrada - N.º {id_pqrf}",
+        f"Se ha registrado la PQRF N.º {id_pqrf}, dirigida a este correo según la selección del formulario.\n"
+        "Ingresa al aplicativo La Perfección, módulo PQRF, para consultar el caso.",
+    )
 
     return {
         'id': id_pqrf,
@@ -312,7 +433,11 @@ _CONSULTA_PERSONAL_PQRF = """
             SELECT 1 FROM public."ResponsableProcesoPQRF" rp
             WHERE rp."IdProcesoPQRF" = p."IdProcesoPQRF"
               AND rp."IdUsuarioResponsable" = :usuario
-        ) AS es_gerente_proceso
+        ) AS es_gerente_proceso,
+        (p."Estado" = 'ABIERTA' AND p."IdUsuarioResponsable" = :usuario
+         AND EXISTS (SELECT 1 FROM public."ResponsableProcesoPQRF" rp
+                     WHERE rp."IdProcesoPQRF" = p."IdProcesoPQRF"
+                       AND rp."IdUsuarioResponsable" <> :usuario)) AS puede_rechazar_asignacion
     FROM public."PQRF" p
     JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
     JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
@@ -443,6 +568,7 @@ class ReasignarPQRF(BaseModel):
 def reasignar_pqrf(
     id_pqrf: int,
     datos: ReasignarPQRF,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
@@ -473,7 +599,7 @@ def reasignar_pqrf(
             raise HTTPException(status_code=409, detail="La PQRF ya está asignada a ese usuario.")
 
         destino = db.execute(text('''
-            SELECT "NombreUsuario" AS nombre FROM public."Usuario"
+            SELECT "NombreUsuario" AS nombre, "CorreoCorporativo" AS correo FROM public."Usuario"
             WHERE "IdUsuario" = :usuario
               AND UPPER(TRIM(COALESCE("HashEstado", ''))) = 'ACTIVO'
         '''), {"usuario": datos.id_usuario_destino}).mappings().first()
@@ -515,11 +641,111 @@ def reasignar_pqrf(
         db.rollback()
         raise
 
+    _programar_correo_pqrf(
+        background_tasks, id_pqrf, dict(destino),
+        f"PQRF reasignada a tu cargo - N.º {id_pqrf}",
+        f"Se te ha reasignado la PQRF N.º {id_pqrf}.\n"
+        f"Motivo de la asignación: {datos.motivo}\n"
+        "Consulta el caso en el módulo PQRF del aplicativo.",
+    )
+
     return {
         "id": id_pqrf, "estado": "ABIERTA",
         "id_usuario_responsable": str(datos.id_usuario_destino),
         "usuario_responsable": destino["nombre"],
         "mensaje": "PQRF reasignada correctamente en QA.",
+    }
+
+
+# Rechazo de asignación: devolución transaccional al gerente del proceso.
+class RechazarAsignacionPQRF(BaseModel):
+    motivo: str = Field(min_length=5, max_length=1000)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo_rechazo(cls, valor: str) -> str:
+        valor = valor.strip()
+        if len(valor) < 5:
+            raise ValueError("Indique un motivo de al menos cinco caracteres.")
+        return valor
+
+
+@router.post("/{id_pqrf}/rechazar-asignacion")
+def rechazar_asignacion_pqrf(
+    id_pqrf: int,
+    datos: RechazarAsignacionPQRF,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    usuario = _usuario_actual_pqrf(current)
+    if id_pqrf <= 0:
+        raise HTTPException(status_code=422, detail="Identificador de PQRF no válido.")
+    try:
+        pqrf = db.execute(text('''
+            SELECT "Estado" AS estado, "IdProcesoPQRF" AS proceso,
+                   "IdUsuarioResponsable" AS responsable
+            FROM public."PQRF" WHERE "IdPQRF" = :id FOR UPDATE
+        '''), {"id": id_pqrf}).mappings().first()
+        if pqrf is None:
+            raise HTTPException(status_code=404, detail="PQRF no encontrada.")
+        if pqrf["estado"] != "ABIERTA":
+            raise HTTPException(status_code=409, detail="Solo se pueden rechazar asignaciones de PQRF ABIERTAS.")
+        if pqrf["responsable"] != usuario:
+            raise HTTPException(status_code=403, detail="Solo el colaborador actualmente asignado puede rechazar la asignación.")
+        gerente = db.execute(text('''
+            SELECT r."IdUsuarioResponsable" AS id, u."NombreUsuario" AS nombre,
+                   u."CorreoCorporativo" AS correo
+            FROM public."ResponsableProcesoPQRF" r
+            JOIN public."Usuario" u ON u."IdUsuario" = r."IdUsuarioResponsable"
+            WHERE r."IdProcesoPQRF" = :proceso
+              AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+        '''), {"proceso": pqrf["proceso"]}).mappings().first()
+        if gerente is None:
+            raise HTTPException(status_code=409, detail="No existe un gerente activo configurado para este proceso.")
+        if gerente["id"] == usuario:
+            raise HTTPException(status_code=403, detail="El gerente no puede rechazar su propia asignación; debe reasignarla.")
+        colaborador = db.execute(text('''
+            SELECT "NombreUsuario" FROM public."Usuario" WHERE "IdUsuario" = :usuario
+        '''), {"usuario": usuario}).scalar_one_or_none()
+        db.execute(text('''
+            UPDATE public."PQRF"
+            SET "IdUsuarioResponsable" = :gerente, "FechaActualizacion" = CURRENT_TIMESTAMP
+            WHERE "IdPQRF" = :id
+        '''), {"gerente": gerente["id"], "id": id_pqrf})
+        db.execute(text('''
+            INSERT INTO public."HistorialPQRF" (
+                "IdPQRF", "IdUsuario", "TipoMovimiento", "EstadoAnterior", "EstadoNuevo", "Observacion"
+            ) VALUES (:id, :usuario, 'RECHAZO_ASIGNACION', 'ABIERTA', 'ABIERTA', :observacion)
+        '''), {
+            "id": id_pqrf, "usuario": usuario,
+            "observacion": f"Asignación rechazada por {colaborador or 'COLABORADOR'} y devuelta a {gerente['nombre']}. Motivo: {datos.motivo}",
+        })
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Restricción de base de datos al rechazar. Verifique TipoMovimiento en QA.") from exc
+    except Exception:
+        db.rollback()
+        raise
+    _programar_correo_pqrf(
+        background_tasks, id_pqrf, dict(gerente),
+        f"Asignación de PQRF rechazada - N.º {id_pqrf}",
+        f"La asignación de la PQRF N.º {id_pqrf} fue rechazada por "
+        f"{colaborador or 'el colaborador'} y devuelta a tu gestión.\n"
+        f"Motivo del rechazo: {datos.motivo}\n"
+        "Ingresa al aplicativo para revisar y reasignar el caso.",
+    )
+
+    return {
+        "id": id_pqrf, "estado": "ABIERTA",
+        "id_usuario_responsable": str(gerente["id"]),
+        "usuario_responsable": gerente["nombre"],
+        "mensaje": "Asignación rechazada y devuelta automáticamente al gerente.",
     }
 
 
@@ -774,6 +1000,7 @@ def consultar_historial_pqrf(
 @router.post("/{id_pqrf}/cerrar")
 def cerrar_pqrf(
     id_pqrf: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
@@ -784,8 +1011,12 @@ def cerrar_pqrf(
 
     try:
         pqrf = db.execute(text('''
-            SELECT "Estado" AS estado, "IdUsuarioRegistro" AS registrador
-            FROM public."PQRF"
+            SELECT p."Estado" AS estado, p."IdUsuarioRegistro" AS registrador,
+                   p."CorreoRespuestaCliente" AS correo_cliente,
+                   p."NombreRemitente" AS nombre_cliente,
+                   t."NombreTipo" AS tipo_pqrf
+            FROM public."PQRF" p
+            JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
             WHERE "IdPQRF" = :id
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
@@ -802,8 +1033,10 @@ def cerrar_pqrf(
                 detail="Solo se pueden cerrar PQRF en estado RESPONDIDA.",
             )
         gestion = db.execute(text('''
-            SELECT 1 FROM public."GestionPQRF" WHERE "IdPQRF" = :id LIMIT 1
-        '''), {"id": id_pqrf}).scalar_one_or_none()
+            SELECT "RespuestaPQRF" AS respuesta
+            FROM public."GestionPQRF" WHERE "IdPQRF" = :id
+            ORDER BY "FechaGestion" DESC, "IdGestionPQRF" DESC LIMIT 1
+        '''), {"id": id_pqrf}).mappings().first()
         if gestion is None:
             raise HTTPException(status_code=409, detail="La PQRF no tiene una respuesta registrada.")
 
@@ -833,6 +1066,16 @@ def cerrar_pqrf(
     except Exception:
         db.rollback()
         raise
+
+    # Únicamente información externa: tipo, radicado y respuesta final.
+    background_tasks.add_task(
+        _enviar_correo_pqrf, id_pqrf, pqrf["correo_cliente"],
+        f"Respuesta final a su {pqrf['tipo_pqrf']} - PQRF N.º {id_pqrf}",
+        pqrf["nombre_cliente"] or "Estimado(a) cliente",
+        f"Su solicitud {pqrf['tipo_pqrf']} con radicado N.º {id_pqrf} "
+        f"ha sido gestionada y cerrada.\n\nRespuesta final:\n{gestion['respuesta']}",
+        True,
+    )
 
     return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente en QA."}
 
