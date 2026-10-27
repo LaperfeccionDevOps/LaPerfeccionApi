@@ -296,6 +296,29 @@ class CrearPQRF(BaseModel):
         return valor
 
 
+def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
+    """Permiso dinámico: únicamente responsables de procesos activos."""
+    return db.execute(text('''
+        SELECT 1
+        FROM public."ResponsableProcesoPQRF" rp
+        JOIN public."ProcesoPQRF" p ON p."IdProcesoPQRF" = rp."IdProcesoPQRF"
+        JOIN public."Usuario" u ON u."IdUsuario" = rp."IdUsuarioResponsable"
+        WHERE rp."IdUsuarioResponsable" = :usuario
+          AND p."Activo" = TRUE
+          AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+        LIMIT 1
+    '''), {"usuario": usuario_id}).scalar_one_or_none() is not None
+
+
+@router.get("/permisos")
+def permisos_pqrf(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    return {"puede_crear": _puede_crear_pqrf(db, _usuario_actual_pqrf(current))}
+
+
 @router.post('', status_code=status.HTTP_201_CREATED)
 def registrar_pqrf(
     datos: CrearPQRF,
@@ -308,6 +331,9 @@ def registrar_pqrf(
         id_registrador = UUID(str(current['usuario'].IdUsuario))
     except (KeyError, AttributeError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=401, detail='Sesión sin usuario válido.') from exc
+
+    if not _puede_crear_pqrf(db, id_registrador):
+        raise HTTPException(status_code=403, detail="No tiene autorización para registrar nuevas PQRF.")
 
     catalogos = (
         ('TipoPQRF', 'IdTipoPQRF', datos.id_tipo_pqrf, 'Tipo de PQRF'),
