@@ -474,6 +474,123 @@ def _obtener_requisitos_perfil_pdf(db: Session, id_paz_y_salvo: int):
     """), {"id": id_paz_y_salvo, "perfil": perfil["CodigoPerfil"]}).mappings().all()
     # Los seis requisitos del formulario operativo básico. Los códigos de
     # llaves y casillero son históricos: se muestran como UN SOLO requisito.
+    if perfil["CodigoPerfil"] == "OPERATIVO_TECNICO":
+        # Los tres elementos físicos de QA son históricos. Para el perfil
+        # técnico el formulario oficial utiliza las seis validaciones del Excel.
+        # No se modifican ni eliminan respuestas físicas preexistentes.
+        requisitos_tecnicos = (
+            ("RELACION_HERRAMIENTAS", "Relación detallada de herramientas"),
+            ("EQUIPOS_MAQUINARIA", "Equipos y maquinaria asignados"),
+            ("CANTIDAD_ESTADO", "Cantidad y estado de cada elemento"),
+            ("PROPIEDAD_ELEMENTOS", "Identificación de si el elemento pertenece a ALP o al cliente"),
+            ("INVENTARIOS_CUSTODIA", "Llaves, controles, inventarios y demás elementos bajo custodia"),
+            ("RESPONSABLE_TECNICO", "Nombre del responsable que recibe y valida la entrega"),
+        )
+        guardadas = {str(v["codigo"]).strip().upper(): v for v in validaciones}
+        resultado = []
+        for codigo, nombre in requisitos_tecnicos:
+            validacion = guardadas.get(codigo)
+            resultado.append({
+                "nombre": nombre,
+                "estado": validacion["estado"] if validacion else None,
+                "observacion": validacion["observacion"] if validacion else None,
+            })
+        return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
+    if perfil["CodigoPerfil"] == "ADMINISTRATIVO_CAMPO":
+        # Requisitos oficiales del perfil administrativo de campo.
+        # Las respuestas se almacenan en PazYSalvoOperacionesValidacion;
+        # los elementos físicos históricos no se imprimen para este perfil.
+        requisitos_administrativos = (
+            ("EQUIPOS_COMUNICACION", "Equipos tecnológicos y de comunicación"),
+            ("USUARIOS_ACCESOS", "Usuarios, correos, aplicaciones y accesos asignados"),
+            ("ACCESO_CLIENTE", "Carnés, tarjetas o permisos de acceso del cliente"),
+            ("DOCUMENTOS_ARCHIVOS", "Llaves, documentos, archivos e información bajo su responsabilidad"),
+            ("ACTA_PUESTO", "Acta de entrega del puesto de trabajo"),
+            ("ACTIVIDADES", "Relación de actividades finalizadas, en curso y pendientes"),
+            ("UBICACION_ARCHIVOS", "Ubicación de archivos y documentos"),
+            ("RECEPTOR_PUESTO", "Identificación de la persona que recibe el puesto"),
+        )
+        guardadas = {str(v["codigo"]).strip().upper(): v for v in validaciones}
+        resultado = []
+        for codigo, nombre in requisitos_administrativos:
+            validacion = guardadas.get(codigo)
+            resultado.append({
+                "nombre": nombre,
+                "estado": validacion["estado"] if validacion else None,
+                "observacion": validacion["observacion"] if validacion else None,
+            })
+        return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
+    if perfil["CodigoPerfil"] == "SUPERVISION_LIDERAZGO":
+        # Perfil 4: requisitos oficiales de Supervisión y Liderazgo.
+        # Solo consulta respuestas ya guardadas; no modifica el retiro.
+        requisitos_supervision = (
+            ("HERRAMIENTAS_EQUIPOS", "Herramientas, equipos y elementos asignados"),
+            ("USUARIOS_CLAVES", "Usuarios, claves y accesos tecnológicos"),
+            ("LLAVES_CONTROLES", "Llaves, carnés y permisos de ingreso"),
+            ("REGISTROS_OPERACION", "Documentos, inventarios y registros de la operación"),
+            ("ACTA_GESTION", "Acta de entrega de gestión"),
+            ("ACTIVIDADES_PROGRAMADAS", "Estado de las actividades programadas"),
+            ("PENDIENTES_CLIENTE", "Pendientes operativos, administrativos y compromisos con el cliente"),
+            ("RECEPTOR_OPERACION", "Identificación de la persona que recibe la operación"),
+        )
+        guardadas = {str(v["codigo"]).strip().upper(): v for v in validaciones}
+        resultado = []
+        for codigo, nombre in requisitos_supervision:
+            validacion = guardadas.get(codigo)
+            resultado.append({
+                "nombre": nombre,
+                "estado": validacion["estado"] if validacion else None,
+                "observacion": validacion["observacion"] if validacion else None,
+            })
+        return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
+    if perfil["CodigoPerfil"] == "SERVICIOS_ESPECIALES":
+        # Perfil 5: seis requisitos oficiales de la matriz de cargos ALP.
+        # Lee las validaciones existentes; no modifica respuestas ni adjuntos.
+        requisitos_especiales = (
+            ("HERRAMIENTAS_TECNICAS", "Herramientas y equipos técnicos"),
+            ("INSTRUMENTOS_MEDICION", "Instrumentos de medición y control"),
+            ("EPP_ESPECIALIZADO", "Elementos de protección personal especializados"),
+            ("INSUMOS_CUSTODIA", "Insumos o elementos bajo custodia"),
+            ("ESTADO_SERVICIO", "Estado de las actividades y pendientes del servicio"),
+            ("SUMINISTROS_CLIENTE", "Elementos suministrados por el cliente"),
+        )
+        guardadas = {str(v["codigo"]).strip().upper(): v for v in validaciones}
+        resultado = []
+        for codigo, nombre in requisitos_especiales:
+            validacion = guardadas.get(codigo)
+            resultado.append({
+                "nombre": nombre,
+                "estado": validacion["estado"] if validacion else None,
+                "observacion": validacion["observacion"] if validacion else None,
+            })
+        return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
+    if perfil["CodigoPerfil"] == "TRABAJO_ALTURAS":
+        # Perfil 6: requisitos oficiales de la matriz ALP (Excel).
+        # Se leen exclusivamente las validaciones guardadas; no se modifican
+        # elementos físicos históricos, adjuntos ni registros de retiro.
+        requisitos_alturas = (
+            ("EQUIPO_DESCRIPCION", "Equipos de protección contra caídas y sus accesorios (registro individual por elemento)"),
+            ("EQUIPO_CODIGO", "Descripción, código o identificación y cantidad de cada elemento"),
+            ("EQUIPO_ESTADO", "Estado al momento de la devolución"),
+            ("EQUIPO_NOVEDADES", "Faltantes o novedades"),
+            ("CONCEPTO_COORDINADOR", "Concepto del coordinador de trabajo en alturas"),
+            ("RECEPTOR_ALTURAS", "Nombre y confirmación de la persona que recibe"),
+        )
+        guardadas = {str(v["codigo"]).strip().upper(): v for v in validaciones}
+        resultado = []
+        for codigo, nombre in requisitos_alturas:
+            validacion = guardadas.get(codigo)
+            resultado.append({
+                "nombre": nombre,
+                "estado": validacion["estado"] if validacion else None,
+                "observacion": validacion["observacion"] if validacion else None,
+            })
+        return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
     if perfil["CodigoPerfil"] != "OPERATIVO_BASICO":
         # Mantener compatibilidad con los demás perfiles.
         return None
@@ -509,7 +626,7 @@ def _obtener_requisitos_perfil_pdf(db: Session, id_paz_y_salvo: int):
     return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
 
 
-def _tabla_requisitos_perfil_pdf(requisitos, estilos):
+def _tabla_requisitos_perfil_pdf(requisitos, estilos, lineas_nomina=None):
     filas = [[_parrafo("REQUISITOS DEL PERFIL", estilos["seccion"]), "", ""]]
     filas.append([_parrafo("ELEMENTO", estilos["etiqueta"]),
                   _parrafo("RESPUESTA", estilos["etiqueta"]),
@@ -521,17 +638,34 @@ def _tabla_requisitos_perfil_pdf(requisitos, estilos):
         filas.append([_parrafo(item["nombre"], estilos["valor_izquierda"]),
                       _parrafo(estado, estilos["valor"]),
                       _parrafo(item.get("observacion"), estilos["valor_izquierda"])])
+    # Añadir nómina como filas de la MISMA tabla: idéntico origen X, sin
+    # depender de centrado, anidamiento o márgenes de otro Flowable.
+    ultima_fila_requisitos = len(filas) - 1
+    for linea in (lineas_nomina or []):
+        filas.append([_parrafo_markup(linea, estilos["valor_izquierda"]), "", ""])
     tabla = Table(filas, colWidths=[6.5 * cm, 3.2 * cm, 6.8 * cm], repeatRows=2)
-    tabla.setStyle(TableStyle([
+    instrucciones = [
         ("SPAN", (0, 0), (-1, 0)),
-        ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
+        ("GRID", (0, 0), (-1, ultima_fila_requisitos), 1.15, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 1), (-1, 1), colors.white),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
+    ]
+    for fila in range(ultima_fila_requisitos + 1, len(filas)):
+        instrucciones.extend([
+            ("SPAN", (0, fila), (2, fila)),
+            ("LEFTPADDING", (0, fila), (2, fila), 0),
+            ("RIGHTPADDING", (0, fila), (2, fila), 0),
+            ("TOPPADDING", (0, fila), (2, fila), 0),
+            ("BOTTOMPADDING", (0, fila), (2, fila), 0),
+        ])
+    if len(filas) > ultima_fila_requisitos + 1:
+        instrucciones.append(("TOPPADDING", (0, ultima_fila_requisitos + 1),
+                              (2, ultima_fila_requisitos + 1), 0.20 * cm))
+    tabla.setStyle(TableStyle(instrucciones))
     return tabla
 
 
@@ -1485,16 +1619,40 @@ def generar_paz_salvo_operaciones_pdf(
     )
 
     if requisitos_perfil is not None:
-        elementos.append(_tabla_requisitos_perfil_pdf(requisitos_perfil, estilos))
+        tabla_requisitos = _tabla_requisitos_perfil_pdf(requisitos_perfil, estilos)
+        # Resumen común a todos los perfiles dinámicos. La tabla sin bordes
+        # comparte el ancho y el borde izquierdo de REQUISITOS DEL PERFIL.
+        # No se añaden cuadrículas ni se modifican los datos del documento.
+        lineas_nomina = [
+            "<b>NOVEDADES Y DESCUENTOS DE NÓMINA</b>",
+            "<b>APLICA DESCUENTO:</b> "
+            + _texto_html(datos.get("AplicaDescuento"), "NO"),
+        ]
+        if (str(datos.get("AplicaDescuento") or "").strip().upper() == "SI"
+                and datos.get("ValorDescuento") is not None):
+            lineas_nomina.append(
+                "<b>VALOR DEL DESCUENTO:</b> "
+                + _texto_html(_dinero(datos.get("ValorDescuento")))
+            )
+        lineas_nomina.append(
+            "<b>OBSERVACIONES PARA NÓMINA:</b> "
+            + _texto_html(datos.get("NovedadesNomina"), "SIN NOVEDADES")
+        )
         observaciones_generales = _texto(datos.get("ObservacionPazYSalvo"))
         if (observaciones_generales and
                 observaciones_generales.casefold() !=
                 "retiro guardado desde el módulo de operaciones.".casefold()):
-            elementos.append(Spacer(1, 0.20 * cm))
-            elementos.append(_parrafo_markup(
-                "<b>OBSERVACIONES GENERALES:</b> " + _texto_html(observaciones_generales),
-                estilos["valor_izquierda"],
-            ))
+            lineas_nomina.append(
+                "<b>OBSERVACIONES GENERALES:</b> "
+                + _texto_html(observaciones_generales)
+            )
+
+        # La cuadrícula y nómina son filas de una sola tabla.
+        # Las filas de nómina no llevan bordes y comienzan exactamente
+        # donde inicia la cuadrícula, para todos los perfiles dinámicos.
+        elementos.append(_tabla_requisitos_perfil_pdf(
+            requisitos_perfil, estilos, lineas_nomina
+        ))
     else:
         # Compatibilidad con perfiles todavía no migrados a requisitos dinámicos.
         elementos.append(_tabla_entrega_elementos(datos, estilos))

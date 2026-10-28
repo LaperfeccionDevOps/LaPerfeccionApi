@@ -1,6 +1,7 @@
 # ruff: noqa: B008, BLE001
 
 import json
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,7 @@ from infrastructure.db.deps import get_db
 from infrastructure.security.auth_dependencies import get_current_user
 from services.paz_salvo_operaciones_pdf_service import (
     generar_paz_salvo_operaciones_pdf,
+    _obtener_requisitos_perfil_pdf,
 )
 
 
@@ -1326,7 +1328,7 @@ VALIDACIONES_ESPECIFICAS_PAZ_SALVO = {
         ("INSTRUMENTOS_MEDICION", "Instrumentos de medición y control"),
         ("EPP_ESPECIALIZADO", "Elementos de protección personal especializados"),
         ("INSUMOS_CUSTODIA", "Insumos o elementos bajo custodia"),
-        ("ESTADO_SERVICIO", "Estado de actividades y pendientes del servicio"),
+        ("ESTADO_SERVICIO", "Estado de las actividades y pendientes del servicio"),
         ("SUMINISTROS_CLIENTE", "Elementos suministrados por el cliente"),
     ),
     "TRABAJO_ALTURAS": (
@@ -1396,6 +1398,8 @@ REQUISITOS_EXCEL_POR_PERFIL = {
         ("ESTADO_SERVICIO", "Estado de las actividades y pendientes del servicio"),
         ("SUMINISTROS_CLIENTE", "Elementos suministrados por el cliente"),
     ),
+    # Perfil 6: exactamente seis requisitos del Excel. El catálogo anterior
+    # VALIDACIONES_ESPECIFICAS_PAZ_SALVO queda solo como respaldo histórico.
     "TRABAJO_ALTURAS": (
         ("EQUIPO_DESCRIPCION", "Equipos de protección contra caídas y sus accesorios (registro individual por elemento)"),
         ("EQUIPO_CODIGO", "Descripción, código o identificación y cantidad de cada elemento"),
@@ -1522,6 +1526,11 @@ def guardar_validaciones_paz_salvo(
             if estado not in {None, "ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"}:
                 raise HTTPException(status_code=400, detail=f"Estado no permitido para {elemento}.")
             observacion = _normalizar_texto_opcional(respuesta.Observacion)
+            if codigo in {"OPERATIVO_TECNICO", "ADMINISTRATIVO_CAMPO", "SUPERVISION_LIDERAZGO"} and estado and not observacion:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Debes registrar el detalle obligatorio de {elemento}.",
+                )
             db.execute(text('''
                 INSERT INTO public."PazYSalvoOperacionesValidacion" (
                     "IdPazYSalvo", "CodigoElemento", "CodigoPerfil", "Estado",
@@ -2609,14 +2618,8 @@ async def actualizar_paz_salvo_proceso_pendiente(
             aplica_descuento,
             ValorDescuento,
         )
-        novedades_nomina = (
-            _normalizar_texto_requerido(
-                NovedadesNomina,
-                "NovedadesNomina",
-            )
-            if aplica_descuento == "SI"
-            else _normalizar_texto_opcional(NovedadesNomina)
-        )
+        # La observación de nómina es opcional para todos los perfiles.
+        novedades_nomina = _normalizar_texto_opcional(NovedadesNomina)
 
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
@@ -4771,14 +4774,8 @@ async def guardar_retiro_operaciones(
             aplica_descuento,
             ValorDescuento,
         )
-        novedades_nomina = (
-            _normalizar_texto_requerido(
-                NovedadesNomina,
-                "NovedadesNomina",
-            )
-            if aplica_descuento == "SI"
-            else _normalizar_texto_opcional(NovedadesNomina)
-        )
+        # La observación de nómina es opcional para todos los perfiles.
+        novedades_nomina = _normalizar_texto_opcional(NovedadesNomina)
 
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
@@ -5327,3 +5324,226 @@ async def guardar_retiro_operaciones(
 
         for archivo_evidencia in archivos_evidencia_cierre:
             await archivo_evidencia.close()
+
+@router.post("/qa/paz-salvo/62/regenerar-pdf")
+def regenerar_pdf_federico_qa(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    '''Operación excepcional SOLO QA: Paz y Salvo 62, retiro 92.
+
+    No edita retiro, detalle, validaciones ni estado RRLL.
+    La operación se habilita temporalmente mediante variable de entorno.
+    '''
+    if os.getenv("ENABLE_QA_PAZ_SALVO_PDF_REGEN", "").strip() != "1":
+        raise HTTPException(status_code=404, detail="Regeneración QA deshabilitada.")
+
+    roles = _roles_ids_actuales(current)
+    if not roles.intersection({ROL_SUPER_ADMIN, ROL_DESARROLLADOR}):
+        raise HTTPException(status_code=403, detail="Solo SuperAdmin o Desarrollador.")
+
+    database_name = db.execute(text("SELECT current_database()")).scalar_one()
+    if str(database_name).upper() != "LA_PERFECCION_QA":
+        raise HTTPException(status_code=403, detail="Solo se permite en LA_PERFECCION_QA.")
+
+    ruta_nueva = None
+    try:
+        caso = db.execute(text('''
+            SELECT ps."IdPazYSalvo", ps."IdRetiroLaboral", ps."IdRegistroPersonal"
+            FROM public."PazYSalvoOperaciones" ps
+            WHERE ps."IdPazYSalvo" = 62
+            FOR UPDATE OF ps
+        ''')).mappings().first()
+        if (not caso or int(caso["IdRetiroLaboral"]) != 92
+                or int(caso["IdRegistroPersonal"]) != 1869):
+            raise HTTPException(status_code=409, detail="Identidad del caso QA no coincide.")
+
+        requisitos = _obtener_requisitos_perfil_pdf(db, 62)
+        if not requisitos or len(requisitos["requisitos"]) != 8:
+            raise HTTPException(status_code=409, detail="No se identificaron los 8 requisitos del perfil 3.")
+        faltantes = [r["nombre"] for r in requisitos["requisitos"]
+                     if not str(r.get("estado") or "").strip()
+                     or not str(r.get("observacion") or "").strip()]
+        if faltantes:
+            raise HTTPException(status_code=409, detail={
+                "mensaje": "No se regeneró: faltan respuestas u observaciones.",
+                "requisitos": faltantes,
+            })
+
+        adjuntos = db.execute(text('''
+            SELECT "IdRetiroLaboralAdjunto"
+            FROM public."RetiroLaboralAdjunto"
+            WHERE "IdRetiroLaboral" = 92 AND "IdTipoDocumentoRetiro" = 2
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false
+            FOR UPDATE
+        ''')).mappings().all()
+        if len(adjuntos) != 1:
+            raise HTTPException(status_code=409, detail="Se esperaba exactamente un PDF oficial activo.")
+        id_anterior = int(adjuntos[0]["IdRetiroLaboralAdjunto"])
+
+        buffer_pdf = generar_paz_salvo_operaciones_pdf(db=db, id_paz_y_salvo=62)
+        try:
+            contenido = buffer_pdf.getvalue()
+        finally:
+            buffer_pdf.close()
+        if not contenido.startswith(b"%PDF"):
+            raise HTTPException(status_code=500, detail="El servicio no produjo un PDF válido.")
+
+        carpeta = STORAGE_BASE_DIR / "92"
+        carpeta.mkdir(parents=True, exist_ok=True)
+        nombre = f"paz_salvo_operaciones_92_qa_regenerado_{uuid4().hex}.pdf"
+        ruta_nueva = carpeta / nombre
+        ruta_nueva.write_bytes(contenido)
+
+        usuario = _normalizar_usuario(_obtener_usuario_actual_rq(current)["Usuario"])
+        db.execute(text('''
+            UPDATE public."RetiroLaboralAdjunto"
+            SET "Activo" = false, "FechaActualizacion" = CURRENT_TIMESTAMP,
+                "UsuarioActualizacion" = :usuario
+            WHERE "IdRetiroLaboralAdjunto" = :anterior
+        '''), {"usuario": usuario, "anterior": id_anterior})
+        id_nuevo = db.execute(text('''
+            INSERT INTO public."RetiroLaboralAdjunto" (
+                "IdRetiroLaboral", "IdTipoDocumentoRetiro", "NombreArchivo",
+                "NombreArchivoOriginal", "RutaArchivo", "ExtensionArchivo",
+                "PesoArchivo", "Observacion", "OrigenArchivo", "MimeType",
+                "Activo", "Eliminado", "FechaCreacion", "FechaActualizacion",
+                "CreadoPor", "UsuarioActualizacion"
+            ) VALUES (
+                92, 2, :nombre, 'paz_salvo_operaciones_92.pdf', :ruta,
+                '.pdf', :peso, :observacion, 'OPERACIONES', 'application/pdf',
+                true, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                :usuario, :usuario
+            ) RETURNING "IdRetiroLaboralAdjunto"
+        '''), {
+            "nombre": nombre,
+            "ruta": str(ruta_nueva).replace("\\", "/"),
+            "peso": len(contenido),
+            "observacion": "Regeneración controlada QA del PDF perfil ADMINISTRATIVO_CAMPO; adjunto anterior conservado.",
+            "usuario": usuario,
+        }).scalar_one()
+        db.commit()
+        return {"success": True, "IdPazYSalvo": 62, "IdRetiroLaboral": 92,
+                "IdAdjuntoAnterior": id_anterior, "IdAdjuntoNuevo": int(id_nuevo),
+                "CantidadRequisitos": 8}
+    except Exception:
+        db.rollback()
+        if ruta_nueva is not None:
+            try:
+                ruta_nueva.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+@router.post("/qa/paz-salvo/63/regenerar-pdf")
+def regenerar_pdf_ingrith_qa(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    '''Operación excepcional SOLO QA: Paz y Salvo 63, retiro 93.
+
+    No edita retiro, detalle, validaciones ni estado RRLL.
+    La operación se habilita temporalmente mediante variable de entorno.
+    '''
+    if os.getenv("ENABLE_QA_PAZ_SALVO_PDF_REGEN", "").strip() != "1":
+        raise HTTPException(status_code=404, detail="Regeneración QA deshabilitada.")
+
+    roles = _roles_ids_actuales(current)
+    if not roles.intersection({ROL_SUPER_ADMIN, ROL_DESARROLLADOR}):
+        raise HTTPException(status_code=403, detail="Solo SuperAdmin o Desarrollador.")
+
+    database_name = db.execute(text("SELECT current_database()")).scalar_one()
+    if str(database_name).upper() != "LA_PERFECCION_QA":
+        raise HTTPException(status_code=403, detail="Solo se permite en LA_PERFECCION_QA.")
+
+    ruta_nueva = None
+    try:
+        caso = db.execute(text('''
+            SELECT ps."IdPazYSalvo", ps."IdRetiroLaboral", ps."IdRegistroPersonal"
+            FROM public."PazYSalvoOperaciones" ps
+            WHERE ps."IdPazYSalvo" = 63
+            FOR UPDATE OF ps
+        ''')).mappings().first()
+        if (not caso or int(caso["IdRetiroLaboral"]) != 93
+                or str(db.execute(text('SELECT "NumeroIdentificacion" FROM public."RegistroPersonal" WHERE "IdRegistroPersonal" = :id'), {"id": int(caso["IdRegistroPersonal"])}).scalar_one()) != "64748601"):
+            raise HTTPException(status_code=409, detail="Identidad del caso QA no coincide.")
+
+        requisitos = _obtener_requisitos_perfil_pdf(db, 63)
+        if not requisitos or len(requisitos["requisitos"]) != 8:
+            raise HTTPException(status_code=409, detail="No se identificaron los 8 requisitos del perfil 4.")
+        faltantes = [r["nombre"] for r in requisitos["requisitos"]
+                     if not str(r.get("estado") or "").strip()
+                     or not str(r.get("observacion") or "").strip()]
+        if faltantes:
+            raise HTTPException(status_code=409, detail={
+                "mensaje": "No se regeneró: faltan respuestas u observaciones.",
+                "requisitos": faltantes,
+            })
+
+        adjuntos = db.execute(text('''
+            SELECT "IdRetiroLaboralAdjunto"
+            FROM public."RetiroLaboralAdjunto"
+            WHERE "IdRetiroLaboral" = 93 AND "IdTipoDocumentoRetiro" = 2
+              AND COALESCE("Activo", true) = true
+              AND COALESCE("Eliminado", false) = false
+            FOR UPDATE
+        ''')).mappings().all()
+        if len(adjuntos) != 1:
+            raise HTTPException(status_code=409, detail="Se esperaba exactamente un PDF oficial activo.")
+        id_anterior = int(adjuntos[0]["IdRetiroLaboralAdjunto"])
+
+        buffer_pdf = generar_paz_salvo_operaciones_pdf(db=db, id_paz_y_salvo=63)
+        try:
+            contenido = buffer_pdf.getvalue()
+        finally:
+            buffer_pdf.close()
+        if not contenido.startswith(b"%PDF"):
+            raise HTTPException(status_code=500, detail="El servicio no produjo un PDF válido.")
+
+        carpeta = STORAGE_BASE_DIR / "93"
+        carpeta.mkdir(parents=True, exist_ok=True)
+        nombre = f"paz_salvo_operaciones_93_qa_regenerado_{uuid4().hex}.pdf"
+        ruta_nueva = carpeta / nombre
+        ruta_nueva.write_bytes(contenido)
+
+        usuario = _normalizar_usuario(_obtener_usuario_actual_rq(current)["Usuario"])
+        db.execute(text('''
+            UPDATE public."RetiroLaboralAdjunto"
+            SET "Activo" = false, "FechaActualizacion" = CURRENT_TIMESTAMP,
+                "UsuarioActualizacion" = :usuario
+            WHERE "IdRetiroLaboralAdjunto" = :anterior
+        '''), {"usuario": usuario, "anterior": id_anterior})
+        id_nuevo = db.execute(text('''
+            INSERT INTO public."RetiroLaboralAdjunto" (
+                "IdRetiroLaboral", "IdTipoDocumentoRetiro", "NombreArchivo",
+                "NombreArchivoOriginal", "RutaArchivo", "ExtensionArchivo",
+                "PesoArchivo", "Observacion", "OrigenArchivo", "MimeType",
+                "Activo", "Eliminado", "FechaCreacion", "FechaActualizacion",
+                "CreadoPor", "UsuarioActualizacion"
+            ) VALUES (
+                93, 2, :nombre, 'paz_salvo_operaciones_93.pdf', :ruta,
+                '.pdf', :peso, :observacion, 'OPERACIONES', 'application/pdf',
+                true, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                :usuario, :usuario
+            ) RETURNING "IdRetiroLaboralAdjunto"
+        '''), {
+            "nombre": nombre,
+            "ruta": str(ruta_nueva).replace("\\", "/"),
+            "peso": len(contenido),
+            "observacion": "Regeneración controlada QA del PDF perfil SUPERVISION_LIDERAZGO; adjunto anterior conservado.",
+            "usuario": usuario,
+        }).scalar_one()
+        db.commit()
+        return {"success": True, "IdPazYSalvo": 63, "IdRetiroLaboral": 93,
+                "IdAdjuntoAnterior": id_anterior, "IdAdjuntoNuevo": int(id_nuevo),
+                "CantidadRequisitos": 8}
+    except Exception:
+        db.rollback()
+        if ruta_nueva is not None:
+            try:
+                ruta_nueva.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
