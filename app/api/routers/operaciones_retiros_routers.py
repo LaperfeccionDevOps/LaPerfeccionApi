@@ -92,6 +92,7 @@ TIPO_DOCUMENTO_RQ_CARTA_RETIRO = "CARTA_RETIRO"
 OPCIONES_ENTREGA_GENERAL = {"NO APLICA", "ACEPTADO", "RECHAZADO"}
 OPCIONES_CUMPLIMIENTO = {"NO APLICA", "CUMPLE", "NO CUMPLE"}
 OPCIONES_SI_NO = {"SI", "NO"}
+OPCIONES_SI_NO_HISTORICO = {"SI", "NO", "NO APLICA"}
 OPCIONES_ESTADO_PAZ_SALVO = {"ABIERTO", "CERRADO"}
 
 
@@ -1347,18 +1348,83 @@ VALIDACIONES_ESPECIFICAS_PAZ_SALVO = {
 }
 
 
+# QA - Matriz de requisitos de William (cargos_ALP_perfiles).
+# Este catálogo define exclusivamente los requisitos no cubiertos por la tabla
+# PerfilElementoPazSalvoOperaciones. No se borran respuestas históricas.
+# En OPERATIVO_BASICO, DOTACION_REUTILIZABLE y EPP_REUTILIZABLE se consultan
+# por /elementos-perfil; los cuatro restantes por /validaciones.
+REQUISITOS_EXCEL_POR_PERFIL = {
+    "OPERATIVO_BASICO": (
+        ("CARNET_ALP", "Carné de Aseos La Perfección"),
+        ("ACCESO_CLIENTE", "Carnés o permisos de acceso otorgados por el cliente"),
+        ("LLAVES_CONTROLES", "Llaves, casilleros o lockers"),
+        ("DESCUENTOS", "Novedades, faltantes o descuentos aplicables"),
+    ),
+    "OPERATIVO_TECNICO": (
+        ("RELACION_HERRAMIENTAS", "Relación detallada de herramientas"),
+        ("EQUIPOS_MAQUINARIA", "Equipos y maquinaria asignados"),
+        ("CANTIDAD_ESTADO", "Cantidad y estado de cada elemento"),
+        ("PROPIEDAD_ELEMENTOS", "Identificación de si el elemento pertenece a ALP o al cliente"),
+        ("INVENTARIOS_CUSTODIA", "Llaves, controles, inventarios y demás elementos bajo custodia"),
+        ("RESPONSABLE_TECNICO", "Nombre del responsable que recibe y valida la entrega"),
+    ),
+    "ADMINISTRATIVO_CAMPO": (
+        ("EQUIPOS_COMUNICACION", "Equipos tecnológicos y de comunicación"),
+        ("USUARIOS_ACCESOS", "Usuarios, correos, aplicaciones y accesos asignados"),
+        ("ACCESO_CLIENTE", "Carnés, tarjetas o permisos de acceso del cliente"),
+        ("DOCUMENTOS_ARCHIVOS", "Llaves, documentos, archivos e información bajo su responsabilidad"),
+        ("ACTA_PUESTO", "Acta de entrega del puesto de trabajo"),
+        ("ACTIVIDADES", "Relación de actividades finalizadas, en curso y pendientes"),
+        ("UBICACION_ARCHIVOS", "Ubicación de archivos y documentos"),
+        ("RECEPTOR_PUESTO", "Identificación de la persona que recibe el puesto"),
+    ),
+    "SUPERVISION_LIDERAZGO": (
+        ("HERRAMIENTAS_EQUIPOS", "Herramientas, equipos y elementos asignados"),
+        ("USUARIOS_CLAVES", "Usuarios, claves y accesos tecnológicos"),
+        ("LLAVES_CONTROLES", "Llaves, carnés y permisos de ingreso"),
+        ("REGISTROS_OPERACION", "Documentos, inventarios y registros de la operación"),
+        ("ACTA_GESTION", "Acta de entrega de gestión"),
+        ("ACTIVIDADES_PROGRAMADAS", "Estado de las actividades programadas"),
+        ("PENDIENTES_CLIENTE", "Pendientes operativos, administrativos y compromisos con el cliente"),
+        ("RECEPTOR_OPERACION", "Identificación de la persona que recibe la operación"),
+    ),
+    "SERVICIOS_ESPECIALES": (
+        ("HERRAMIENTAS_TECNICAS", "Herramientas y equipos técnicos"),
+        ("INSTRUMENTOS_MEDICION", "Instrumentos de medición y control"),
+        ("EPP_ESPECIALIZADO", "Elementos de protección personal especializados"),
+        ("INSUMOS_CUSTODIA", "Insumos o elementos bajo custodia"),
+        ("ESTADO_SERVICIO", "Estado de las actividades y pendientes del servicio"),
+        ("SUMINISTROS_CLIENTE", "Elementos suministrados por el cliente"),
+    ),
+    "TRABAJO_ALTURAS": (
+        ("EQUIPO_DESCRIPCION", "Equipos de protección contra caídas y sus accesorios (registro individual por elemento)"),
+        ("EQUIPO_CODIGO", "Descripción, código o identificación y cantidad de cada elemento"),
+        ("EQUIPO_ESTADO", "Estado al momento de la devolución"),
+        ("EQUIPO_NOVEDADES", "Faltantes o novedades"),
+        ("CONCEPTO_COORDINADOR", "Concepto del coordinador de trabajo en alturas"),
+        ("RECEPTOR_ALTURAS", "Nombre y confirmación de la persona que recibe"),
+    ),
+}
+
+
 def _catalogo_validaciones_perfil(codigo_perfil: str) -> list[dict]:
-    # Campos de consulta, no son registros persistidos en BD.
-    especificas = VALIDACIONES_ESPECIFICAS_PAZ_SALVO.get(codigo_perfil, ())
-    return [
-        {"CodigoElemento": codigo, "NombreElemento": nombre,
-         "TipoValidacion": tipo, "Obligatorio": False,
-         "EstadosPermitidos": ["ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"],
-         "ObservacionObligatoria": False}
-        for tipo, grupo in (("TRANSVERSAL", VALIDACIONES_TRANSVERSALES_PAZ_SALVO),
-                            ("PERFIL", especificas))
-        for codigo, nombre in grupo
-    ]
+    # ADMINISTRATIVO_INTERNO se conserva por compatibilidad histórica.
+    requisitos = REQUISITOS_EXCEL_POR_PERFIL.get(codigo_perfil)
+    if requisitos is None:
+        requisitos = VALIDACIONES_ESPECIFICAS_PAZ_SALVO.get(codigo_perfil, ())
+    resultado = []
+    for codigo, nombre in requisitos:
+        es_novedad = codigo == "DESCUENTOS"
+        resultado.append({
+            "CodigoElemento": codigo,
+            "NombreElemento": nombre,
+            "TipoValidacion": "PERFIL",  # nunca mostrar sección transversal
+            "Obligatorio": False,
+            "EstadosPermitidos": (["NO APLICA", "CON NOVEDAD"] if es_novedad
+                                  else ["ENTREGADO", "PENDIENTE"]),
+            "ObservacionObligatoria": not es_novedad,
+        })
+    return resultado
 
 
 # Validaciones por perfil: persistencia independiente en QA.
@@ -1589,6 +1655,14 @@ def guardar_elementos_perfil_paz_salvo(
             if estado not in {None, "ENTREGADO", "PENDIENTE", "NO APLICA", "CON NOVEDAD"}:
                 raise HTTPException(status_code=400, detail="Estado no permitido para el elemento.")
             observacion = _normalizar_texto_opcional(respuesta.Observacion)
+            if estado == "PENDIENTE" and not observacion:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Cuando un elemento se marca como NO ENTREGÓ "
+                        "(PENDIENTE), su observación es obligatoria."
+                    ),
+                )
             parametros = {
                 "id": id_paz_y_salvo,
                 "elemento": respuesta.IdPerfilElementoPazSalvoOperaciones,
@@ -2393,27 +2467,27 @@ async def actualizar_paz_salvo_proceso_pendiente(
     ElaboradoPor: str = Form(...),
     DescripcionMotivoRetiro: str = Form(...),
 
-    Locker: str = Form(...),
-    Llaves: str = Form(...),
-    EntregaHerramientas: str = Form(...),
-    TarjetaControlAcceso: str = Form(...),
+    Locker: str = Form("NO APLICA"),
+    Llaves: str = Form("NO APLICA"),
+    EntregaHerramientas: str = Form("NO APLICA"),
+    TarjetaControlAcceso: str = Form("NO APLICA"),
 
-    EntregaGuantes: str = Form(...),
-    EntregaMonogafas: str = Form(...),
-    EntregaPeto: str = Form(...),
-    ObservacionesEntrega: str = Form(...),
+    EntregaGuantes: str = Form("NO APLICA"),
+    EntregaMonogafas: str = Form("NO APLICA"),
+    EntregaPeto: str = Form("NO APLICA"),
+    ObservacionesEntrega: str = Form(""),
 
     AplicaDescuento: str = Form(...),
     ValorDescuento: Decimal | None = Form(None),
     NovedadesNomina: str | None = Form(None),
 
-    PendienteEntregaUniforme: str = Form(...),
-    UniformePatogeno: str = Form(...),
-    Botas: str = Form(...),
-    Zapatos: str = Form(...),
-    Chaqueta: str = Form(...),
-    CarnetAlpArl: str = Form(...),
-    PendientePagoVacunas: str = Form(...),
+    PendienteEntregaUniforme: str = Form("NO APLICA"),
+    UniformePatogeno: str = Form("NO APLICA"),
+    Botas: str = Form("NO APLICA"),
+    Zapatos: str = Form("NO APLICA"),
+    Chaqueta: str = Form("NO APLICA"),
+    CarnetAlpArl: str = Form("NO APLICA"),
+    PendientePagoVacunas: str = Form("NO APLICA"),
 
     UsuariosClavesDispositivos: str | None = Form(None),
     CorreoSupervisora: str | None = Form(None),
@@ -2524,10 +2598,7 @@ async def actualizar_paz_salvo_proceso_pendiente(
             "EntregaPeto",
             OPCIONES_ENTREGA_GENERAL,
         )
-        observaciones_entrega = _normalizar_texto_requerido(
-            ObservacionesEntrega,
-            "ObservacionesEntrega",
-        )
+        observaciones_entrega = _normalizar_texto_opcional(ObservacionesEntrega) or ""
 
         aplica_descuento = _normalizar_opcion(
             AplicaDescuento,
@@ -2550,26 +2621,38 @@ async def actualizar_paz_salvo_proceso_pendiente(
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
             "PendienteEntregaUniforme",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         uniforme_patogeno = _normalizar_opcion(
             UniformePatogeno,
             "UniformePatogeno",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
-        botas = _normalizar_opcion(Botas, "Botas", OPCIONES_SI_NO)
-        zapatos = _normalizar_opcion(Zapatos, "Zapatos", OPCIONES_SI_NO)
-        chaqueta = _normalizar_opcion(Chaqueta, "Chaqueta", OPCIONES_SI_NO)
+        botas = _normalizar_opcion(Botas, "Botas", OPCIONES_SI_NO_HISTORICO)
+        zapatos = _normalizar_opcion(Zapatos, "Zapatos", OPCIONES_SI_NO_HISTORICO)
+        chaqueta = _normalizar_opcion(Chaqueta, "Chaqueta", OPCIONES_SI_NO_HISTORICO)
         carnet_alp_arl = _normalizar_opcion(
             CarnetAlpArl,
             "CarnetAlpArl",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         pendiente_pago_vacunas = _normalizar_opcion(
             PendientePagoVacunas,
             "PendientePagoVacunas",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
+
+        # QA: estos siete campos historicos son VARCHAR(2) en PostgreSQL.
+        # El formulario nuevo no los diligencia; "NO APLICA" no cabe y tampoco
+        # representa una respuesta del trabajador. Guardar NULL, sin alterar
+        # los valores historicos validos SI/NO que si se reciban.
+        pendiente_entrega_uniforme = (None if pendiente_entrega_uniforme == "NO APLICA" else pendiente_entrega_uniforme)
+        uniforme_patogeno = (None if uniforme_patogeno == "NO APLICA" else uniforme_patogeno)
+        botas = (None if botas == "NO APLICA" else botas)
+        zapatos = (None if zapatos == "NO APLICA" else zapatos)
+        chaqueta = (None if chaqueta == "NO APLICA" else chaqueta)
+        carnet_alp_arl = (None if carnet_alp_arl == "NO APLICA" else carnet_alp_arl)
+        pendiente_pago_vacunas = (None if pendiente_pago_vacunas == "NO APLICA" else pendiente_pago_vacunas)
 
         usuarios_claves_dispositivos = _normalizar_texto_opcional(
             UsuariosClavesDispositivos
@@ -2911,6 +2994,9 @@ async def actualizar_paz_salvo_proceso_pendiente(
                 },
             )
 
+        # Guardar las respuestas del perfil antes de generar el PDF.
+        _guardar_bloques_perfil_en_transaccion(db, current, IdPazYSalvo, BloquesPerfilJSON)
+
         # ============================================================
         # REGENERAR PDF OFICIAL DEL MISMO PAZ Y SALVO
         # ============================================================
@@ -3057,7 +3143,6 @@ async def actualizar_paz_salvo_proceso_pendiente(
         # - NO se cambia RetiroLaboral.EstadoCasoRRLL.
         # - NO se llena FechaEnvioOperaciones.
         # El envío formal sigue siendo un paso separado.
-        _guardar_bloques_perfil_en_transaccion(db, current, IdPazYSalvo, BloquesPerfilJSON)
         db.commit()
 
         return {
@@ -4557,27 +4642,27 @@ async def guardar_retiro_operaciones(
     ElaboradoPor: str = Form(...),
     DescripcionMotivoRetiro: str = Form(...),
 
-    Locker: str = Form(...),
-    Llaves: str = Form(...),
-    EntregaHerramientas: str = Form(...),
-    TarjetaControlAcceso: str = Form(...),
+    Locker: str = Form("NO APLICA"),
+    Llaves: str = Form("NO APLICA"),
+    EntregaHerramientas: str = Form("NO APLICA"),
+    TarjetaControlAcceso: str = Form("NO APLICA"),
 
-    EntregaGuantes: str = Form(...),
-    EntregaMonogafas: str = Form(...),
-    EntregaPeto: str = Form(...),
-    ObservacionesEntrega: str = Form(...),
+    EntregaGuantes: str = Form("NO APLICA"),
+    EntregaMonogafas: str = Form("NO APLICA"),
+    EntregaPeto: str = Form("NO APLICA"),
+    ObservacionesEntrega: str = Form(""),
 
     AplicaDescuento: str = Form(...),
     ValorDescuento: Decimal | None = Form(None),
     NovedadesNomina: str | None = Form(None),
 
-    PendienteEntregaUniforme: str = Form(...),
-    UniformePatogeno: str = Form(...),
-    Botas: str = Form(...),
-    Zapatos: str = Form(...),
-    Chaqueta: str = Form(...),
-    CarnetAlpArl: str = Form(...),
-    PendientePagoVacunas: str = Form(...),
+    PendienteEntregaUniforme: str = Form("NO APLICA"),
+    UniformePatogeno: str = Form("NO APLICA"),
+    Botas: str = Form("NO APLICA"),
+    Zapatos: str = Form("NO APLICA"),
+    Chaqueta: str = Form("NO APLICA"),
+    CarnetAlpArl: str = Form("NO APLICA"),
+    PendientePagoVacunas: str = Form("NO APLICA"),
 
     UsuariosClavesDispositivos: str | None = Form(None),
     CorreoSupervisora: str | None = Form(None),
@@ -4675,10 +4760,7 @@ async def guardar_retiro_operaciones(
             "EntregaPeto",
             OPCIONES_ENTREGA_GENERAL,
         )
-        observaciones_entrega = _normalizar_texto_requerido(
-            ObservacionesEntrega,
-            "ObservacionesEntrega",
-        )
+        observaciones_entrega = _normalizar_texto_opcional(ObservacionesEntrega) or ""
 
         aplica_descuento = _normalizar_opcion(
             AplicaDescuento,
@@ -4701,38 +4783,50 @@ async def guardar_retiro_operaciones(
         pendiente_entrega_uniforme = _normalizar_opcion(
             PendienteEntregaUniforme,
             "PendienteEntregaUniforme",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         uniforme_patogeno = _normalizar_opcion(
             UniformePatogeno,
             "UniformePatogeno",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         botas = _normalizar_opcion(
             Botas,
             "Botas",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         zapatos = _normalizar_opcion(
             Zapatos,
             "Zapatos",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         chaqueta = _normalizar_opcion(
             Chaqueta,
             "Chaqueta",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         carnet_alp_arl = _normalizar_opcion(
             CarnetAlpArl,
             "CarnetAlpArl",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
         pendiente_pago_vacunas = _normalizar_opcion(
             PendientePagoVacunas,
             "PendientePagoVacunas",
-            OPCIONES_SI_NO,
+            OPCIONES_SI_NO_HISTORICO,
         )
+
+        # QA: estos siete campos historicos son VARCHAR(2) en PostgreSQL.
+        # El formulario nuevo no los diligencia; "NO APLICA" no cabe y tampoco
+        # representa una respuesta del trabajador. Guardar NULL, sin alterar
+        # los valores historicos validos SI/NO que si se reciban.
+        pendiente_entrega_uniforme = (None if pendiente_entrega_uniforme == "NO APLICA" else pendiente_entrega_uniforme)
+        uniforme_patogeno = (None if uniforme_patogeno == "NO APLICA" else uniforme_patogeno)
+        botas = (None if botas == "NO APLICA" else botas)
+        zapatos = (None if zapatos == "NO APLICA" else zapatos)
+        chaqueta = (None if chaqueta == "NO APLICA" else chaqueta)
+        carnet_alp_arl = (None if carnet_alp_arl == "NO APLICA" else carnet_alp_arl)
+        pendiente_pago_vacunas = (None if pendiente_pago_vacunas == "NO APLICA" else pendiente_pago_vacunas)
 
         usuarios_claves_dispositivos = _normalizar_texto_opcional(
             UsuariosClavesDispositivos
@@ -5013,6 +5107,9 @@ async def guardar_retiro_operaciones(
             },
         ).scalar_one()
 
+        # Guardar las respuestas del perfil antes de generar el PDF.
+        _guardar_bloques_perfil_en_transaccion(db, current, id_paz_y_salvo, BloquesPerfilJSON)
+
         # ============================================================
         # PAZ Y SALVO PDF
         # ============================================================
@@ -5144,7 +5241,6 @@ async def guardar_retiro_operaciones(
         # Mientras el caso siga en PENDIENTE_OPERACIONES no se cambia
         # RegistroPersonal.IdEstadoProceso. El estado global 30 se asignará
         # únicamente cuando Operaciones haga el envío formal a RRLL.
-        _guardar_bloques_perfil_en_transaccion(db, current, id_paz_y_salvo, BloquesPerfilJSON)
         db.commit()
 
         return {

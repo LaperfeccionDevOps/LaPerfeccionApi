@@ -433,6 +433,108 @@ def _obtener_datos_paz_salvo(
     return fila
 
 
+# Requisitos efectivos del perfil, consultados de forma independiente de las
+# columnas históricas. Solo lectura: no altera el caso ni sus adjuntos.
+def _obtener_requisitos_perfil_pdf(db: Session, id_paz_y_salvo: int):
+    perfil = db.execute(text("""
+        SELECT p."CodigoPerfil", p."NombrePerfil", p."IdPerfilPazSalvoOperaciones"
+        FROM public."PazYSalvoOperaciones" ps
+        JOIN public."CargoPerfilPazSalvoOperaciones" cp
+          ON cp."IdCargo" = (
+              SELECT acc."IdCargo" FROM public."AsignacionCargoCliente" acc
+              WHERE acc."IdRegistroPersonal" = ps."IdRegistroPersonal"
+              ORDER BY acc."FechaActualizacion" DESC NULLS LAST,
+                       acc."FechaCreacion" DESC NULLS LAST,
+                       acc."IdAsignacionCargoCliente" DESC LIMIT 1
+          ) AND COALESCE(cp."Activo", true) = true
+        JOIN public."PerfilPazSalvoOperaciones" p
+          ON p."IdPerfilPazSalvoOperaciones" = cp."IdPerfilPazSalvoOperaciones"
+         AND COALESCE(p."Activo", true) = true
+        WHERE ps."IdPazYSalvo" = :id
+        LIMIT 1
+    """), {"id": id_paz_y_salvo}).mappings().first()
+    if not perfil:
+        return None
+    elementos = db.execute(text("""
+        SELECT e."NombreElemento" AS nombre, r."Estado" AS estado,
+               r."Observacion" AS observacion
+        FROM public."PerfilElementoPazSalvoOperaciones" e
+        LEFT JOIN public."PazYSalvoOperacionesElementoPerfilRespuesta" r
+          ON r."IdPerfilElementoPazSalvoOperaciones" = e."IdPerfilElementoPazSalvoOperaciones"
+         AND r."IdPazYSalvo" = :id AND COALESCE(r."Activo", true) = true
+        WHERE e."IdPerfilPazSalvoOperaciones" = :perfil
+          AND COALESCE(e."Activo", true) = true
+        ORDER BY e."IdPerfilElementoPazSalvoOperaciones"
+    """), {"id": id_paz_y_salvo, "perfil": perfil["IdPerfilPazSalvoOperaciones"]}).mappings().all()
+    validaciones = db.execute(text("""
+        SELECT "CodigoElemento" AS codigo, "Estado" AS estado,
+               "Observacion" AS observacion
+        FROM public."PazYSalvoOperacionesValidacion"
+        WHERE "IdPazYSalvo" = :id AND "CodigoPerfil" = :perfil
+    """), {"id": id_paz_y_salvo, "perfil": perfil["CodigoPerfil"]}).mappings().all()
+    # Los seis requisitos del formulario operativo básico. Los códigos de
+    # llaves y casillero son históricos: se muestran como UN SOLO requisito.
+    if perfil["CodigoPerfil"] != "OPERATIVO_BASICO":
+        # Mantener compatibilidad con los demás perfiles.
+        return None
+
+    guardadas = {v["codigo"]: v for v in validaciones}
+    resultado = []
+    for indice, nombre in enumerate((
+        "Dotación",
+        "Elementos de protección personal (EPP)",
+    )):
+        elemento = elementos[indice] if len(elementos) > indice else None
+        resultado.append({
+            "nombre": nombre,
+            "estado": elemento["estado"] if elemento else None,
+            "observacion": elemento["observacion"] if elemento else None,
+        })
+
+    for codigo, nombre in (
+        ("CARNET_ALP", "Carné de Aseos La Perfección"),
+        ("ACCESO_CLIENTE", "Carnés o permisos de acceso otorgados por el cliente"),
+        ("LLAVES_CONTROLES", "Llaves, casilleros o lockers"),
+        ("DESCUENTOS", "Novedades, faltantes o descuentos aplicables"),
+    ):
+        validacion = guardadas.get(codigo)
+        if codigo == "LLAVES_CONTROLES" and not validacion:
+            # Solo respaldo para documentos antiguos; no crea respuestas.
+            validacion = guardadas.get("CASILLERO_LOCKER")
+        resultado.append({
+            "nombre": nombre,
+            "estado": validacion["estado"] if validacion else None,
+            "observacion": validacion["observacion"] if validacion else None,
+        })
+    return {"perfil": perfil["NombrePerfil"], "requisitos": resultado}
+
+
+def _tabla_requisitos_perfil_pdf(requisitos, estilos):
+    filas = [[_parrafo("REQUISITOS DEL PERFIL", estilos["seccion"]), "", ""]]
+    filas.append([_parrafo("ELEMENTO", estilos["etiqueta"]),
+                  _parrafo("RESPUESTA", estilos["etiqueta"]),
+                  _parrafo("OBSERVACIÓN", estilos["etiqueta"])])
+    for item in requisitos["requisitos"]:
+        estado = _texto(item.get("estado"), "SIN REGISTRAR")
+        if estado == "ENTREGADO": estado = "ENTREGÓ"
+        elif estado == "PENDIENTE": estado = "NO ENTREGÓ"
+        filas.append([_parrafo(item["nombre"], estilos["valor_izquierda"]),
+                      _parrafo(estado, estilos["valor"]),
+                      _parrafo(item.get("observacion"), estilos["valor_izquierda"])])
+    tabla = Table(filas, colWidths=[6.5 * cm, 3.2 * cm, 6.8 * cm], repeatRows=2)
+    tabla.setStyle(TableStyle([
+        ("SPAN", (0, 0), (-1, 0)),
+        ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.white),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    return tabla
+
+
 # ============================================================
 # ESTILOS
 # ============================================================
@@ -524,7 +626,7 @@ def _estilo_tabla(
     encabezado: bool = False,
 ) -> TableStyle:
     instrucciones = [
-        ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+        ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 2),
         ("RIGHTPADDING", (0, 0), (-1, -1), 2),
@@ -534,7 +636,7 @@ def _estilo_tabla(
 
     if encabezado:
         instrucciones.append(
-            ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke)
+            ("BACKGROUND", (0, 0), (-1, 0), colors.white)
         )
 
     return TableStyle(instrucciones)
@@ -646,7 +748,7 @@ def _crear_encabezado(
     )
     bloque_codigo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 1),
             ("RIGHTPADDING", (0, 0), (-1, -1), 1),
@@ -671,7 +773,7 @@ def _crear_encabezado(
     )
     titulo_codigo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -700,7 +802,7 @@ def _crear_encabezado(
     )
     objetivo.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 2),
             ("RIGHTPADDING", (0, 0), (-1, -1), 2),
@@ -739,7 +841,8 @@ def _tabla_datos_realizacion(
         ),
         (
             "CORREO",
-            datos.get("CorreoSupervisora"),
+            ("" if _texto(datos.get("CorreoSupervisora")).upper() in
+             {"NO_APLICA", "NO APLICA"} else datos.get("CorreoSupervisora")),
         ),
         (
             "FECHA Y HORA",
@@ -781,7 +884,7 @@ def _tabla_datos_realizacion(
     )
     tabla.setStyle(
         TableStyle([
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
             ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
@@ -855,7 +958,7 @@ def _tabla_datos_colaborador(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
             ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
@@ -912,7 +1015,7 @@ def _tabla_datos_paz_salvo(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
             ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
@@ -1063,8 +1166,8 @@ def _tabla_entrega_elementos(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
             ("SPAN", (0, -1), (1, -1)),
-            ("GRID", (0, 0), (-1, -2), 1.0, colors.black),
-            ("BOX", (0, -1), (1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -2), 1.15, colors.black),
+            ("BOX", (0, -1), (1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
             ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
@@ -1161,7 +1264,7 @@ def _tabla_uniformes_alp_vacunas(
     tabla.setStyle(
         TableStyle([
             ("SPAN", (0, 0), (1, 0)),
-            ("GRID", (0, 0), (-1, -1), 1.0, colors.black),
+            ("GRID", (0, 0), (-1, -1), 1.15, colors.black),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
             ("FONTNAME", (1, 1), (1, -1), "Helvetica"),
@@ -1241,7 +1344,7 @@ def _pie_pagina(
     y = 0.78 * cm
 
     canvas.setStrokeColor(colors.black)
-    canvas.setLineWidth(0.55)
+    canvas.setLineWidth(1.0)
     canvas.line(
         margen_izquierdo + 0.4 * cm,
         y + 0.88 * cm,
@@ -1323,6 +1426,7 @@ def generar_paz_salvo_operaciones_pdf(
     )
 
     estilos = _crear_estilos()
+    requisitos_perfil = _obtener_requisitos_perfil_pdf(db, id_paz_y_salvo)
 
     buffer = BytesIO()
 
@@ -1380,31 +1484,23 @@ def generar_paz_salvo_operaciones_pdf(
         Spacer(1, 0.32 * cm)
     )
 
-    elementos.append(
-        _tabla_entrega_elementos(
-            datos,
-            estilos,
-        )
-    )
-
-    # El formato oficial continúa en una segunda página.
-    elementos.append(
-        PageBreak()
-    )
-
-    elementos.extend(
-        _crear_encabezado(
-            estilos,
-            solo_logos=True,
-        )
-    )
-
-    elementos.append(
-        _tabla_uniformes_alp_vacunas(
-            datos,
-            estilos,
-        )
-    )
+    if requisitos_perfil is not None:
+        elementos.append(_tabla_requisitos_perfil_pdf(requisitos_perfil, estilos))
+        observaciones_generales = _texto(datos.get("ObservacionPazYSalvo"))
+        if (observaciones_generales and
+                observaciones_generales.casefold() !=
+                "retiro guardado desde el módulo de operaciones.".casefold()):
+            elementos.append(Spacer(1, 0.20 * cm))
+            elementos.append(_parrafo_markup(
+                "<b>OBSERVACIONES GENERALES:</b> " + _texto_html(observaciones_generales),
+                estilos["valor_izquierda"],
+            ))
+    else:
+        # Compatibilidad con perfiles todavía no migrados a requisitos dinámicos.
+        elementos.append(_tabla_entrega_elementos(datos, estilos))
+        elementos.append(PageBreak())
+        elementos.extend(_crear_encabezado(estilos, solo_logos=True))
+        elementos.append(_tabla_uniformes_alp_vacunas(datos, estilos))
 
     elementos.append(
         _bloque_firma(
