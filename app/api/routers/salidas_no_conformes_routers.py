@@ -417,6 +417,13 @@ def registrar_snc(
         raise HTTPException(status_code=422, detail='El responsable no está asociado al área seleccionada.')
 
     id_usuario_responsable = responsable['id_usuario']
+    # Una SNC solo puede asignarse a un responsable con cuenta vinculada.
+    # Validar antes del INSERT evita notificaciones sin acceso a la gestión.
+    if id_usuario_responsable is None:
+        raise HTTPException(
+            status_code=422,
+            detail='El responsable no tiene una cuenta del aplicativo vinculada. Solicita su configuración antes de asignarle una SNC.',
+        )
     if id_usuario_responsable is not None:
         activo = db.execute(
             text('''
