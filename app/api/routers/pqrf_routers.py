@@ -461,6 +461,7 @@ _CONSULTA_PERSONAL_PQRF = """
         p."CorreoRespuestaCliente" AS correo_respuesta_cliente,
         p."DescripcionPQRF" AS descripcion_pqrf,
         p."IdCliente" AS id_cliente,
+        p."OrigenPQRF" AS origen_pqrf,
         p."IdTipoPQRF" AS id_tipo_pqrf,
         p."IdProcesoPQRF" AS id_proceso_pqrf,
         p."IdCorreoPQRF" AS id_correo_pqrf,
@@ -470,7 +471,7 @@ _CONSULTA_PERSONAL_PQRF = """
    WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
         p."FechaCreacion" AS fecha_creacion,
         p."FechaActualizacion" AS fecha_actualizacion,
-        TRIM(REPLACE(REPLACE(c."Nombre", CHR(13), ' '), CHR(10), ' ')) AS cliente,
+        TRIM(REPLACE(REPLACE(COALESCE(c."Nombre", p."NombreClienteExterno"), CHR(13), ' '), CHR(10), ' ')) AS cliente,
         t."NombreTipo" AS tipo_pqrf,
         pr."NombreProceso" AS proceso,
         co."Correo" AS correo_destinatario,
@@ -486,7 +487,7 @@ _CONSULTA_PERSONAL_PQRF = """
                      WHERE rp."IdProcesoPQRF" = p."IdProcesoPQRF"
                        AND rp."IdUsuarioResponsable" <> :usuario)) AS puede_rechazar_asignacion
     FROM public."PQRF" p
-    JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
+    LEFT JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
     JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
     JOIN public."ProcesoPQRF" pr ON pr."IdProcesoPQRF" = p."IdProcesoPQRF"
     JOIN public."CorreoPQRF" co ON co."IdCorreoPQRF" = p."IdCorreoPQRF"
@@ -1192,7 +1193,7 @@ def pqrf_general_clientes(
 
 _PQRF_GENERAL_FROM = '''
  FROM public."PQRF" p
- JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
+ LEFT JOIN public."Cliente" c ON c."IdCliente" = p."IdCliente"
  JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
  JOIN public."ProcesoPQRF" pr ON pr."IdProcesoPQRF" = p."IdProcesoPQRF"
  JOIN public."CorreoPQRF" co ON co."IdCorreoPQRF" = p."IdCorreoPQRF"
@@ -1206,7 +1207,8 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."Estado" AS estado, p."NombreRemitente" AS nombre_remitente,
  p."CorreoRemitente" AS correo_remitente,
         p."CorreoRespuestaCliente" AS correo_respuesta_cliente, p."DescripcionPQRF" AS descripcion_pqrf,
- p."IdCliente" AS id_cliente, c."Nombre" AS cliente,
+ p."IdCliente" AS id_cliente, COALESCE(c."Nombre", p."NombreClienteExterno") AS cliente,
+  p."OrigenPQRF" AS origen_pqrf,
  p."IdTipoPQRF" AS id_tipo_pqrf, t."NombreTipo" AS tipo_pqrf,
  p."IdProcesoPQRF" AS id_proceso_pqrf, pr."NombreProceso" AS proceso,
  co."Correo" AS correo_destinatario,
@@ -1221,7 +1223,7 @@ def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde
         raise HTTPException(status_code=422, detail='Filtros inválidos.')
     if busqueda.strip():
         parts.append('''(CAST(p."IdPQRF" AS TEXT) ILIKE :q OR
-          p."NombreRemitente" ILIKE :q OR c."Nombre" ILIKE :q OR
+          p."NombreRemitente" ILIKE :q OR COALESCE(c."Nombre", p."NombreClienteExterno", '') ILIKE :q OR
           ur."NombreUsuario" ILIKE :q OR COALESCE(ua."NombreUsuario", '') ILIKE :q)''')
         params['q'] = '%' + busqueda.strip() + '%'
     for key, column, value in (
@@ -1305,7 +1307,7 @@ def pqrf_general_indicadores(
             'total': sum(counts.values()), 'totales': counts,
             'tipos': grouped('t."NombreTipo"', 'tipo'),
             'procesos': grouped('pr."NombreProceso"', 'proceso'),
-            'clientes': grouped('c."Nombre"', 'cliente'),
+            'clientes': grouped('COALESCE(c."Nombre", p."NombreClienteExterno")', 'cliente'),
             'mensual': [dict(r) for r in db.execute(text(monthly_sql), params).mappings().all()]}
 
 
