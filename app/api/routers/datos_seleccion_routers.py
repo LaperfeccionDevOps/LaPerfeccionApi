@@ -17,6 +17,7 @@ from domain.schemas.registro_personal_update_schema import RegistroPersonalUpdat
 from repositories.registro_personal_repo import RegistroPersonalRepository
 from infrastructure.db.deps import get_db
 from services.datos_seleccion_service import DatosSeleccionService
+from api.routers.aspirante_routers import require_listado_aspirantes_seleccion
 from domain.schemas.datos_seleccion_schema import (
     DatosSeleccionUpsertRequest,
     DatosSeleccionResponse,
@@ -3731,7 +3732,10 @@ def obtener_dashboard_contratacion(
 
 
 @router.get("/reporte-excel")
-def generar_reporte_excel_seleccion(db: Annotated[Session, Depends(get_db)]):
+def generar_reporte_excel_seleccion(
+    db: Annotated[Session, Depends(get_db)],
+    current=Depends(require_listado_aspirantes_seleccion),
+):
     """
     Genera el reporte Excel de Selección.
 
