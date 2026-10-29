@@ -297,17 +297,38 @@ class CrearPQRF(BaseModel):
 
 
 def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
-    """Permiso dinámico: únicamente responsables de procesos activos."""
+    """Responsables de procesos activos y excepción individual de Victoria Comercial."""
     return db.execute(text('''
         SELECT 1
-        FROM public."ResponsableProcesoPQRF" rp
-        JOIN public."ProcesoPQRF" p ON p."IdProcesoPQRF" = rp."IdProcesoPQRF"
-        JOIN public."Usuario" u ON u."IdUsuario" = rp."IdUsuarioResponsable"
-        WHERE rp."IdUsuarioResponsable" = :usuario
-          AND p."Activo" = TRUE
+        FROM public."Usuario" u
+        WHERE u."IdUsuario" = :usuario
           AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM public."ResponsableProcesoPQRF" rp
+                  JOIN public."ProcesoPQRF" p
+                    ON p."IdProcesoPQRF" = rp."IdProcesoPQRF"
+                  WHERE rp."IdUsuarioResponsable" = u."IdUsuario"
+                    AND p."Activo" = TRUE
+              )
+              OR (
+                  u."IdUsuario" IN (:victoria_qa, :victoria_prod)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public."UsuarioRoles" ur
+                      JOIN public."Roles" r ON r."IdRol" = ur."IdRol"
+                      WHERE ur."IdUsuario" = u."IdUsuario"
+                        AND UPPER(TRIM(r."NombreRol")) = 'COMERCIAL'
+                  )
+              )
+          )
         LIMIT 1
-    '''), {"usuario": usuario_id}).scalar_one_or_none() is not None
+    '''), {
+        "usuario": usuario_id,
+        "victoria_qa": UUID("03ade084-3706-4fc2-80b9-fa31698ee356"),
+        "victoria_prod": UUID("e4836180-ec91-4c3f-b177-741744824ce3"),
+    }).scalar_one_or_none() is not None
 
 
 @router.get("/permisos")
