@@ -88,6 +88,29 @@ def require_consulta_aspirantes_operaciones(
     return current
 
 
+
+# Restricción puntual del listado general de Selección.
+# Compras (8) y Contabilidad (7) pueden tener permisos de Operaciones,
+# pero esos permisos no les habilitan el listado masivo de aspirantes.
+# Se conserva el acceso si el usuario tiene además un rol habilitado
+# expresamente para consultar aspirantes (p. ej., Selección o Talento Humano).
+def require_listado_aspirantes_seleccion(
+    current=Depends(require_consulta_aspirantes_operaciones),
+):
+    roles_ids = {
+        int(rol_id)
+        for rol_id in (current.get("roles_ids") or [])
+        if str(rol_id).isdigit()
+    }
+
+    if roles_ids & {7, 8} and not (roles_ids & (ROLES_CONSULTA_ASPIRANTES | {ROL_ADMIN, ROL_DESARROLLADOR})):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para consultar el listado de Selección",
+        )
+
+    return current
+
 def _exists_registro_personal(db: Session, id_registro: int) -> bool:
     row = db.execute(
         text("""
@@ -217,7 +240,7 @@ def listar_aspirantes(
     search: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    current=Depends(require_consulta_aspirantes_operaciones),
+    current=Depends(require_listado_aspirantes_seleccion),
 ):
     try:
         sql = """
