@@ -297,7 +297,7 @@ class CrearPQRF(BaseModel):
 
 
 def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
-    """Responsables de procesos activos y excepción individual de Victoria Comercial."""
+    """Responsables de procesos activos, Victoria Comercial y seis líderes autorizadas."""
     return db.execute(text('''
         SELECT 1
         FROM public."Usuario" u
@@ -311,6 +311,9 @@ def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
                     ON p."IdProcesoPQRF" = rp."IdProcesoPQRF"
                   WHERE rp."IdUsuarioResponsable" = u."IdUsuario"
                     AND p."Activo" = TRUE
+              )
+              OR u."IdUsuario" IN (
+                  :sandra, :sandra_qa, :derly, :edilma, :diyer, :olga, :alix
               )
               OR (
                   u."IdUsuario" IN (:victoria_qa, :victoria_prod)
@@ -328,6 +331,13 @@ def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
         "usuario": usuario_id,
         "victoria_qa": UUID("03ade084-3706-4fc2-80b9-fa31698ee356"),
         "victoria_prod": UUID("e4836180-ec91-4c3f-b177-741744824ce3"),
+        "sandra": UUID("ae84bc57-9f41-4be0-b66c-cc477af37638"),
+        "sandra_qa": UUID("1e964955-2419-4d56-9fd8-a5696d8d2272"),
+        "derly": UUID("b37d6662-8ad5-43c1-b289-e52a86de3b97"),
+        "edilma": UUID("63813ad7-1878-4816-a4bf-59ba8504dbba"),
+        "diyer": UUID("0fbe3a01-a017-42dd-9c40-8acfc28ea72b"),
+        "olga": UUID("63b038ce-d2e1-4b89-bb95-07762e1f357d"),
+        "alix": UUID("14cdf40b-804d-49c5-8d3c-9432df5b2b2c"),
     }).scalar_one_or_none() is not None
 
 
