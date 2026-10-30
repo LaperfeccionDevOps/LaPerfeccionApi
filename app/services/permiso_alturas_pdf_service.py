@@ -291,7 +291,7 @@ def _consultar_datos(db, id_permiso: int) -> dict | None:
                         JOIN public."OpcionPermisoAlturas" O
                           ON O."IdOpcionPermisoAlturas" = PO."IdOpcionPermisoAlturas"
                         WHERE PO."IdPermisoTrabajoAlturas" = P."IdPermisoTrabajoAlturas"
-                          AND O."Tipo" = 'HERRAMIENTA'),
+                          AND O."Tipo" = 'HERRAMIENTA_MANUAL'),
                        P."HerramientasUtensilios"
                    ) AS herramientas,
                    P."AlturaAproximadaMetros" AS altura,
@@ -496,7 +496,7 @@ def _seccion_tarea(p: dict) -> list:
         _fila_seccion("2. DATOS BÁSICOS DEL PERMISO DE TRABAJO EN ALTURA", 2),
         [_p("Tipo de trabajo en alturas a realizar:", ESTILO_NEGRITA), _p(p["tipo_trabajo"])],
         [_p("Descripción detallada de la tarea:", ESTILO_NEGRITA), _p(p["descripcion"])],
-        [_p("Herramientas a utilizar:", ESTILO_NEGRITA), _p(p["herramientas"])],
+        [_p("Herramientas manuales:", ESTILO_NEGRITA), _p(p["herramientas"])],
         [_p("Altura aproximada a la cual se va a desarrollar la actividad:", ESTILO_NEGRITA), _p(altura)],
     ]
     tabla = Table(filas, colWidths=anchos)

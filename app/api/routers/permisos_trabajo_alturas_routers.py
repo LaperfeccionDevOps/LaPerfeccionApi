@@ -89,7 +89,7 @@ def _sql_lista_completa(tipo: str) -> str:
 TIPOS_OPCION_TAREA = {
     "mecanismos": "MECANISMO",
     "sistemas_ingenieria": "SISTEMA_INGENIERIA",
-    "herramientas": "HERRAMIENTA",
+    "herramientas": "HERRAMIENTA_MANUAL",
     "sistemas_acceso": "SISTEMA_ACCESO",
 }
 # Listas en las que se debe elegir al menos una opción (nombre para mensajes).
@@ -169,6 +169,7 @@ class PermisoTrabajoAlturasOut(BaseModel):
 class OpcionTareaOut(BaseModel):
     id_opcion_permiso_alturas: int
     tipo: str
+    codigo: str
     nombre: str
     orden: int
 
@@ -435,11 +436,13 @@ def listar_opciones_tarea(
     db: Session = Depends(get_db),
     _current=Depends(require_operaciones_alturas),
 ):
-    """Opciones activas de las listas del paso 3 (todas las listas)."""
+    """Opciones activas de todas las listas del catálogo (paso 3 del permiso
+    y bloque 3 del análisis de trabajo seguro)."""
     filas = db.execute(
         text("""
             SELECT "IdOpcionPermisoAlturas" AS id_opcion_permiso_alturas,
                    "Tipo"                   AS tipo,
+                   "Codigo"                 AS codigo,
                    "Nombre"                 AS nombre,
                    "Orden"                  AS orden
             FROM public."OpcionPermisoAlturas"
