@@ -1506,3 +1506,102 @@ def descargar_evidencia_snc(
         filename=fila["nombre"], content_disposition_type="attachment",
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
     )
+
+
+# Evidencias opcionales del REGISTRO SNC (independientes de las respuestas).
+@router.post("/{id_snc}/evidencias-registro", status_code=201)
+async def cargar_evidencias_registro_snc(
+    id_snc: int,
+    archivos: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    usuario = _id_usuario_actual(current)
+    snc = db.execute(text('''
+        SELECT "IdUsuarioCreador" AS creador
+        FROM public."SalidaNoConforme"
+        WHERE "IdSalidaNoConforme" = :id
+    '''), {"id": id_snc}).mappings().first()
+    if not snc:
+        raise HTTPException(404, "SNC no encontrada.")
+    if snc["creador"] != usuario:
+        raise HTTPException(403, "Solo el creador puede cargar evidencias iniciales.")
+    if not archivos or len(archivos) > 10:
+        raise HTTPException(422, "Seleccione entre 1 y 10 archivos.")
+    existentes = db.execute(text('''
+        SELECT COUNT(*) FROM public."SalidaNoConformeAdjunto"
+        WHERE "IdSalidaNoConforme" = :id AND "Activo" = TRUE
+    '''), {"id": id_snc}).scalar_one()
+    if existentes:
+        raise HTTPException(409, "Esta SNC ya tiene evidencias iniciales. No se permite duplicar la carga.")
+    carpeta = _storage_snc(db) / str(id_snc)
+    guardados = []
+    try:
+        total = 0
+        for archivo in archivos:
+            meta = await _guardar_temporal_snc(archivo, carpeta)
+            guardados.append(meta)
+            total += meta["tamano"]
+            if total > _MAX_TOTAL_SNC:
+                raise HTTPException(413, "Los archivos superan 150 MB en total.")
+        for meta in guardados:
+            db.execute(text('''
+                INSERT INTO public."SalidaNoConformeAdjunto" (
+                    "IdSalidaNoConforme", "NombreOriginal", "NombreAlmacenado",
+                    "RutaArchivo", "TipoMime", "TamanoBytes", "IdUsuarioCarga", "Activo"
+                ) VALUES (:snc, :nombre, :interno, :ruta, :mime, :tamano, :usuario, TRUE)
+            '''), {"snc": id_snc, "nombre": meta["nombre_original"],
+                   "interno": meta["nombre_almacenado"], "ruta": str(meta["ruta"]),
+                   "mime": meta["tipo_mime"], "tamano": meta["tamano"], "usuario": usuario})
+        db.commit()
+        return {"id": id_snc, "evidencias": len(guardados)}
+    except BaseException:
+        db.rollback()
+        for meta in guardados:
+            meta["ruta"].unlink(missing_ok=True)
+        raise
+
+
+@router.get("/{id_snc}/evidencias-registro")
+def listar_evidencias_registro_snc(
+    id_snc: int, db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    _autorizar_evidencia_snc(db, current, id_snc)
+    filas = db.execute(text('''
+        SELECT "IdAdjuntoSNCRegistro" AS id, "NombreOriginal" AS nombre,
+               "TipoMime" AS tipo_mime, "TamanoBytes" AS tamano_bytes,
+               "FechaCreacion" AS fecha_creacion
+        FROM public."SalidaNoConformeAdjunto"
+        WHERE "IdSalidaNoConforme" = :id AND "Activo" = TRUE
+        ORDER BY "IdAdjuntoSNCRegistro"
+    '''), {"id": id_snc}).mappings().all()
+    return [dict(fila) for fila in filas]
+
+
+@router.get("/evidencias-registro/{id_adjunto}/descargar")
+def descargar_evidencia_registro_snc(
+    id_adjunto: int, db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    fila = db.execute(text('''
+        SELECT "IdSalidaNoConforme" AS id_snc, "NombreOriginal" AS nombre,
+               "NombreAlmacenado" AS interno
+        FROM public."SalidaNoConformeAdjunto"
+        WHERE "IdAdjuntoSNCRegistro" = :id AND "Activo" = TRUE
+    '''), {"id": id_adjunto}).mappings().first()
+    if not fila:
+        raise HTTPException(404, "Evidencia no encontrada.")
+    _autorizar_evidencia_snc(db, current, fila["id_snc"])
+    raiz = _storage_snc(db)
+    carpeta = (raiz / str(fila["id_snc"])).resolve()
+    ruta = (carpeta / fila["interno"]).resolve()
+    if ruta.parent != carpeta:
+        raise HTTPException(403, "Ruta de evidencia no permitida.")
+    if not ruta.is_file():
+        raise HTTPException(404, "El archivo no está disponible.")
+    return FileResponse(
+        str(ruta), media_type="application/octet-stream", filename=fila["nombre"],
+        content_disposition_type="attachment",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )

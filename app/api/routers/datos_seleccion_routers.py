@@ -3937,6 +3937,9 @@ def generar_reporte_excel_seleccion(
             ORDER BY "IdRegistroPersonal", "FechaCreacion" DESC
         ) mcp
             ON mcp."IdRegistroPersonal" = rp."IdRegistroPersonal"
+        ORDER BY
+            rp."FechaCreacion" DESC NULLS LAST,
+            rp."IdRegistroPersonal" DESC
     """)).mappings().all()
 
     filas = [dict(r) for r in rows]
@@ -3964,6 +3967,10 @@ def generar_reporte_excel_seleccion(
         for key, value in fila.items():
             if isinstance(value, datetime):
                 value = value.replace(tzinfo=None)
+            elif isinstance(value, str):
+                # Solo presentación del reporte: no modifica datos en PostgreSQL
+                # ni los valores originales usados por el Dashboard.
+                value = value.upper()
             fila_limpia[key] = value
 
         ws.append(list(fila_limpia.values()))

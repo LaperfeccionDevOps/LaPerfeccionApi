@@ -4,6 +4,10 @@ import os
 import re
 import os
 import logging
+import mimetypes
+import secrets
+from pathlib import Path
+from urllib.parse import quote
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -17,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from fastapi.responses import FileResponse
 
 from infrastructure.db.deps import get_db
 from infrastructure.security.auth_dependencies import get_current_user
@@ -997,6 +1002,131 @@ def _pqrf_visible_para_usuario(db: Session, id_pqrf: int, usuario: UUID):
         if delegado is None:
             raise HTTPException(status_code=403, detail="No tiene acceso a esta PQRF.")
     return pqrf
+
+
+# Evidencias iniciales opcionales. Independientes de GestionPQRF y de sus reglas.
+# Configurar PQRF_ADJUNTOS_DIR en una carpeta PRIVADA y persistente del servidor.
+_PQRF_EXT = {"pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "doc", "docx", "xls", "xlsx", "csv", "txt", "ppt", "pptx", "mp3", "wav", "ogg", "m4a", "mp4", "mov", "avi", "webm", "zip"}
+_PQRF_MAX_ARCHIVOS = 10
+_PQRF_MAX_BYTES = 50 * 1024 * 1024  # Por archivo; evita cargas ilimitadas.
+_PQRF_MAX_TOTAL = 100 * 1024 * 1024
+
+
+def _directorio_adjuntos_pqrf(db: Session) -> Path:
+    """Mismo almacenamiento privado usado por SNC, separado por ambiente."""
+    nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
+    if nombre_bd == "LA_PERFECCION_QA":
+        base = os.getenv("SNC_STORAGE_ROOT_QA") or os.getenv("SNC_STORAGE_ROOT") or "C:/LaPerfeccionStorage/calidad/qa/snc"
+        raiz = Path(base).expanduser().resolve().parent / "pqrf"
+    else:
+        # Solo bases autorizadas por _validar_acceso pueden llegar aquí.
+        base = os.getenv("SNC_STORAGE_ROOT_PROD") or "C:/LaPerfeccionStorage/calidad/prod/snc"
+        raiz = Path(base).expanduser().resolve().parent / "pqrf"
+    raiz.mkdir(parents=True, exist_ok=True)
+    return raiz
+
+
+@router.get("/{id_pqrf}/adjuntos")
+def listar_adjuntos_pqrf(id_pqrf: int, db: Session = Depends(get_db), current: dict = Depends(get_current_user)):
+    _validar_acceso(db, current)
+    _pqrf_visible_para_usuario(db, id_pqrf, _usuario_actual_pqrf(current))
+    filas = db.execute(text('''SELECT "IdAdjuntoPQRF" AS id, "NombreOriginal" AS nombre,
+        "TipoMime" AS tipo, "TamanoBytes" AS tamano, "FechaCreacion" AS fecha
+        FROM public."PQRFAdjunto" WHERE "IdPQRF" = :id AND "Activo" = TRUE
+        ORDER BY "IdAdjuntoPQRF"'''), {"id": id_pqrf}).mappings().all()
+    return [dict(f) for f in filas]
+
+
+@router.post("/{id_pqrf}/adjuntos", status_code=201)
+async def cargar_adjuntos_pqrf(id_pqrf: int, archivos: list[UploadFile] = File(...),
+                              db: Session = Depends(get_db), current: dict = Depends(get_current_user)):
+    _validar_acceso(db, current)
+    usuario = _usuario_actual_pqrf(current)
+    pqrf = _pqrf_visible_para_usuario(db, id_pqrf, usuario)
+    if pqrf["registrador"] != usuario or pqrf["estado"] != "ABIERTA":
+        raise HTTPException(status_code=403, detail="Solo quien registró la PQRF puede agregar evidencias mientras esté ABIERTA.")
+    if not 1 <= len(archivos) <= _PQRF_MAX_ARCHIVOS:
+        raise HTTPException(status_code=422, detail="Seleccione entre 1 y 10 archivos por carga.")
+    existentes = db.execute(text('''SELECT COUNT(*) FROM public."PQRFAdjunto"
+        WHERE "IdPQRF" = :id AND "Activo" = TRUE'''), {"id": id_pqrf}).scalar_one()
+    if existentes + len(archivos) > _PQRF_MAX_ARCHIVOS:
+        raise HTTPException(status_code=422, detail="La PQRF permite máximo 10 evidencias activas.")
+    # Validar TODOS los archivos antes de escribirlos en disco o BD.
+    preparados = []
+    total = 0
+    for archivo in archivos:
+        nombre = (archivo.filename or "").replace("\\", "/").split("/")[-1].strip()[:255]
+        extension = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+        if not nombre or extension not in _PQRF_EXT:
+            raise HTTPException(status_code=422, detail=f"Formato no permitido: {nombre or 'sin nombre'}.")
+        contenido = await archivo.read(_PQRF_MAX_BYTES + 1)
+        if not contenido or len(contenido) > _PQRF_MAX_BYTES:
+            raise HTTPException(status_code=422, detail=f"Archivo vacío o mayor a 50 MB: {nombre}.")
+        total += len(contenido)
+        if total > _PQRF_MAX_TOTAL:
+            raise HTTPException(status_code=422, detail="La carga supera 100 MB en total.")
+        preparados.append((nombre, extension, contenido))
+    carpeta = _directorio_adjuntos_pqrf(db) / str(id_pqrf)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    escritos = []
+    try:
+        for nombre, extension, contenido in preparados:
+            almacenado = f"{secrets.token_hex(20)}.{extension}"
+            ruta = carpeta / almacenado
+            # Exclusivo: no sobrescribe archivos existentes.
+            with ruta.open("xb") as destino:
+                destino.write(contenido)
+            escritos.append(ruta)
+            db.execute(text('''INSERT INTO public."PQRFAdjunto"
+                ("IdPQRF", "NombreOriginal", "NombreAlmacenado", "RutaArchivo", "TipoMime",
+                 "TamanoBytes", "IdUsuarioCarga", "Activo")
+                VALUES (:id, :nombre, :almacenado, :ruta, :mime, :tamano, :usuario, TRUE)'''), {
+                "id": id_pqrf, "nombre": nombre, "almacenado": almacenado,
+                "ruta": str(ruta), "mime": mimetypes.guess_type(nombre)[0] or "application/octet-stream",
+                "tamano": len(contenido), "usuario": usuario,
+            })
+        db.commit()
+    except Exception:
+        db.rollback()
+        for ruta in escritos:
+            ruta.unlink(missing_ok=True)
+        raise
+    return {"id_pqrf": id_pqrf, "archivos_cargados": len(escritos)}
+
+
+@router.get("/{id_pqrf}/adjuntos/{id_adjunto}/archivo")
+def descargar_adjunto_pqrf(id_pqrf: int, id_adjunto: int, db: Session = Depends(get_db),
+                          current: dict = Depends(get_current_user)):
+    _validar_acceso(db, current)
+    _pqrf_visible_para_usuario(db, id_pqrf, _usuario_actual_pqrf(current))
+    fila = db.execute(text('''SELECT "NombreOriginal" AS nombre, "RutaArchivo" AS ruta
+        FROM public."PQRFAdjunto" WHERE "IdPQRF" = :id AND "IdAdjuntoPQRF" = :adjunto
+        AND "Activo" = TRUE'''), {"id": id_pqrf, "adjunto": id_adjunto}).mappings().first()
+    if not fila:
+        raise HTTPException(status_code=404, detail="Adjunto no encontrado.")
+    raiz = _directorio_adjuntos_pqrf(db)
+    ruta = Path(fila["ruta"]).resolve()
+    if not ruta.is_relative_to(raiz) or not ruta.is_file():
+        raise HTTPException(status_code=404, detail="Archivo no disponible.")
+    return FileResponse(str(ruta), media_type="application/octet-stream", filename=fila["nombre"])
+
+
+@router.delete("/{id_pqrf}/adjuntos/{id_adjunto}")
+def eliminar_adjunto_pqrf(id_pqrf: int, id_adjunto: int, db: Session = Depends(get_db),
+                         current: dict = Depends(get_current_user)):
+    _validar_acceso(db, current)
+    usuario = _usuario_actual_pqrf(current)
+    pqrf = _pqrf_visible_para_usuario(db, id_pqrf, usuario)
+    if pqrf["registrador"] != usuario or pqrf["estado"] != "ABIERTA":
+        raise HTTPException(status_code=403, detail="Solo el registrador puede quitar adjuntos de una PQRF ABIERTA.")
+    resultado = db.execute(text('''UPDATE public."PQRFAdjunto" SET "Activo" = FALSE
+        WHERE "IdPQRF" = :id AND "IdAdjuntoPQRF" = :adjunto AND "Activo" = TRUE'''),
+        {"id": id_pqrf, "adjunto": id_adjunto})
+    if resultado.rowcount == 0:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="Adjunto no encontrado.")
+    db.commit()
+    return {"eliminado": True}
 
 
 @router.get("/{id_pqrf}/respuesta")
