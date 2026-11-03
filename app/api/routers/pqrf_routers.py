@@ -2,7 +2,6 @@
 
 import os
 import re
-import os
 import logging
 import smtplib
 import ssl
@@ -23,6 +22,12 @@ from infrastructure.security.auth_dependencies import get_current_user
 
 
 router = APIRouter(prefix="/api/pqrf", tags=["PQRF"])
+
+# Flujo de PQR externas: Calidad conserva el proceso original al delegar.
+_PROCESO_CALIDAD_PQRF = 10
+_TIPO_RESPUESTA_CALIDAD = "RESPUESTA_A_CALIDAD"
+_TIPO_RESPUESTA_CLIENTE = "RESPUESTA_FINAL_CLIENTE"
+
 
 
 _logger_pqrf = logging.getLogger(__name__)
@@ -837,6 +842,8 @@ async def responder_pqrf(
         pqrf = db.execute(text('''
             SELECT p."Estado" AS estado,
                    p."IdUsuarioResponsable" AS responsable,
+                   p."OrigenPQRF" AS origen,
+                   p."IdProcesoPQRF" AS proceso,
                    UPPER(TRIM(t."NombreTipo")) AS tipo
             FROM public."PQRF" p
             JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
@@ -918,6 +925,37 @@ async def responder_pqrf(
                 'Respuesta registrada por el responsable asignado'
             )
         '''), {"id": id_pqrf, "usuario": usuario})
+        # La respuesta externa regresa a Calidad para revisión y cierre.
+        # El aviso queda en la cola, no se envía directamente al cliente.
+        if pqrf["origen"] == "EXTERNA":
+            if pqrf["proceso"] != _PROCESO_CALIDAD_PQRF:
+                raise HTTPException(status_code=409, detail="La PQR externa no pertenece al proceso de Calidad.")
+            calidad = db.execute(text('''
+                SELECT r."IdUsuarioResponsable" AS id, c."Correo" AS correo
+                FROM public."ResponsableProcesoPQRF" r
+                JOIN public."ProcesoPQRF" p ON p."IdProcesoPQRF" = r."IdProcesoPQRF"
+                JOIN public."CorreoPQRF" c ON c."IdCorreoPQRF" = p."IdCorreoPQRF"
+                JOIN public."Usuario" u ON u."IdUsuario" = r."IdUsuarioResponsable"
+                WHERE r."IdProcesoPQRF" = :proceso AND p."Activo" = TRUE
+                  AND c."Activo" = TRUE
+                  AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+                LIMIT 1
+            '''), {"proceso": _PROCESO_CALIDAD_PQRF}).mappings().first()
+            if not calidad or not calidad["correo"]:
+                raise HTTPException(status_code=409, detail="Calidad no tiene responsable y correo activos.")
+            # No cambiar el responsable actual: conserva la trazabilidad de quien respondió.
+            # El gerente de Calidad puede ver la respuesta en /mis-delegadas.
+            db.execute(text('''
+                INSERT INTO public."NotificacionPQRF"
+                    ("IdPQRF", "TipoNotificacion", "CorreoDestino", "Asunto", "Cuerpo")
+                VALUES (:id, :tipo, :correo, :asunto, :cuerpo)
+            '''), {
+                "id": id_pqrf, "tipo": _TIPO_RESPUESTA_CALIDAD,
+                "correo": calidad["correo"],
+                "asunto": f"PQR N.º {id_pqrf} respondida - pendiente revisión de Calidad",
+                "cuerpo": (f"La PQR externa N.º {id_pqrf} fue respondida por el área asignada.\n"
+                           "Ingrese al aplicativo, revise la gestión y cierre la PQR cuando corresponda."),
+            })
         db.commit()
     except HTTPException:
         db.rollback()
@@ -1060,6 +1098,7 @@ def cerrar_pqrf(
     try:
         pqrf = db.execute(text('''
             SELECT p."Estado" AS estado, p."IdUsuarioRegistro" AS registrador,
+                   p."OrigenPQRF" AS origen, p."IdProcesoPQRF" AS proceso,
                    p."CorreoRespuestaCliente" AS correo_cliente,
                    p."NombreRemitente" AS nombre_cliente,
                    t."NombreTipo" AS tipo_pqrf
@@ -1070,11 +1109,22 @@ def cerrar_pqrf(
         '''), {"id": id_pqrf}).mappings().first()
         if pqrf is None:
             raise HTTPException(status_code=404, detail="PQRF no encontrada.")
-        if pqrf["registrador"] != usuario:
-            raise HTTPException(
-                status_code=403,
-                detail="Solo el usuario que registró la PQRF puede cerrarla.",
-            )
+        es_externa = pqrf["origen"] == "EXTERNA"
+        if es_externa:
+            if pqrf["proceso"] != _PROCESO_CALIDAD_PQRF:
+                raise HTTPException(status_code=409, detail="La PQR externa no pertenece al proceso de Calidad.")
+            autorizado = db.execute(text('''
+                SELECT 1 FROM public."ResponsableProcesoPQRF" r
+                JOIN public."Usuario" u ON u."IdUsuario" = r."IdUsuarioResponsable"
+                WHERE r."IdProcesoPQRF" = :proceso
+                  AND r."IdUsuarioResponsable" = :usuario
+                  AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+                LIMIT 1
+            '''), {"proceso": _PROCESO_CALIDAD_PQRF, "usuario": usuario}).scalar_one_or_none()
+            if autorizado is None:
+                raise HTTPException(status_code=403, detail="Solo el responsable de Calidad puede cerrar PQR externas.")
+        elif pqrf["registrador"] != usuario:
+            raise HTTPException(status_code=403, detail="Solo el usuario que registró la PQRF puede cerrarla.")
         if pqrf["estado"] != "RESPONDIDA":
             raise HTTPException(
                 status_code=409,
@@ -1102,6 +1152,21 @@ def cerrar_pqrf(
                 'Cierre de PQRF posterior a la respuesta del responsable'
             )
         '''), {"id": id_pqrf, "usuario": usuario})
+        if es_externa:
+            # El cierre y la notificación final se confirman en la misma transacción.
+            # El despachador de NotificacionPQRF se encargará del SMTP y los reintentos.
+            db.execute(text('''
+                INSERT INTO public."NotificacionPQRF"
+                    ("IdPQRF", "TipoNotificacion", "CorreoDestino", "Asunto", "Cuerpo")
+                VALUES (:id, :tipo, :correo, :asunto, :cuerpo)
+            '''), {
+                "id": id_pqrf, "tipo": _TIPO_RESPUESTA_CLIENTE,
+                "correo": pqrf["correo_cliente"],
+                "asunto": f"Respuesta final a su {pqrf['tipo_pqrf']} - PQR N.º {id_pqrf}",
+                "cuerpo": (f"Estimado(a) {pqrf['nombre_cliente'] or 'cliente'}:\n\n"
+                           f"Su solicitud con radicado N.º {id_pqrf} ha sido gestionada y cerrada.\n\n"
+                           f"Respuesta final:\n{gestion['respuesta']}\n\nAseos La Perfección"),
+            })
         db.commit()
     except HTTPException:
         db.rollback()
@@ -1116,7 +1181,8 @@ def cerrar_pqrf(
         raise
 
     # Únicamente información externa: tipo, radicado y respuesta final.
-    background_tasks.add_task(
+    if not es_externa:
+        background_tasks.add_task(
         _enviar_correo_pqrf, id_pqrf, pqrf["correo_cliente"],
         f"Respuesta final a su {pqrf['tipo_pqrf']} - PQRF N.º {id_pqrf}",
         pqrf["nombre_cliente"] or "Estimado(a) cliente",
