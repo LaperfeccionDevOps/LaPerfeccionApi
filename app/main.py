@@ -135,6 +135,7 @@ from api.routers.salidas_no_conformes_routers import (
     router as salidas_no_conformes_router,
 )
 from api.routers.pqrf_routers import router as pqrf_router
+from api.routers.pqrf_publico_routers import router as pqrf_publico_router
 
 
 app = FastAPI(
@@ -258,6 +259,7 @@ app.include_router(panel_gerencial_rrll_router)
 app.include_router(reintegros_router)
 app.include_router(salidas_no_conformes_router)
 app.include_router(pqrf_router)
+app.include_router(pqrf_publico_router)
 
 
 # ─────────────────────────────────────────────
