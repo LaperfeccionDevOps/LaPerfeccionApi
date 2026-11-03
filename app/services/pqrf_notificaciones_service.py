@@ -1,4 +1,4 @@
-"""Despachador PQRF EXTERNAS, exclusivamente QA.
+"""Despachador PQRF EXTERNAS, compatible con QA y producción.
 
 Ejecutar desde la carpeta app:
     python -m services.pqrf_notificaciones_service --pendientes
@@ -7,9 +7,9 @@ Ejecutar desde la carpeta app:
     python -m services.pqrf_notificaciones_service --pendientes --enviar
 
 Por defecto SIMULA (sin SMTP ni cambios en BD). Para enviar realmente:
-PQRF_QA_PERMITIR_ENVIO_MANUAL=true y --enviar. TODOS los correos se
-redirigen exclusivamente a desarrollo@aseoslaperfeccion.com, incluso si
-CorreoDestino en BD contiene otra dirección. No instala un programador:
+El envío manual requiere el permiso explícito del entorno y --enviar.
+En QA todos los correos se redirigen al buzón de pruebas; en producción
+se respetan los destinatarios validados según el tipo de notificación. No instala un programador:
 --pendientes procesa un lote y termina; programar ejecuciones es otra fase.
 """
 
@@ -32,6 +32,8 @@ from infrastructure.db.deps import get_db  # noqa: E402
 
 QA_DB = 'LA_PERFECCION_QA'
 QA_DESTINO = 'desarrollo@aseoslaperfeccion.com'
+PROD_DB = 'la_perfeccion'
+CALIDAD_PROD = 'calidad@aseoslaperfeccion.com'
 TIPOS = {
     'NUEVA_PQRF_EXTERNA': ('Nueva PQR registrada', 'Aviso al área de Calidad'),
     'RESPUESTA_A_CALIDAD': ('Respuesta a PQR para revisión', 'Aviso al área de Calidad'),
@@ -41,27 +43,56 @@ TIPOS = {
 
 def _validar_entorno(db: Session):
     nombre = db.execute(text('SELECT current_database()')).scalar_one()
-    if nombre != QA_DB:
-        raise RuntimeError('BLOQUEADO: este servicio solo permite LA_PERFECCION_QA')
+    if nombre not in (QA_DB, PROD_DB):
+        raise RuntimeError('BLOQUEADO: base de datos no autorizada para PQRF público')
+    if os.getenv('PQRF_PUBLICO_BASE_DATOS', '').strip() != nombre:
+        raise RuntimeError('BLOQUEADO: PQRF_PUBLICO_BASE_DATOS no coincide con la conexión')
     if os.getenv('PQRF_PUBLICO_HABILITADO', '').strip().lower() != 'true':
         raise RuntimeError('BLOQUEADO: PQRF_PUBLICO_HABILITADO no es true')
+    return nombre
 
 
-def _smtp_config():
-    """SOLO variables SMTP de QA: nunca usar fallback SNC/producción."""
+def _smtp_config(nombre_bd):
+    # Credenciales separadas por entorno; sin fallback.
+    prefijo = 'PQRF_MAIL_QA_' if nombre_bd == QA_DB else 'PQRF_MAIL_PROD_'
+
     def cfg(clave):
-        return (os.getenv('PQRF_MAIL_QA_' + clave) or '').strip()
+        return (os.getenv(prefijo + clave) or '').strip()
 
     host, sender, user, password = (cfg(k) for k in ('HOST', 'FROM', 'USER', 'PASSWORD'))
     try:
         port = int(cfg('PORT') or '587')
     except ValueError as exc:
-        raise RuntimeError('Puerto SMTP QA inválido') from exc
+        raise RuntimeError('Puerto SMTP PQRF inválido') from exc
     if not all((host, sender, user, password)) or port not in (465, 587):
-        raise RuntimeError('Configuración PQRF_MAIL_QA_* incompleta o inválida')
+        raise RuntimeError(f'Configuración {prefijo}* incompleta o inválida')
     if port == 587 and cfg('USE_TLS').lower() in ('false', '0', 'no'):
-        raise RuntimeError('BLOQUEADO: el puerto 587 requiere STARTTLS en QA')
+        raise RuntimeError('BLOQUEADO: el puerto 587 requiere STARTTLS')
     return host, port, sender, user, password
+
+
+def _destino_validado(db: Session, fila, nombre_bd: str):
+    # QA redirige a pruebas; producción verifica destinatarios.
+    if nombre_bd == QA_DB:
+        return QA_DESTINO
+    destino = (fila['destino'] or '').strip()
+    if '\r' in destino or '\n' in destino or '@' not in destino:
+        raise RuntimeError('BLOQUEADO: destinatario inválido')
+    if fila['tipo'] in ('NUEVA_PQRF_EXTERNA', 'RESPUESTA_A_CALIDAD'):
+        if destino.lower() != CALIDAD_PROD:
+            raise RuntimeError('BLOQUEADO: notificación interna no dirigida a Calidad')
+    elif fila['tipo'] == 'RESPUESTA_FINAL_CLIENTE':
+        datos = db.execute(text('''
+            SELECT "CorreoRespuestaCliente" AS correo, "Estado" AS estado
+            FROM public."PQRF" WHERE "IdPQRF" = :id AND "OrigenPQRF" = 'EXTERNA'
+        '''), {'id': fila['radicado']}).mappings().first()
+        if not datos or (datos['correo'] or '').strip().lower() != destino.lower():
+            raise RuntimeError('BLOQUEADO: destinatario no coincide con el correo del cliente')
+        if (datos['estado'] or '').upper() not in ('CERRADA', 'CERRADO'):
+            raise RuntimeError('BLOQUEADO: respuesta final sin cierre de Calidad')
+    else:
+        raise RuntimeError('BLOQUEADO: tipo de notificación desconocido')
+    return destino
 
 
 def _consultar(db: Session, id_notificacion: int):
@@ -86,7 +117,7 @@ def _consultar(db: Session, id_notificacion: int):
     return fila
 
 
-def _html_correo(cuerpo: str, radicado: int, tipo: str) -> str:
+def _html_correo(cuerpo: str, radicado: int, tipo: str, nombre_bd: str = QA_DB) -> str:
     """Correo institucional compatible con Outlook de escritorio (tablas e inline CSS).
 
     El contenido proviene íntegramente de NotificacionPQRF.Cuerpo; no se
@@ -153,7 +184,7 @@ def _html_correo(cuerpo: str, radicado: int, tipo: str) -> str:
         '<p style="font-family:Arial,Helvetica,sans-serif;font-size:12px;'
         'line-height:19px;color:#65778a;margin:0;">'
         'Comunicación automática de Aseos La Perfección<br>'
-        'Sistema de Gestión PQR · Entorno de pruebas QA</p>'
+        f'Sistema de Gestión PQR{" · Entorno de pruebas QA" if nombre_bd == QA_DB else ""}</p>'
         '</td></tr>'
         '</table></td></tr></table></body></html>'
     )
@@ -189,15 +220,18 @@ def _evidencias_respuesta(db: Session, fila):
     return evidencias
 
 
-def _enviar_smtp(fila, config, evidencias=None):
+def _enviar_smtp(fila, config, destino, nombre_bd, evidencias=None):
     host, port, sender, user, password = config
     mensaje = EmailMessage()
     mensaje['From'] = sender
-    mensaje['To'] = QA_DESTINO  # Jamás usar fila['destino'] como destinatario SMTP en QA.
-    mensaje['Subject'] = '[QA PQR] ' + fila['asunto']
-    mensaje.set_content('PRUEBA QA. Destinatario original registrado: '
-                        + fila['destino'] + '\n\n' + fila['cuerpo'])
-    mensaje.add_alternative(_html_correo(fila['cuerpo'], fila['radicado'], fila['tipo']), subtype='html')
+    mensaje['To'] = destino
+    mensaje['Subject'] = ('[QA PQR] ' if nombre_bd == QA_DB else '') + fila['asunto']
+    if nombre_bd == QA_DB:
+        mensaje.set_content('PRUEBA QA. Destinatario original registrado: '
+                            + fila['destino'] + '\n\n' + fila['cuerpo'])
+    else:
+        mensaje.set_content(fila['cuerpo'])
+    mensaje.add_alternative(_html_correo(fila['cuerpo'], fila['radicado'], fila['tipo'], nombre_bd), subtype='html')
     for nombre, maintype, subtype, contenido in (evidencias or []):
         mensaje.add_attachment(contenido, maintype=maintype, subtype=subtype, filename=nombre)
     contexto = ssl.create_default_context()
@@ -216,18 +250,21 @@ def procesar(id_notificacion: int, enviar: bool = False):
     generador = get_db()
     db = next(generador)
     try:
-        _validar_entorno(db)
+        nombre_bd = _validar_entorno(db)
         fila = _consultar(db, id_notificacion)
-        print(f"QA | Notificación {fila['id']} | PQR {fila['radicado']} | "
-              f"Tipo {fila['tipo']} | Destino REAL bloqueado | Destino QA {QA_DESTINO}")
+        destino = _destino_validado(db, fila, nombre_bd)
+        print(f"{nombre_bd} | Notificación {fila['id']} | PQR {fila['radicado']} | "
+              f"Tipo {fila['tipo']} | Destino autorizado {destino}")
         if not enviar:
             print('SIMULACIÓN: sin SMTP ni modificaciones a BD.')
             return True
-        if os.getenv('PQRF_QA_PERMITIR_ENVIO_MANUAL', '').strip().lower() != 'true':
-            raise RuntimeError('BLOQUEADO: requiere PQRF_QA_PERMITIR_ENVIO_MANUAL=true')
+        flag = ('PQRF_QA_PERMITIR_ENVIO_MANUAL' if nombre_bd == QA_DB
+                else 'PQRF_PROD_PERMITIR_ENVIO_MANUAL')
+        if os.getenv(flag, '').strip().lower() != 'true':
+            raise RuntimeError(f'BLOQUEADO: requiere {flag}=true')
         evidencias = _evidencias_respuesta(db, fila)
         print(f'Evidencias de respuesta final para adjuntar: {len(evidencias)}')
-        config = _smtp_config()  # Validar antes de reservar el registro.
+        config = _smtp_config(nombre_bd)  # Validar antes de reservar el registro.
         reservado = db.execute(text('''
             UPDATE public."NotificacionPQRF"
                SET "EstadoEnvio" = 'ENVIANDO',
@@ -244,7 +281,7 @@ def procesar(id_notificacion: int, enviar: bool = False):
             raise RuntimeError('La notificación cambió de estado; envío cancelado')
         db.commit()  # Reserva atómica visible a otros despachadores.
         try:
-            _enviar_smtp(fila, config, evidencias)
+            _enviar_smtp(fila, config, destino, nombre_bd, evidencias)
         except Exception as exc:
             db.rollback()
             db.execute(text('''
@@ -262,7 +299,7 @@ def procesar(id_notificacion: int, enviar: bool = False):
              WHERE "IdNotificacionPQRF" = :id AND "EstadoEnvio" = 'ENVIANDO'
         '''), {'id': id_notificacion})
         db.commit()
-        print(f"SMTP aceptó notificación {id_notificacion} para {QA_DESTINO}; comprobar bandeja.")
+        print(f"SMTP aceptó notificación {id_notificacion} para {destino}; comprobar bandeja.")
         return True
     finally:
         db.close()
@@ -292,12 +329,12 @@ def pendientes(limite: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Despachador PQR externas, exclusivamente QA')
+    parser = argparse.ArgumentParser(description='Despachador PQR externas, QA y producción')
     grupo = parser.add_mutually_exclusive_group(required=True)
     grupo.add_argument('--id', type=int, help='ID específico de NotificacionPQRF')
     grupo.add_argument('--pendientes', action='store_true', help='Procesar un lote de pendientes')
     parser.add_argument('--limite', type=int, default=20, help='Máximo de notificaciones por lote (1-100)')
-    parser.add_argument('--enviar', action='store_true', help='Envío SMTP real a DESARROLLO, con flag de QA')
+    parser.add_argument('--enviar', action='store_true', help='Envío SMTP real, sujeto al permiso explícito del entorno')
     args = parser.parse_args()
     if not 1 <= args.limite <= 100:
         parser.error('--limite debe estar entre 1 y 100')

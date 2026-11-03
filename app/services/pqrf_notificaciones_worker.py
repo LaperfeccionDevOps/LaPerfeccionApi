@@ -1,4 +1,4 @@
-"""Worker independiente de notificaciones PQR externas, exclusivamente QA.
+"""Worker independiente de notificaciones PQR externas para QA y producción.
 
 Desde la carpeta app:
   python -m services.pqrf_notificaciones_worker --una-vez
@@ -6,7 +6,8 @@ Desde la carpeta app:
   python -m services.pqrf_notificaciones_worker --id 9
 
 Corte de pruebas QA: nunca despacha notificaciones con ID <= 8.
-No se inicia desde main.py ni uvicorn. No ejecutar en producción.
+En producción no hay corte por ID; requiere habilitación explícita.
+No se inicia desde main.py ni uvicorn.
 """
 import argparse
 import logging
@@ -23,18 +24,36 @@ load_dotenv(dotenv_path=ENV_FILE)
 from sqlalchemy import text
 
 from infrastructure.db.deps import get_db
-from services.pqrf_notificaciones_service import _validar_entorno, procesar
+from services.pqrf_notificaciones_service import _validar_entorno, procesar, QA_DB, PROD_DB
 
-LOG = logging.getLogger('pqrf_qa_worker')
+LOG = logging.getLogger('pqrf_notificaciones_worker')
 ID_CORTE_QA = 8
 TIPOS = ('NUEVA_PQRF_EXTERNA', 'RESPUESTA_A_CALIDAD', 'RESPUESTA_FINAL_CLIENTE')
 
 
-def _habilitado():
-    if os.getenv('PQRF_QA_ENVIO_AUTOMATICO_HABILITADO', '').strip().lower() != 'true':
-        raise RuntimeError('Worker deshabilitado: PQRF_QA_ENVIO_AUTOMATICO_HABILITADO no es true')
-    if os.getenv('PQRF_QA_PERMITIR_ENVIO_MANUAL', '').strip().lower() != 'true':
-        raise RuntimeError('Servicio SMTP deshabilitado: PQRF_QA_PERMITIR_ENVIO_MANUAL no es true')
+def _habilitado(nombre_bd):
+    if nombre_bd == QA_DB:
+        automatico = 'PQRF_QA_ENVIO_AUTOMATICO_HABILITADO'
+        manual = 'PQRF_QA_PERMITIR_ENVIO_MANUAL'
+    elif nombre_bd == PROD_DB:
+        automatico = 'PQRF_PROD_ENVIO_AUTOMATICO_HABILITADO'
+        manual = 'PQRF_PROD_PERMITIR_ENVIO_MANUAL'
+    else:
+        raise RuntimeError('Worker bloqueado: base de datos no autorizada')
+    if os.getenv(automatico, '').strip().lower() != 'true':
+        raise RuntimeError(f'Worker deshabilitado: {automatico} no es true')
+    if os.getenv(manual, '').strip().lower() != 'true':
+        raise RuntimeError(f'Servicio SMTP deshabilitado: {manual} no es true')
+
+
+def _entorno_actual():
+    generador = get_db()
+    db = next(generador)
+    try:
+        return _validar_entorno(db)
+    finally:
+        db.close()
+        generador.close()
 
 
 def _seleccionar_pendientes(limite=10, id_unico=None):
@@ -42,7 +61,8 @@ def _seleccionar_pendientes(limite=10, id_unico=None):
     generador = get_db()
     db = next(generador)
     try:
-        _validar_entorno(db)
+        nombre_bd = _validar_entorno(db)
+        corte = ID_CORTE_QA if nombre_bd == QA_DB else 0
         sql = '''
             SELECT n."IdNotificacionPQRF"
             FROM public."NotificacionPQRF" n
@@ -54,7 +74,7 @@ def _seleccionar_pendientes(limite=10, id_unico=None):
                   ('NUEVA_PQRF_EXTERNA','RESPUESTA_A_CALIDAD','RESPUESTA_FINAL_CLIENTE')
               AND n."IdNotificacionPQRF" > :corte
         '''
-        parametros = {'corte': ID_CORTE_QA, 'limite': limite}
+        parametros = {'corte': corte, 'limite': limite}
         if id_unico is not None:
             sql += ' AND n."IdNotificacionPQRF" = :id_unico\n'
             parametros['id_unico'] = id_unico
@@ -66,12 +86,13 @@ def _seleccionar_pendientes(limite=10, id_unico=None):
 
 
 def ejecutar_lote(id_unico=None, limite=10):
-    _habilitado()
+    nombre_bd = _entorno_actual()
+    _habilitado(nombre_bd)
     ids = _seleccionar_pendientes(limite=limite, id_unico=id_unico)
     if id_unico is not None and not ids:
-        raise RuntimeError('Notificación no elegible, ya enviada o excluida por el corte QA')
+        raise RuntimeError('Notificación no elegible, ya enviada o excluida por el corte del entorno')
     if not ids:
-        LOG.info('Sin notificaciones nuevas pendientes (ID > %s)', ID_CORTE_QA)
+        LOG.info('Sin notificaciones nuevas pendientes en %s', nombre_bd)
     for ident in ids:
         try:
             procesar(ident, enviar=True)
@@ -82,7 +103,7 @@ def ejecutar_lote(id_unico=None, limite=10):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Worker de correos PQR externas QA')
+    parser = argparse.ArgumentParser(description='Worker de correos PQR externas QA/producción')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--id', type=int)
     group.add_argument('--una-vez', action='store_true')
@@ -95,13 +116,14 @@ def main():
     if not 1 <= args.limite <= 100 or not 30 <= args.intervalo <= 3600:
         parser.error('limite 1-100; intervalo 30-3600 segundos')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    _habilitado()
+    nombre_bd = _entorno_actual()
+    _habilitado(nombre_bd)
     if args.id is not None:
         ejecutar_lote(id_unico=args.id, limite=1)
     elif args.una_vez:
         ejecutar_lote(limite=args.limite)
     else:
-        LOG.info('Worker QA iniciado. Solo ID > %s. Detener con Ctrl+C', ID_CORTE_QA)
+        LOG.info('Worker %s iniciado. Corte ID > %s. Detener con Ctrl+C', nombre_bd, ID_CORTE_QA if nombre_bd == QA_DB else 0)
         try:
             while True:
                 ejecutar_lote(limite=args.limite)

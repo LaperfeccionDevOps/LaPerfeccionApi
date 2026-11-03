@@ -10,6 +10,7 @@ from html import escape
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
+from urllib.parse import urlsplit, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, status, File, Form, UploadFile, Response, BackgroundTasks
 from pydantic import BaseModel, Field, field_validator
@@ -46,20 +47,31 @@ def _enviar_correo_pqrf(
     id_pqrf: int, destinatario: str | None, asunto: str,
     saludo: str, contenido: str, externo: bool = False,
 ) -> None:
-    # Solo QA, tras commit
+    # Notificación interna existente, tras commit. No utiliza la cola de PQR externas.
     if not destinatario or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", destinatario):
         _logger_pqrf.warning("PQRF %s: correo omitido; destinatario vacío o inválido", id_pqrf)
         return
-    # PQRF QA usa su configuración propia cuando exista; mientras tanto reutiliza
-    # la cuenta institucional no.reply de SNC, sin alterar el servicio SNC.
-    # No utilizar el SMTP general de Nómina para notificaciones PQRF.
+    # Seleccionar SMTP por la base configurada, sin consultar datos del navegador.
+    # No se permite que producción use credenciales de QA o el SMTP de SNC.
+    try:
+        nombre_bd = unquote(urlsplit(os.getenv("DATABASE_URL", "")).path.lstrip("/"))
+    except ValueError:
+        nombre_bd = ""
+    if nombre_bd == "LA_PERFECCION_QA":
+        prefijo = "PQRF_MAIL_QA_"
+    elif nombre_bd == "la_perfeccion":
+        prefijo = "PQRF_MAIL_PROD_"
+    else:
+        _logger_pqrf.error("PQRF %s: base SMTP no autorizada; correo omitido", id_pqrf)
+        return
+
     def config(campo: str) -> str:
-        return (os.getenv("PQRF_MAIL_QA_" + campo) or os.getenv("SNC_MAIL_PROD_" + campo) or "").strip()
+        return (os.getenv(prefijo + campo) or "").strip()
 
     host, remitente = config("HOST"), config("FROM")
     usuario, clave = config("USER"), config("PASSWORD")
     if not host or not remitente or bool(usuario) != bool(clave):
-        _logger_pqrf.error("PQRF %s: SMTP QA incompleto; no se envía correo", id_pqrf)
+        _logger_pqrf.error("PQRF %s: SMTP del entorno incompleto; no se envía correo", id_pqrf)
         return
     try:
         puerto = int(config("PORT") or "587")
@@ -131,8 +143,8 @@ def _programar_correo_pqrf(background_tasks: BackgroundTasks, id_pqrf: int, usua
 def _validar_acceso(db: Session, current: dict) -> None:
     """Valida sesión activa y base de datos explícitamente autorizada."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-    # QA está autorizado por defecto. Para producción, configurar
-    # PQRF_BASES_PERMITIDAS con el nombre REAL de la BD de producción.
+    # Se conserva la lista explícita de bases autorizadas.
+    # En producción configurar PQRF_BASES_PERMITIDAS=la_perfeccion.
     bases_configuradas = os.getenv("PQRF_BASES_PERMITIDAS", "LA_PERFECCION_QA")
     bases_permitidas = {
         nombre.strip() for nombre in bases_configuradas.split(",") if nombre.strip()

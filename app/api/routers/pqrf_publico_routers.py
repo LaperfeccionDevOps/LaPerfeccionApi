@@ -1,4 +1,4 @@
-"""Registro público PQRF - fase QA. No modifica el router interno.
+"""Registro público PQRF - QA y producción. No modifica el router interno.
 
 IMPORTANTE: No exponer a Internet sin rate limiting/CAPTCHA en el perímetro.
 El correo se encola en NotificacionPQRF; este módulo NO envía SMTP.
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from infrastructure.db.deps import get_db
 
-router = APIRouter(prefix="/api/pqrf-publico", tags=["PQRF Público (QA)"])
+router = APIRouter(prefix="/api/pqrf-publico", tags=["PQRF Público"])
 logger = logging.getLogger(__name__)
 
 # Parámetros del proceso de Calidad, no se reciben del navegador.
@@ -26,18 +26,36 @@ _CORREO_CALIDAD = 15
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
-def _validar_qa(db: Session) -> UUID:
-    """Bloquea cualquier base distinta de QA y exige habilitación explícita."""
+def _validar_entorno(db: Session) -> tuple[UUID, str]:
+    """Habilitación explícita y base autorizada; QA nunca envía al destino real."""
     nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
-    if nombre_bd != "LA_PERFECCION_QA":
-        raise HTTPException(status_code=503, detail="Portal público aún no habilitado para esta base de datos.")
+    if nombre_bd not in ("LA_PERFECCION_QA", "la_perfeccion"):
+        raise HTTPException(
+            status_code=503,
+            detail="Portal público no habilitado para esta base de datos.",
+        )
+
     if os.getenv("PQRF_PUBLICO_HABILITADO", "").strip().lower() != "true":
-        raise HTTPException(status_code=503, detail="Portal público deshabilitado en QA.")
+        raise HTTPException(status_code=503, detail="Portal público deshabilitado.")
+
+    # Impide habilitar accidentalmente una base diferente de la configurada.
+    base_configurada = os.getenv("PQRF_PUBLICO_BASE_DATOS", "").strip()
+    if base_configurada != nombre_bd:
+        raise HTTPException(
+            status_code=503,
+            detail="La base de datos del portal público no coincide con la configuración.",
+        )
+
     valor = os.getenv("PQRF_PUBLICO_REGISTRADOR_ID", "").strip()
     try:
-        return UUID(valor)
-    except (ValueError, AttributeError):
-        raise HTTPException(status_code=503, detail="Falta configurar el registrador técnico de QA.")
+        registrador_id = UUID(valor)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Falta configurar el registrador técnico del portal público.",
+        ) from exc
+
+    return registrador_id, nombre_bd
 
 
 class NuevaPQRFPublica(BaseModel):
@@ -67,7 +85,7 @@ class NuevaPQRFPublica(BaseModel):
 
 @router.get("/tipos")
 def consultar_tipos_publicos(db: Session = Depends(get_db)):
-    _validar_qa(db)
+    _validar_entorno(db)
     filas = db.execute(text('''
         SELECT "IdTipoPQRF" AS id, "NombreTipo" AS nombre
         FROM public."TipoPQRF" WHERE "Activo" = TRUE
@@ -78,7 +96,7 @@ def consultar_tipos_publicos(db: Session = Depends(get_db)):
 
 @router.post("/registrar", status_code=status.HTTP_201_CREATED)
 def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db)):
-    registrador_id = _validar_qa(db)
+    registrador_id, nombre_bd = _validar_entorno(db)
     if datos.sitio_web.strip():
         raise HTTPException(status_code=422, detail="No fue posible validar la solicitud.")
     if datos.fecha_pqrf > date.today():
@@ -95,7 +113,7 @@ def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db
         WHERE "IdTipoPQRF" = :id AND "Activo" = TRUE
     '''), {"id": datos.id_tipo_pqrf}).scalar_one()
 
-    # Validar la parametrización de Calidad en la propia base de QA.
+    # Validar la parametrización de Calidad en la base de datos activa.
     configuracion = db.execute(text('''
         SELECT p."IdCorreoPQRF" AS id_correo,
                c."Correo" AS correo_calidad,
@@ -113,11 +131,23 @@ def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db
     if not configuracion or not _EMAIL_RE.fullmatch(configuracion["correo_calidad"] or ""):
         raise HTTPException(status_code=503, detail="Calidad no tiene una configuración activa para recibir PQRF.")
 
-    # Solo QA: redirigir la notificación al buzón de pruebas configurado.
-    # Se mantiene IdCorreoPQRF=15 y la asignación al responsable de Calidad.
-    correo_pruebas = os.getenv("PQRF_PUBLICO_CORREO_PRUEBAS_QA", "").strip()
-    if not correo_pruebas or not _EMAIL_RE.fullmatch(correo_pruebas):
-        raise HTTPException(status_code=503, detail="Configure un correo de pruebas válido para PQRF público QA.")
+    # QA conserva su buzón de pruebas; producción usa el correo real de Calidad.
+    if nombre_bd == "LA_PERFECCION_QA":
+        destino_notificacion = os.getenv(
+            "PQRF_PUBLICO_CORREO_PRUEBAS_QA", ""
+        ).strip()
+        if not destino_notificacion or not _EMAIL_RE.fullmatch(destino_notificacion):
+            raise HTTPException(
+                status_code=503,
+                detail="Configure un correo de pruebas válido para PQRF público QA.",
+            )
+    else:
+        destino_notificacion = (configuracion["correo_calidad"] or "").strip()
+        if destino_notificacion.lower() != "calidad@aseoslaperfeccion.com":
+            raise HTTPException(
+                status_code=503,
+                detail="El correo de Calidad en producción no coincide con el autorizado.",
+            )
 
     registrador_activo = db.execute(text('''
         SELECT 1 FROM public."Usuario"
@@ -125,7 +155,7 @@ def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db
           AND UPPER(TRIM(COALESCE("HashEstado", ''))) = 'ACTIVO'
     '''), {"id": registrador_id}).scalar_one_or_none()
     if registrador_activo is None:
-        raise HTTPException(status_code=503, detail="Registrador técnico de QA no disponible.")
+        raise HTTPException(status_code=503, detail="Registrador técnico del portal público no disponible.")
 
     try:
         id_pqrf = db.execute(text('''
@@ -171,7 +201,7 @@ def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db
             )
         '''), {
             "id": id_pqrf,
-            "destino": correo_pruebas,
+            "destino": destino_notificacion,
             "asunto": f"[PQRF N.º {id_pqrf}] Nueva solicitud externa para Calidad",
             "cuerpo": (
                 "ASEOS LA PERFECCIÓN\n"
@@ -204,7 +234,7 @@ def registrar_pqrf_publica(datos: NuevaPQRFPublica, db: Session = Depends(get_db
         raise HTTPException(status_code=409, detail="No fue posible registrar la PQRF.") from exc
     except Exception:
         db.rollback()
-        logger.exception("Error al registrar PQRF externa en QA")
+        logger.exception("Error al registrar PQRF externa")
         raise
 
     return {
