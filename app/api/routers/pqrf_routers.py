@@ -318,7 +318,7 @@ class CrearPQRF(BaseModel):
 
 
 def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
-    """Responsables de procesos activos, Victoria Comercial y seis líderes autorizadas."""
+    """Responsables activos y colaboradores expresamente autorizados para crear PQRF."""
     return db.execute(text('''
         SELECT 1
         FROM public."Usuario" u
@@ -336,6 +336,7 @@ def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
               OR u."IdUsuario" IN (
                   :sandra, :sandra_qa, :derly, :edilma, :diyer, :olga, :alix
               )
+              OR u."IdUsuario" = :william
               OR (
                   u."IdUsuario" IN (:victoria_qa, :victoria_prod)
                   AND EXISTS (
@@ -350,6 +351,7 @@ def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
         LIMIT 1
     '''), {
         "usuario": usuario_id,
+        "william": UUID("510972b7-94ad-4290-b038-8ff16b8f0bf1"),
         "victoria_qa": UUID("03ade084-3706-4fc2-80b9-fa31698ee356"),
         "victoria_prod": UUID("e4836180-ec91-4c3f-b177-741744824ce3"),
         "sandra": UUID("ae84bc57-9f41-4be0-b66c-cc477af37638"),
