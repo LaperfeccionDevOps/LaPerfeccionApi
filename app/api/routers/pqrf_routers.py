@@ -1366,9 +1366,8 @@ def cerrar_pqrf(
     return {"id": id_pqrf, "estado": "CERRADA", "mensaje": "PQRF cerrada correctamente."}
 
 
-# Consultas globales PQRF para usuarios con rol SUPERADMIN (IdRol 5).
-# Se valida contra UsuarioRoles y Roles en la BD actual, no por nombre ni UUID fijo.
-# Solo lectura: no modifica las reglas operativas de PQRF.
+# Consultas globales PQRF: SUPERADMIN o permiso activo PQRF_GENERAL_VER.
+# Exclusivamente lectura; no modifica autorizaciones ni flujo operativo.
 ROL_SUPERADMIN_PQRF = 5
 
 
@@ -1383,10 +1382,23 @@ def _pqrf_admin(db: Session, current: dict) -> None:
           AND r."IdRol" = :rol
         LIMIT 1
     '''), {"usuario": usuario_id, "rol": ROL_SUPERADMIN_PQRF}).scalar_one_or_none()
-    if autorizado is None:
+    if autorizado is not None:
+        return
+
+    permiso = db.execute(text('''
+        SELECT 1
+        FROM public."UsuarioPermiso" up
+        JOIN public."Permiso" p ON p."IdPermiso" = up."IdPermiso"
+        WHERE up."IdUsuario" = :usuario
+          AND up."Activo" = TRUE
+          AND p."Activo" = TRUE
+          AND p."Codigo" = 'PQRF_GENERAL_VER'
+        LIMIT 1
+    '''), {"usuario": usuario_id}).scalar_one_or_none()
+    if permiso is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso exclusivo al panel PQRF de SUPERADMIN.",
+            detail="No tiene permiso para consultar PQRF General.",
         )
 
 # Días calendario inclusivos según la fecha local de Colombia (UTC-5).

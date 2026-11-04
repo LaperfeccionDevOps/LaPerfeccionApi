@@ -35,9 +35,9 @@ QA_DESTINO = 'desarrollo@aseoslaperfeccion.com'
 PROD_DB = 'la_perfeccion'
 CALIDAD_PROD = 'calidad@aseoslaperfeccion.com'
 TIPOS = {
-    'NUEVA_PQRF_EXTERNA': ('Nueva PQR registrada', 'Aviso al área de Calidad'),
-    'RESPUESTA_A_CALIDAD': ('Respuesta a PQR para revisión', 'Aviso al área de Calidad'),
-    'RESPUESTA_FINAL_CLIENTE': ('Respuesta final a su PQR', 'Comunicación de cierre'),
+    'NUEVA_PQRF_EXTERNA': ('Nueva PQRF registrada', 'Aviso al área de Calidad'),
+    'RESPUESTA_A_CALIDAD': ('Respuesta a PQRF para revisión', 'Aviso al área de Calidad'),
+    'RESPUESTA_FINAL_CLIENTE': ('Respuesta final a su PQRF', 'Comunicación de cierre'),
 }
 
 
@@ -144,7 +144,7 @@ def _html_correo(cuerpo: str, radicado: int, tipo: str, nombre_bd: str = QA_DB) 
     return (
         '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Notificación PQR</title></head>'
+        '<title>Notificación PQRF</title></head>'
         '<body style="margin:0;padding:0;background-color:#f3f6f9;">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'width="100%" style="border-collapse:collapse;background-color:#f3f6f9;">'
@@ -157,7 +157,7 @@ def _html_correo(cuerpo: str, radicado: int, tipo: str, nombre_bd: str = QA_DB) 
         '<p style="margin:0 0 7px 0;color:#ffffff;font-family:Arial,Helvetica,sans-serif;'
         'font-size:13px;font-weight:bold;letter-spacing:0.6px;">ASEOS LA PERFECCIÓN</p>'
         '<p style="margin:0;color:#dce9f2;font-family:Arial,Helvetica,sans-serif;'
-        'font-size:13px;">Sistema de Gestión PQR</p>'
+        'font-size:13px;">Sistema de Gestión PQRF</p>'
         '</td></tr>'
         '<tr><td style="padding:30px 32px 12px 32px;">'
         f'<h1 style="font-family:Arial,Helvetica,sans-serif;font-size:23px;'
@@ -171,7 +171,7 @@ def _html_correo(cuerpo: str, radicado: int, tipo: str, nombre_bd: str = QA_DB) 
         '<p style="font-family:Arial,Helvetica,sans-serif;font-size:12px;'
         'color:#526779;margin:0 0 5px 0;">NÚMERO DE RADICADO</p>'
         f'<p style="font-family:Arial,Helvetica,sans-serif;font-size:17px;'
-        f'font-weight:bold;color:#17364d;margin:0 0 5px 0;">PQR N.º {int(radicado)}</p>'
+        f'font-weight:bold;color:#17364d;margin:0 0 5px 0;">PQRF N.º {int(radicado)}</p>'
         f'<p style="font-family:Arial,Helvetica,sans-serif;font-size:12px;'
         f'color:#526779;margin:0;">{escape(estados[tipo])}</p>'
         '</td></tr></table>'
@@ -184,7 +184,7 @@ def _html_correo(cuerpo: str, radicado: int, tipo: str, nombre_bd: str = QA_DB) 
         '<p style="font-family:Arial,Helvetica,sans-serif;font-size:12px;'
         'line-height:19px;color:#65778a;margin:0;">'
         'Comunicación automática de Aseos La Perfección<br>'
-        f'Sistema de Gestión PQR{" · Entorno de pruebas QA" if nombre_bd == QA_DB else ""}</p>'
+        f'Sistema de Gestión PQRF{" · Entorno de pruebas QA" if nombre_bd == QA_DB else ""}</p>'
         '</td></tr>'
         '</table></td></tr></table></body></html>'
     )

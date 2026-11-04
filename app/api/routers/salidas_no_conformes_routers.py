@@ -974,16 +974,32 @@ def cerrar_snc(
     }
 
 
-# Fase SUPERADMIN: consultas globales de solo lectura. No modifica el flujo personal.
-def _validar_superadmin(db: Session, current: dict) -> None:
+# Consultas globales de solo lectura: SUPERADMIN o permiso SNC_GENERAL_VER.
+# No altera las autorizaciones de creación, gestión, devolución o cierre.
+def _validar_consulta_general_snc(db: Session, current: dict) -> None:
     _validar_acceso(db, current)
     nombres = {
         "".join(c for c in unicodedata.normalize("NFKD", str(nombre).upper())
                 if not unicodedata.combining(c)).replace(" ", "").replace("_", "").replace("-", "")
         for nombre in (current.get("roles") or [])
     }
-    if "SUPERADMIN" not in nombres and "SUPERADMINISTRADOR" not in nombres:
-        raise HTTPException(status_code=403, detail="Consulta exclusiva de SUPERADMIN.")
+    if "SUPERADMIN" in nombres or "SUPERADMINISTRADOR" in nombres:
+        return
+
+    id_usuario = _id_usuario_actual(current)
+    autorizado = db.execute(text('''
+        SELECT EXISTS (
+            SELECT 1
+            FROM public."UsuarioPermiso" up
+            INNER JOIN public."Permiso" p ON p."IdPermiso" = up."IdPermiso"
+            WHERE up."IdUsuario" = :id_usuario
+              AND up."Activo" = TRUE
+              AND p."Activo" = TRUE
+              AND p."Codigo" = 'SNC_GENERAL_VER'
+        )
+    '''), {"id_usuario": id_usuario}).scalar_one()
+    if not autorizado:
+        raise HTTPException(status_code=403, detail="No tiene permiso para consultar SNC General.")
 
 
 def _serializar_snc(fila):
@@ -1096,7 +1112,7 @@ def listar_snc_general(
     limite: int = 15, tipo: str = 'TODAS', db: Session = Depends(get_db),
     current: dict = Depends(get_current_user),
 ):
-    _validar_superadmin(db, current)
+    _validar_consulta_general_snc(db, current)
     if pagina < 1 or limite < 1 or limite > 15:
         raise HTTPException(status_code=422, detail="Paginación inválida (máximo 15).")
     where, params = _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
@@ -1117,7 +1133,7 @@ def indicadores_snc_general(
     db: Session = Depends(get_db), current: dict = Depends(get_current_user),
 ):
     # Totales únicos; relaciones por dirección.
-    _validar_superadmin(db, current)
+    _validar_consulta_general_snc(db, current)
     where, params = _filtros_generales(None, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
     base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where
     filas = db.execute(text('''
@@ -1199,7 +1215,7 @@ def indicadores_snc_general(
 @router.get('/general/{id_snc}')
 def detalle_snc_general(id_snc: int, db: Session = Depends(get_db),
                         current: dict = Depends(get_current_user)):
-    _validar_superadmin(db, current)
+    _validar_consulta_general_snc(db, current)
     if id_snc <= 0:
         raise HTTPException(status_code=422, detail="Número SNC inválido.")
     fila = db.execute(text(_SNC_GENERAL_SELECT + _SNC_GENERAL_FROM +
