@@ -547,7 +547,7 @@ _CONSULTA_PERSONAL_PQRF = """
     JOIN public."CorreoPQRF" co ON co."IdCorreoPQRF" = p."IdCorreoPQRF"
     JOIN public."Usuario" ur ON ur."IdUsuario" = p."IdUsuarioRegistro"
     LEFT JOIN public."Usuario" ua ON ua."IdUsuario" = p."IdUsuarioResponsable"
-    WHERE {filtro}
+    WHERE p."Activo" = TRUE AND ({filtro})
     ORDER BY p."FechaCreacion" DESC, p."IdPQRF" DESC
     LIMIT :limite OFFSET :desplazamiento
 """
@@ -619,6 +619,7 @@ def contador_pqrf_pendientes(
         FROM public."PQRF"
         WHERE "IdUsuarioResponsable" = :usuario
           AND "Estado" = 'ABIERTA'
+          AND "Activo" = TRUE
     """), {"usuario": usuario}).scalar_one()
     return {"pendientes": int(total)}
 
@@ -684,7 +685,7 @@ def reasignar_pqrf(
         pqrf = db.execute(text('''
             SELECT "Estado" AS estado, "IdProcesoPQRF" AS proceso,
                    "IdUsuarioResponsable" AS responsable
-            FROM public."PQRF" WHERE "IdPQRF" = :id FOR UPDATE
+            FROM public."PQRF" WHERE "IdPQRF" = :id AND "Activo" = TRUE FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
         if pqrf is None:
             raise HTTPException(status_code=404, detail="PQRF no encontrada.")
@@ -788,7 +789,7 @@ def rechazar_asignacion_pqrf(
         pqrf = db.execute(text('''
             SELECT "Estado" AS estado, "IdProcesoPQRF" AS proceso,
                    "IdUsuarioResponsable" AS responsable
-            FROM public."PQRF" WHERE "IdPQRF" = :id FOR UPDATE
+            FROM public."PQRF" WHERE "IdPQRF" = :id AND "Activo" = TRUE FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
         if pqrf is None:
             raise HTTPException(status_code=404, detail="PQRF no encontrada.")
@@ -896,7 +897,7 @@ async def responder_pqrf(
                    UPPER(TRIM(t."NombreTipo")) AS tipo
             FROM public."PQRF" p
             JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
-            WHERE p."IdPQRF" = :id
+            WHERE p."IdPQRF" = :id AND p."Activo" = TRUE
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
 
@@ -1032,7 +1033,7 @@ def _pqrf_visible_para_usuario(db: Session, id_pqrf: int, usuario: UUID):
                "IdUsuarioRegistro" AS registrador,
                "IdUsuarioResponsable" AS responsable
         FROM public."PQRF"
-        WHERE "IdPQRF" = :id
+        WHERE "IdPQRF" = :id AND "Activo" = TRUE
     '''), {"id": id_pqrf}).mappings().first()
     if pqrf is None:
         raise HTTPException(status_code=404, detail="PQRF no encontrada.")
@@ -1278,7 +1279,7 @@ def cerrar_pqrf(
                    t."NombreTipo" AS tipo_pqrf
             FROM public."PQRF" p
             JOIN public."TipoPQRF" t ON t."IdTipoPQRF" = p."IdTipoPQRF"
-            WHERE p."IdPQRF" = :id
+            WHERE p."IdPQRF" = :id AND p."Activo" = TRUE
             FOR UPDATE
         '''), {"id": id_pqrf}).mappings().first()
         if pqrf is None:
@@ -1456,7 +1457,7 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."FechaCreacion" AS fecha_creacion, p."FechaActualizacion" AS fecha_actualizacion,
  (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
   WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
- p."Estado" AS estado, p."NombreRemitente" AS nombre_remitente,
+ p."Estado" AS estado, p."Activo" AS activo, p."NombreRemitente" AS nombre_remitente,
  p."CorreoRemitente" AS correo_remitente,
         p."CorreoRespuestaCliente" AS correo_respuesta_cliente, p."DescripcionPQRF" AS descripcion_pqrf,
  p."IdCliente" AS id_cliente, COALESCE(c."Nombre", p."NombreClienteExterno") AS cliente,
@@ -1469,7 +1470,7 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."IdUsuarioResponsable" AS id_usuario_responsable'''
 
 
-def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta):
+def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=False):
     parts, params = [], {}
     if len(busqueda) > 150 or (fecha_desde and fecha_hasta and fecha_desde > fecha_hasta):
         raise HTTPException(status_code=422, detail='Filtros inválidos.')
@@ -1492,7 +1493,9 @@ def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde
     if fecha_hasta:
         parts.append('p."FechaPQRF" < CAST(:hasta AS DATE) + INTERVAL \'1 day\'')
         params['hasta'] = fecha_hasta
-    return ' AND '.join(parts) if parts else 'TRUE', params
+    if not incluir_inactivas:
+        parts.append('p."Activo" = TRUE')
+    return ' AND '.join(parts), params
 
 
 def _pqrf_general_row(row):
@@ -1512,12 +1515,19 @@ def pqrf_general(
     db: Session = Depends(get_db), current: dict = Depends(get_current_user),
 ):
     _pqrf_admin(db, current)
-    if pagina < 1 or not 1 <= limite <= 100 or (estado and estado not in ('ABIERTA', 'RESPONDIDA', 'CERRADA')):
+    if pagina < 1 or not 1 <= limite <= 100 or (estado and estado not in ('ABIERTA', 'RESPONDIDA', 'CERRADA', 'INHABILITADAS')):
         raise HTTPException(status_code=422, detail='Estado o paginación inválidos.')
-    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta)
-    if estado:
-        where += ' AND p."Estado" = :estado'
-        params['estado'] = estado
+    # La bandeja permite consultar inhabilitadas, sin mezclarlas con estados de gestión.
+    # La vista general ya exige autorización mediante _pqrf_admin.
+    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=True)
+    if estado == 'INHABILITADAS':
+        _pqrf_superadmin(db, current)
+        where = (where + ' AND ' if where else '') + 'p."Activo" = FALSE'
+    else:
+        where = (where + ' AND ' if where else '') + 'p."Activo" = TRUE'
+        if estado:
+            where += ' AND p."Estado" = :estado'
+            params['estado'] = estado
     total = db.execute(text('SELECT COUNT(*) ' + _PQRF_GENERAL_FROM + ' WHERE ' + where), params).scalar_one()
     rows = db.execute(text('SELECT ' + _PQRF_GENERAL_SELECT + _PQRF_GENERAL_FROM +
         ' WHERE ' + where + ' ORDER BY p."FechaCreacion" DESC, p."IdPQRF" DESC LIMIT :limite OFFSET :offset'),
@@ -1554,13 +1564,159 @@ def pqrf_general_indicadores(
         ''' + base), params).mappings().all()
     dias = [_dias_calendario_respuesta(r['fecha_creacion'], r['fecha_primera_respuesta'])
             for r in tiempos if r['fecha_primera_respuesta'] is not None]
-    return {'cantidad_con_respuesta': len(dias),
+    where_todas, params_todas = _pqrf_general_filters(
+        busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta,
+        incluir_inactivas=True,
+    )
+    es_superadmin_indicadores = db.execute(text('SELECT 1 FROM public."UsuarioRoles" WHERE "IdUsuario" = :u AND "IdRol" = :r LIMIT 1'), {'u': _usuario_actual_pqrf(current), 'r': ROL_SUPERADMIN_PQRF}).scalar_one_or_none() is not None
+    total_inhabilitadas = db.execute(text(
+        'SELECT COUNT(*) ' + _PQRF_GENERAL_FROM + ' WHERE ' +
+        (where_todas + ' AND ' if where_todas else '') + 'p."Activo" = FALSE'
+    ), params_todas).scalar_one() if es_superadmin_indicadores else 0
+    return {'inhabilitadas': int(total_inhabilitadas), 'cantidad_con_respuesta': len(dias),
             'promedio_dias_respuesta': round(sum(dias) / len(dias), 2) if dias else None,
             'total': sum(counts.values()), 'totales': counts,
             'tipos': grouped('t."NombreTipo"', 'tipo'),
             'procesos': grouped('pr."NombreProceso"', 'proceso'),
             'clientes': grouped('COALESCE(c."Nombre", p."NombreClienteExterno")', 'cliente'),
             'mensual': [dict(r) for r in db.execute(text(monthly_sql), params).mappings().all()]}
+
+
+# Administración de vigencia PQRF: solo SUPERADMIN, independiente del permiso de lectura general.
+class MotivoVigenciaPQRF(BaseModel):
+    motivo: str = Field(min_length=5, max_length=2000)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo(cls, valor: str) -> str:
+        valor = valor.strip()
+        if len(valor) < 5:
+            raise ValueError("El motivo debe tener al menos cinco caracteres.")
+        return valor
+
+
+def _pqrf_superadmin(db: Session, current: dict) -> UUID:
+    _validar_acceso(db, current)
+    usuario = _usuario_actual_pqrf(current)
+    autorizado = db.execute(text('''
+        SELECT 1 FROM public."UsuarioRoles"
+        WHERE "IdUsuario" = :usuario AND "IdRol" = :rol LIMIT 1
+    '''), {"usuario": usuario, "rol": ROL_SUPERADMIN_PQRF}).scalar_one_or_none()
+    if autorizado is None:
+        raise HTTPException(status_code=403, detail="Esta acción es exclusiva de SuperAdmin.")
+    return usuario
+
+
+@router.get('/general/administracion/registros')
+def administrar_listado_pqrf(
+    busqueda: str = '', activo: bool | None = None, limite: int = 50,
+    desplazamiento: int = 0, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _pqrf_superadmin(db, current)
+    if len(busqueda) > 150 or not 1 <= limite <= 100 or desplazamiento < 0:
+        raise HTTPException(status_code=422, detail="Filtros inválidos.")
+    where = ['TRUE']
+    params = {"limite": limite, "desplazamiento": desplazamiento}
+    if busqueda.strip():
+        where.append('''(CAST(p."IdPQRF" AS TEXT) ILIKE :buscar OR
+            p."NombreRemitente" ILIKE :buscar OR p."DescripcionPQRF" ILIKE :buscar)''')
+        params['buscar'] = '%' + busqueda.strip() + '%'
+    if activo is not None:
+        where.append('p."Activo" = :activo')
+        params['activo'] = activo
+    condicion = ' AND '.join(where)
+    total = db.execute(text('SELECT COUNT(*) FROM public."PQRF" p WHERE ' + condicion), params).scalar_one()
+    filas = db.execute(text('''
+        SELECT p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
+               p."Estado" AS estado, p."Activo" AS activo,
+               p."OrigenPQRF" AS origen_pqrf, p."NombreRemitente" AS nombre_remitente,
+               p."DescripcionPQRF" AS descripcion_pqrf,
+               p."FechaCreacion" AS fecha_creacion
+        FROM public."PQRF" p WHERE ''' + condicion + '''
+        ORDER BY p."FechaCreacion" DESC, p."IdPQRF" DESC
+        LIMIT :limite OFFSET :desplazamiento
+    '''), params).mappings().all()
+    return {"total": int(total), "registros": [dict(f) for f in filas]}
+
+
+@router.get('/general/administracion/{id_pqrf}')
+def administrar_detalle_pqrf(
+    id_pqrf: int, db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    # Detalle completo, incluso inhabilitado, exclusivo de SuperAdmin.
+    _pqrf_superadmin(db, current)
+    if id_pqrf <= 0:
+        raise HTTPException(status_code=422, detail="Identificador inválido.")
+    fila = db.execute(text('SELECT ' + _PQRF_GENERAL_SELECT + _PQRF_GENERAL_FROM +
+        ' WHERE p."IdPQRF" = :id'), {"id": id_pqrf}).mappings().first()
+    if fila is None:
+        raise HTTPException(status_code=404, detail="PQRF no encontrada.")
+    historial = db.execute(text('''
+        SELECT h."TipoMovimiento" AS tipo_movimiento,
+               h."EstadoAnterior" AS estado_anterior, h."EstadoNuevo" AS estado_nuevo,
+               h."Observacion" AS observacion, h."FechaMovimiento" AS fecha_movimiento,
+               u."NombreUsuario" AS usuario
+        FROM public."HistorialPQRF" h
+        JOIN public."Usuario" u ON u."IdUsuario" = h."IdUsuario"
+        WHERE h."IdPQRF" = :id
+        ORDER BY h."FechaMovimiento" DESC, h."IdHistorialPQRF" DESC
+    '''), {"id": id_pqrf}).mappings().all()
+    return {"pqrf": _pqrf_general_row(fila), "historial": [dict(h) for h in historial]}
+
+
+def _cambiar_vigencia_pqrf(
+    id_pqrf: int, datos: MotivoVigenciaPQRF, activo: bool,
+    db: Session, current: dict,
+):
+    usuario = _pqrf_superadmin(db, current)
+    if id_pqrf <= 0:
+        raise HTTPException(status_code=422, detail="Identificador inválido.")
+    try:
+        fila = db.execute(text('''
+            SELECT "Estado" AS estado, "Activo" AS activo
+            FROM public."PQRF" WHERE "IdPQRF" = :id FOR UPDATE
+        '''), {"id": id_pqrf}).mappings().first()
+        if fila is None:
+            raise HTTPException(status_code=404, detail="PQRF no encontrada.")
+        if fila['activo'] == activo:
+            raise HTTPException(status_code=409, detail=(
+                "La PQRF ya está activa." if activo else "La PQRF ya está inhabilitada."))
+        db.execute(text('''
+            UPDATE public."PQRF" SET "Activo" = :activo,
+                   "FechaActualizacion" = CURRENT_TIMESTAMP
+            WHERE "IdPQRF" = :id
+        '''), {"id": id_pqrf, "activo": activo})
+        db.execute(text('''
+            INSERT INTO public."HistorialPQRF"
+                ("IdPQRF", "IdUsuario", "TipoMovimiento", "EstadoAnterior",
+                 "EstadoNuevo", "Observacion")
+            VALUES (:id, :usuario, :tipo, :estado, :estado, :motivo)
+        '''), {"id": id_pqrf, "usuario": usuario,
+               "tipo": "REACTIVACION" if activo else "INHABILITACION",
+               "estado": fila['estado'], "motivo": datos.motivo})
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"id": id_pqrf, "activo": activo, "estado": fila['estado'],
+            "mensaje": "PQRF reactivada." if activo else "PQRF inhabilitada."}
+
+
+@router.patch('/general/administracion/{id_pqrf}/inhabilitar')
+def inhabilitar_pqrf(
+    id_pqrf: int, datos: MotivoVigenciaPQRF,
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    return _cambiar_vigencia_pqrf(id_pqrf, datos, False, db, current)
+
+
+@router.patch('/general/administracion/{id_pqrf}/reactivar')
+def reactivar_pqrf(
+    id_pqrf: int, datos: MotivoVigenciaPQRF,
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    return _cambiar_vigencia_pqrf(id_pqrf, datos, True, db, current)
 
 
 @router.get('/general/{id_pqrf}')
@@ -1571,8 +1727,14 @@ def pqrf_general_detalle(
     _pqrf_admin(db, current)
     if id_pqrf <= 0:
         raise HTTPException(status_code=422, detail='Identificador inválido.')
+    # Solo SuperAdmin puede abrir el detalle de un registro inhabilitado.
+    es_superadmin = db.execute(text('''SELECT 1 FROM public."UsuarioRoles"
+        WHERE "IdUsuario" = :usuario AND "IdRol" = :rol LIMIT 1'''),
+        {'usuario': _usuario_actual_pqrf(current), 'rol': ROL_SUPERADMIN_PQRF}
+    ).scalar_one_or_none() is not None
+    condicion_activo = '' if es_superadmin else ' AND p."Activo" = TRUE'
     row = db.execute(text('SELECT ' + _PQRF_GENERAL_SELECT + _PQRF_GENERAL_FROM +
-        ' WHERE p."IdPQRF" = :id'), {'id': id_pqrf}).mappings().first()
+        ' WHERE p."IdPQRF" = :id' + condicion_activo), {'id': id_pqrf}).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail='PQRF no encontrada.')
     gestiones = db.execute(text('''SELECT g."IdGestionPQRF" AS id_gestion,

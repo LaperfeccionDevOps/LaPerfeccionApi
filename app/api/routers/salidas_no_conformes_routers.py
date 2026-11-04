@@ -573,7 +573,7 @@ _CONSULTA_SNC = '''
         ON cr."IdCorreoSNC" = s."IdCorreoRemitente"
     INNER JOIN public."CorreoSNC" cd
         ON cd."IdCorreoSNC" = s."IdCorreoDestinatario"
-    WHERE {filtro}
+    WHERE s."Activo" = TRUE AND ({filtro})
     ORDER BY s."FechaCreacion" DESC, s."IdSalidaNoConforme" DESC
     LIMIT :limite OFFSET :desplazamiento
 '''
@@ -628,6 +628,7 @@ def contador_snc_pendientes(
         SELECT COUNT(*)
         FROM public."SalidaNoConforme"
         WHERE "IdUsuarioResponsable" = :usuario
+          AND "Activo" = TRUE
           AND "Estado" IN ('ABIERTO', 'EN_GESTION', 'DEVUELTO')
     """), {"usuario": usuario}).scalar_one()
     return {"pendientes": int(total)}
@@ -681,6 +682,7 @@ def responder_snc(
             SELECT "IdUsuarioResponsable" AS responsable, "Estado" AS estado
             FROM public."SalidaNoConforme"
             WHERE "IdSalidaNoConforme" = :id
+            AND "Activo" = TRUE
             FOR UPDATE
         '''), {"id": id_snc}).mappings().first()
         if snc is None:
@@ -804,6 +806,7 @@ def devolver_snc(
             LEFT JOIN public."CorreoSNC" c
               ON c."IdCorreoSNC" = s."IdCorreoDestinatario"
             WHERE s."IdSalidaNoConforme" = :id
+            AND s."Activo" = TRUE
             FOR UPDATE OF s
         """), {"id": id_snc}).mappings().first()
         if snc is None:
@@ -865,7 +868,7 @@ def consultar_devoluciones_snc(
     snc = db.execute(text("""
         SELECT "IdUsuarioCreador" AS creador, "IdUsuarioResponsable" AS responsable,
                "Estado" AS estado
-        FROM public."SalidaNoConforme" WHERE "IdSalidaNoConforme" = :id
+        FROM public."SalidaNoConforme" WHERE "IdSalidaNoConforme" = :id AND "Activo" = TRUE
     """), {"id": id_snc}).mappings().first()
     if not snc:
         raise HTTPException(404, "La SNC no existe.")
@@ -904,6 +907,7 @@ def cerrar_snc(
             SELECT "IdUsuarioCreador" AS creador, "Estado" AS estado
             FROM public."SalidaNoConforme"
             WHERE "IdSalidaNoConforme" = :id
+            AND "Activo" = TRUE
             FOR UPDATE
         '''), {"id": id_snc}).mappings().first()
 
@@ -1037,7 +1041,7 @@ _SNC_GENERAL_FROM = '''
 _SNC_GENERAL_SELECT = '''
     SELECT s."IdSalidaNoConforme" AS id,
            s."FechaSNC" AS fecha_snc, s."FechaCreacion" AS fecha_creacion,
-           s."Estado" AS estado, s."Descripcion" AS descripcion,
+           s."Estado" AS estado, s."Activo" AS activo, s."Descripcion" AS descripcion,
            s."Impacto" AS impacto, p."NombreProceso" AS proceso,
            a."NombreArea" AS area_responsable,
            ao."NombreArea" AS area_origen,
@@ -1058,8 +1062,8 @@ _SNC_GENERAL_SELECT = '''
 '''
 
 
-def _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo='TODAS'):
-    partes = []
+def _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo='TODAS', *, activo=True):
+    partes = ['s."Activo" = TRUE' if activo else 's."Activo" = FALSE']
     parametros = {}
     if estado:
         if estado not in ('ABIERTO', 'EN_GESTION', 'RESPONDIDO', 'DEVUELTO', 'CERRADO', 'CANCELADO'):
@@ -1104,6 +1108,125 @@ def _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo
     return (' WHERE ' + ' AND '.join(partes)) if partes else '', parametros
 
 
+def _es_superadmin_snc(current: dict) -> bool:
+    nombres = {
+        "".join(c for c in unicodedata.normalize("NFKD", str(nombre).upper())
+                if not unicodedata.combining(c)).replace(" ", "").replace("_", "").replace("-", "")
+        for nombre in (current.get("roles") or [])
+    }
+    return bool({"SUPERADMIN", "SUPERADMINISTRADOR"} & nombres)
+
+
+def _exigir_superadmin_snc(db: Session, current: dict) -> None:
+    _validar_acceso(db, current)
+    if not _es_superadmin_snc(current):
+        raise HTTPException(status_code=403, detail="Esta operación es exclusiva de SuperAdmin.")
+
+
+def _exigir_snc_activa(db: Session, id_snc: int, *, bloquear: bool = False) -> None:
+    if id_snc <= 0:
+        raise HTTPException(status_code=422, detail="Número de SNC inválido.")
+    consulta = ('SELECT "Activo" FROM public."SalidaNoConforme" '
+                'WHERE "IdSalidaNoConforme" = :id' + (' FOR UPDATE' if bloquear else ''))
+    activo = db.execute(text(consulta), {"id": id_snc}).scalar_one_or_none()
+    if activo is None:
+        raise HTTPException(status_code=404, detail="La SNC no existe.")
+    if not activo:
+        raise HTTPException(status_code=409, detail="La SNC está inhabilitada.")
+
+
+class CambioActivoSNC(BaseModel):
+    motivo: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo(cls, valor: str) -> str:
+        valor = valor.strip()
+        if not valor:
+            raise ValueError("El motivo es obligatorio.")
+        return valor
+
+
+@router.get('/general/administracion/{id_snc}')
+def consultar_administracion_snc(
+    id_snc: int, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _exigir_superadmin_snc(db, current)
+    fila = db.execute(text('''
+        SELECT s."IdSalidaNoConforme" AS id, s."Activo" AS activo,
+               s."Estado" AS estado, s."Descripcion" AS descripcion,
+               s."FechaCreacion" AS fecha_creacion,
+               s."IdUsuarioCreador" AS id_usuario_creador
+        FROM public."SalidaNoConforme" s
+        WHERE s."IdSalidaNoConforme" = :id
+    '''), {"id": id_snc}).mappings().first()
+    if not fila:
+        raise HTTPException(status_code=404, detail="La SNC no existe.")
+    historial = db.execute(text('''
+        SELECT h."TipoAccion" AS accion, h."Observacion" AS motivo,
+               h."FechaAccion" AS fecha, u."NombreUsuario" AS usuario
+        FROM public."HistorialSalidaNoConforme" h
+        LEFT JOIN public."Usuario" u ON u."IdUsuario" = h."IdUsuarioAccion"
+        WHERE h."IdSalidaNoConforme" = :id
+          AND h."TipoAccion" IN ('INHABILITACION', 'REACTIVACION')
+        ORDER BY h."FechaAccion" DESC, h."IdHistorialSalidaNoConforme" DESC
+    '''), {"id": id_snc}).mappings().all()
+    return {**_serializar_snc(fila), "auditoria": [dict(h) for h in historial]}
+
+
+@router.patch('/general/administracion/{id_snc}/inhabilitar')
+def inhabilitar_snc(
+    id_snc: int, datos: CambioActivoSNC, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    return _cambiar_activo_snc(db, current, id_snc, datos.motivo, False)
+
+
+@router.patch('/general/administracion/{id_snc}/reactivar')
+def reactivar_snc(
+    id_snc: int, datos: CambioActivoSNC, db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    return _cambiar_activo_snc(db, current, id_snc, datos.motivo, True)
+
+
+def _cambiar_activo_snc(db: Session, current: dict, id_snc: int,
+                        motivo: str, nuevo_activo: bool):
+    _exigir_superadmin_snc(db, current)
+    if id_snc <= 0:
+        raise HTTPException(status_code=422, detail="Número de SNC inválido.")
+    try:
+        fila = db.execute(text('''
+            SELECT "Activo" AS activo, "Estado" AS estado
+            FROM public."SalidaNoConforme"
+            WHERE "IdSalidaNoConforme" = :id FOR UPDATE
+        '''), {"id": id_snc}).mappings().first()
+        if fila is None:
+            raise HTTPException(status_code=404, detail="La SNC no existe.")
+        if fila['activo'] == nuevo_activo:
+            raise HTTPException(status_code=409, detail="La SNC ya tiene ese estado de habilitación.")
+        db.execute(text('''
+            UPDATE public."SalidaNoConforme"
+            SET "Activo" = :activo, "FechaActualizacion" = CURRENT_TIMESTAMP
+            WHERE "IdSalidaNoConforme" = :id
+        '''), {"id": id_snc, "activo": nuevo_activo})
+        db.execute(text('''
+            INSERT INTO public."HistorialSalidaNoConforme"
+              ("IdSalidaNoConforme", "IdUsuarioAccion", "TipoAccion",
+               "EstadoAnterior", "EstadoNuevo", "Observacion")
+            VALUES (:id, :usuario, :accion, :estado, :estado, :motivo)
+        '''), {"id": id_snc, "usuario": _id_usuario_actual(current),
+               "accion": 'REACTIVACION' if nuevo_activo else 'INHABILITACION',
+               "estado": fila['estado'], "motivo": motivo.strip()})
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"id": id_snc, "activo": nuevo_activo, "estado": fila['estado'],
+            "mensaje": "SNC reactivada." if nuevo_activo else "SNC inhabilitada."}
+
+
 @router.get('/general')
 def listar_snc_general(
     estado: str | None = None, busqueda: str | None = None,
@@ -1115,7 +1238,13 @@ def listar_snc_general(
     _validar_consulta_general_snc(db, current)
     if pagina < 1 or limite < 1 or limite > 15:
         raise HTTPException(status_code=422, detail="Paginación inválida (máximo 15).")
-    where, params = _filtros_generales(estado, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
+    # La pestaña INHABILITADAS es exclusiva de SuperAdmin; las demás
+    # muestran únicamente SNC activas y conservan el estado de gestión.
+    inhabilitadas = estado == 'INHABILITADAS'
+    if inhabilitadas:
+        _exigir_superadmin_snc(db, current)
+    where, params = _filtros_generales(None if inhabilitadas else estado,
+        busqueda, id_area, fecha_desde, fecha_hasta, tipo, activo=not inhabilitadas)
     total = db.execute(text('SELECT COUNT(*) ' + _SNC_GENERAL_FROM + where), params).scalar_one()
     filas = db.execute(text(_SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where +
         ' ORDER BY s."FechaCreacion" DESC, s."IdSalidaNoConforme" DESC LIMIT :limite OFFSET :offset'),
@@ -1135,6 +1264,15 @@ def indicadores_snc_general(
     # Totales únicos; relaciones por dirección.
     _validar_consulta_general_snc(db, current)
     where, params = _filtros_generales(None, busqueda, id_area, fecha_desde, fecha_hasta, tipo)
+    # Conteo separado para la pestaña administrativa. Nunca se suma a
+    # totales, ranking, desglose, gráficas ni indicadores operativos.
+    total_inhabilitadas = 0
+    if _es_superadmin_snc(current):
+        where_inactivas, params_inactivas = _filtros_generales(
+            None, busqueda, id_area, fecha_desde, fecha_hasta, tipo, activo=False)
+        total_inhabilitadas = db.execute(
+            text('SELECT COUNT(*) ' + _SNC_GENERAL_FROM + where_inactivas),
+            params_inactivas).scalar_one()
     base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where
     filas = db.execute(text('''
         SELECT estado, area_responsable, COUNT(*) AS total,
@@ -1203,6 +1341,7 @@ def indicadores_snc_general(
         FROM relaciones GROUP BY area ORDER BY COUNT(*) DESC, area
     '''), global_params).mappings().all()
     return {
+        'inhabilitadas': int(total_inhabilitadas),
         'grupos': [dict(f) for f in filas],
         'totales': {e: sum(f['total'] for f in filas if f['estado'] == e)
                     for e in ('ABIERTO', 'RESPONDIDO', 'DEVUELTO', 'CERRADO')},
@@ -1218,8 +1357,11 @@ def detalle_snc_general(id_snc: int, db: Session = Depends(get_db),
     _validar_consulta_general_snc(db, current)
     if id_snc <= 0:
         raise HTTPException(status_code=422, detail="Número SNC inválido.")
+    # SuperAdmin puede consultar también registros inhabilitados para reactivarlos.
+    # Los demás usuarios con permiso de vista general siguen viendo solo activos.
+    condicion_activo = '' if _es_superadmin_snc(current) else ' AND s."Activo" = TRUE'
     fila = db.execute(text(_SNC_GENERAL_SELECT + _SNC_GENERAL_FROM +
-        ' WHERE s."IdSalidaNoConforme" = :id'), {'id': id_snc}).mappings().first()
+        ' WHERE s."IdSalidaNoConforme" = :id' + condicion_activo), {'id': id_snc}).mappings().first()
     if not fila:
         raise HTTPException(status_code=404, detail="La SNC no existe.")
     gestion = db.execute(text('''SELECT "DescripcionGestion" AS analisis_causa,
@@ -1386,6 +1528,7 @@ async def responder_snc_con_evidencias(
     current: dict = Depends(get_current_user),
 ):
     _validar_acceso(db, current)
+    _exigir_snc_activa(db, id_snc)
     usuario = _id_usuario_actual(current)
     if id_snc <= 0:
         raise HTTPException(422, "Número de SNC inválido.")
@@ -1423,7 +1566,7 @@ async def responder_snc_con_evidencias(
         snc = db.execute(text('''
             SELECT "IdUsuarioResponsable" AS responsable, "Estado" AS estado
             FROM public."SalidaNoConforme"
-            WHERE "IdSalidaNoConforme" = :id FOR UPDATE
+            WHERE "IdSalidaNoConforme" = :id AND "Activo" = TRUE FOR UPDATE
         '''), {"id": id_snc}).mappings().first()
         if not snc:
             raise HTTPException(404, "La SNC no existe.")
@@ -1533,11 +1676,12 @@ async def cargar_evidencias_registro_snc(
     current: dict = Depends(get_current_user),
 ):
     _validar_acceso(db, current)
+    _exigir_snc_activa(db, id_snc)
     usuario = _id_usuario_actual(current)
     snc = db.execute(text('''
         SELECT "IdUsuarioCreador" AS creador
         FROM public."SalidaNoConforme"
-        WHERE "IdSalidaNoConforme" = :id
+        WHERE "IdSalidaNoConforme" = :id AND "Activo" = TRUE
     '''), {"id": id_snc}).mappings().first()
     if not snc:
         raise HTTPException(404, "SNC no encontrada.")
