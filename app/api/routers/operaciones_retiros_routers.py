@@ -3340,6 +3340,31 @@ def _validar_motivo_vacante_rq_personal_nuevo(
     return row
 
 
+def _validar_empresa_contratante_rq_personal_nuevo(
+    db: Session,
+    id_empresa_contratante: int,
+):
+    """Valida la empresa contratante usando el catálogo existente."""
+    empresa = db.execute(
+        text("""
+            SELECT "IdEmpresaContratante", "Codigo", "Nombre"
+            FROM public."EmpresaContratante"
+            WHERE "IdEmpresaContratante" = :id_empresa_contratante
+              AND "Activo" = true
+            LIMIT 1;
+        """),
+        {"id_empresa_contratante": id_empresa_contratante},
+    ).mappings().first()
+
+    if not empresa:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La empresa contratante seleccionada no existe o está inactiva.",
+        )
+
+    return empresa
+
+
 @router.get("/rq/personal-nuevo/catalogos")
 def obtener_catalogos_rq_personal_nuevo(
     db: Session = Depends(get_db),
@@ -3429,9 +3454,19 @@ def obtener_catalogos_rq_personal_nuevo(
         """)
     ).mappings().all()
 
+    empresas_contratantes = db.execute(
+        text("""
+            SELECT "IdEmpresaContratante", "Codigo", "Nombre"
+            FROM public."EmpresaContratante"
+            WHERE "Activo" = true
+            ORDER BY "IdEmpresaContratante" ASC;
+        """)
+    ).mappings().all()
+
     return {
         "success": True,
         "data": {
+            "EmpresasContratantes": [dict(row) for row in empresas_contratantes],
             "Clientes": [dict(row) for row in clientes],
             "Cargos": [dict(row) for row in cargos],
             "Perfiles": [dict(row) for row in perfiles],
@@ -3462,6 +3497,7 @@ def crear_rq_personal_nuevo(
     Turno: str = Form(...),
     IdMotivoVacanteRQ: int = Form(...),
     CantidadSolicitada: int = Form(...),
+    IdEmpresaContratante: int = Form(...),
     ObservacionCliente: str | None = Form(None),
     db: Session = Depends(get_db),
     current=Depends(require_operaciones_retiros),
@@ -3488,6 +3524,9 @@ def crear_rq_personal_nuevo(
         cliente = _validar_cliente(db, IdCliente)
         cargo = _validar_cargo_rq_personal_nuevo(db, IdCargo)
         perfil = _validar_perfil_rq(db, IdPerfilRQ)
+        empresa_contratante = _validar_empresa_contratante_rq_personal_nuevo(
+            db, IdEmpresaContratante
+        )
 
         # IdCiudad llega desde application/x-www-form-urlencoded.
         # Swagger y el frontend pueden enviar el campo opcional como cadena
@@ -3580,7 +3619,8 @@ def crear_rq_personal_nuevo(
                     "IdCiudad",
                     "IdTipoContrato",
                     "CargoAprobadoPlanta",
-                    "IdMotivoVacanteRQ"
+                    "IdMotivoVacanteRQ",
+                    "IdEmpresaContratante"
                 )
                 VALUES (
                     NULL,
@@ -3613,7 +3653,8 @@ def crear_rq_personal_nuevo(
                     :id_ciudad,
                     :id_tipo_contrato,
                     :cargo_aprobado_planta,
-                    :id_motivo_vacante_rq
+                    :id_motivo_vacante_rq,
+                    :id_empresa_contratante
                 )
                 RETURNING "IdRQOperaciones";
             """),
@@ -3631,6 +3672,7 @@ def crear_rq_personal_nuevo(
                 "id_tipo_contrato": IdTipoContrato,
                 "cargo_aprobado_planta": CargoAprobadoPlanta,
                 "id_motivo_vacante_rq": IdMotivoVacanteRQ,
+                "id_empresa_contratante": IdEmpresaContratante,
             },
         ).scalar_one()
 
@@ -3657,6 +3699,9 @@ def crear_rq_personal_nuevo(
                 "IdMotivoVacanteRQ": int(IdMotivoVacanteRQ),
                 "MotivoVacante": motivo["NombreMotivoVacante"],
                 "CantidadSolicitada": int(CantidadSolicitada),
+                "IdEmpresaContratante": int(empresa_contratante["IdEmpresaContratante"]),
+                "CodigoEmpresaContratante": empresa_contratante["Codigo"],
+                "NombreEmpresaContratante": empresa_contratante["Nombre"],
                 "ObservacionCliente": observacion_cliente,
                 "IdUsuarioLider": str(identidad["IdUsuario"]),
                 "NombreLider": identidad["NombreCompleto"],
@@ -3693,6 +3738,9 @@ def listar_rq_personal_nuevo_operaciones(
                 rq."IdRQOperaciones",
                 rq."IdCliente",
                 c."Nombre" AS "NombreCliente",
+                rq."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresaContratante",
+                ec."Nombre" AS "NombreEmpresaContratante",
                 rq."IdCargo",
                 ca."NombreCargo",
                 rq."IdPerfilRQ",
@@ -3735,6 +3783,8 @@ def listar_rq_personal_nuevo_operaciones(
             FROM public."RQOperaciones" rq
             INNER JOIN public."Cliente" c
                 ON c."IdCliente" = rq."IdCliente"
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
             LEFT JOIN public."Cargo" ca
                 ON ca."IdCargo" = rq."IdCargo"
             LEFT JOIN public."PerfilRQ" prq

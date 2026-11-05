@@ -275,7 +275,12 @@ def listar_aspirantes(
                 rp."FechaIngresoHistorica"
             ) AS "FechaIngreso",
                 CL."Nombre" AS "NombreCliente",
-                VL_ACTUAL."IdEmpresaContratante",
+                CASE
+                    WHEN rp."IdEstadoProceso" IN (18, 19, 20, 21, 22, 24, 26)
+                    THEN COALESCE(RQ_ACTUAL."IdEmpresaContratante", VL_ACTUAL."IdEmpresaContratante")
+                    ELSE VL_ACTUAL."IdEmpresaContratante"
+                END AS "IdEmpresaContratante",
+                RQ_ACTUAL."IdRQOperaciones" AS "IdRQOperacionesAsociada",
                 EC."Codigo" AS "CodigoEmpresa",
                 EC."Nombre" AS "NombreEmpresa",
                 EC."Logo" AS "LogoEmpresa",
@@ -317,8 +322,27 @@ def listar_aspirantes(
                     vl."IdVinculacionLaboral" DESC
                 LIMIT 1
             ) VL_ACTUAL ON TRUE
+            -- Empresa heredada de la RQ PERSONAL_NUEVO activa. No modifica ciclos laborales.
+            LEFT JOIN LATERAL (
+                SELECT
+                    rq."IdRQOperaciones",
+                    rq."IdEmpresaContratante"
+                FROM public."RQCandidato" rc
+                INNER JOIN public."RQOperaciones" rq
+                    ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+                WHERE rc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND rc."Activo" = TRUE
+                  AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+                  AND rq."IdEmpresaContratante" IS NOT NULL
+                ORDER BY rc."IdRQCandidato" DESC
+                LIMIT 1
+            ) RQ_ACTUAL ON TRUE
             LEFT JOIN public."EmpresaContratante" EC
-                ON EC."IdEmpresaContratante" = VL_ACTUAL."IdEmpresaContratante"
+                ON EC."IdEmpresaContratante" = CASE
+                    WHEN rp."IdEstadoProceso" IN (18, 19, 20, 21, 22, 24, 26)
+                    THEN COALESCE(RQ_ACTUAL."IdEmpresaContratante", VL_ACTUAL."IdEmpresaContratante")
+                    ELSE VL_ACTUAL."IdEmpresaContratante"
+                END
             WHERE 1=1
         """
 
@@ -423,6 +447,8 @@ def listar_aspirantes(
                 rp."FechaIngresoHistorica",
                 CL."Nombre",
                 VL_ACTUAL."IdEmpresaContratante",
+                RQ_ACTUAL."IdRQOperaciones",
+                RQ_ACTUAL."IdEmpresaContratante",
                 EC."Codigo",
                 EC."Nombre",
                 EC."Logo"
@@ -1121,9 +1147,32 @@ def obtener_detalle_aspirante_por_ciclos(
         )
     ]
 
+    # Consulta adicional: la empresa de una RQ de personal nuevo no debe
+    # confundirse con la empresa de un ciclo laboral anterior.
+    rq_empresa = db.execute(
+        text("""
+            SELECT rq."IdRQOperaciones", rq."IdEmpresaContratante",
+                   ec."Codigo" AS "CodigoEmpresa",
+                   ec."Nombre" AS "NombreEmpresa"
+            FROM public."RQCandidato" rc
+            JOIN public."RQOperaciones" rq
+              ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            JOIN public."EmpresaContratante" ec
+              ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE rc."IdRegistroPersonal" = :id
+              AND rc."Activo" = TRUE
+              AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+              AND rq."IdEmpresaContratante" IS NOT NULL
+            ORDER BY rc."IdRQCandidato" DESC
+            LIMIT 1;
+        """),
+        {"id": id},
+    ).mappings().first()
+
     return {
         "ok": True,
         "soloConsulta": True,
+        "empresaRequisicionActiva": dict(rq_empresa) if rq_empresa else None,
         "persona": dict(persona),
         "esReintegroActual": bool(
             vinculacion_actual
