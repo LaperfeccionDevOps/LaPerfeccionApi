@@ -39,7 +39,10 @@ router = APIRouter(
 )
 
 ROL_SELECCION = 2
+ROL_CONTRATACION = 3
 require_seleccion_rq = require_roles_ids(ROL_SELECCION)
+# Solo lectura de empresa asociada a una RQ: Seleccion y Contratacion.
+require_consulta_empresa_rq = require_roles_ids(ROL_SELECCION, ROL_CONTRATACION)
 
 TZ_COLOMBIA = timezone(timedelta(hours=-5), name="America/Bogota")
 ESTADO_CONTRATADO = 25
@@ -436,6 +439,12 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 rc."FechaVinculacion",
                 rc."UsuarioVinculacion",
                 rc."Salario",
+                CASE WHEN COALESCE(rc."Activo", true) = true
+                     THEN rq_empresa."IdEmpresaContratante" ELSE NULL END AS "IdEmpresaContratante",
+                CASE WHEN COALESCE(rc."Activo", true) = true
+                     THEN ec_empresa."Codigo" ELSE NULL END AS "CodigoEmpresaContratante",
+                CASE WHEN COALESCE(rc."Activo", true) = true
+                     THEN ec_empresa."Nombre" ELSE NULL END AS "NombreEmpresaContratante",
                 rp."NumeroIdentificacion",
                 NULLIF(TRIM(COALESCE(rp."Nombres", '') || ' ' || COALESCE(rp."Apellidos", '')), '') AS "NombreCompleto",
                 rp."IdEstadoProceso",
@@ -447,6 +456,10 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
                 ore."ObservacionesRechazo",
                 ore."FechaRechazo"
             FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq_empresa
+                ON rq_empresa."IdRQOperaciones" = rc."IdRQOperaciones"
+            LEFT JOIN public."EmpresaContratante" ec_empresa
+                ON ec_empresa."IdEmpresaContratante" = rq_empresa."IdEmpresaContratante"
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rc."IdRegistroPersonal"
             LEFT JOIN public."EstadoProceso" ep
@@ -559,6 +572,9 @@ def _consultar_candidatos(db: Session, id_rq_operaciones: int, fecha_recibido: O
             "FechaVinculacion": row["FechaVinculacion"],
             "UsuarioVinculacion": row["UsuarioVinculacion"],
             "Salario": float(row["Salario"]) if row["Salario"] is not None else None,
+            "IdEmpresaContratante": int(row["IdEmpresaContratante"]) if row["IdEmpresaContratante"] is not None else None,
+            "CodigoEmpresaContratante": row["CodigoEmpresaContratante"],
+            "NombreEmpresaContratante": row["NombreEmpresaContratante"],
             "NumeroIdentificacion": row["NumeroIdentificacion"],
             "NombreCompleto": row["NombreCompleto"],
             "IdEstadoProceso": estado_id,
@@ -898,7 +914,10 @@ def vincular_candidato_rq(
 ):
     row_rq = _validar_rq(db, id_rq_operaciones)
     cantidad_solicitada = int(row_rq["CantidadSolicitada"] or 1)
-    es_personal_nuevo = str(row_rq["TipoRQ"] or "").strip().upper() == "PERSONAL_NUEVO"
+
+    # La empresa se hereda de la RQ, no de una vinculacion laboral ficticia.
+    if row_rq["IdEmpresaContratante"] is None:
+        raise HTTPException(status_code=409, detail="La RQ debe tener empresa contratante antes de asociar candidatos.")
 
     if salario <= 0:
         raise HTTPException(status_code=400, detail="El salario debe ser mayor a cero.")
@@ -949,10 +968,10 @@ def vincular_candidato_rq(
     )
     # PERSONAL_NUEVO: asociar es distinto de entregar a Contratación.
     # No permitir asociar candidatos que ya salieron del flujo de Selección.
-    if es_personal_nuevo and estado_actual_candidato not in {18, 19, 20, 21, 22, 26}:
+    if estado_actual_candidato not in {18, 19, 20, 21, 22, 26}:
         raise HTTPException(
             status_code=409,
-            detail="Para PERSONAL_NUEVO solo se pueden asociar aspirantes en etapas activas de Selección (18, 19, 20, 21, 22 o 26).",
+            detail="Solo se pueden asociar aspirantes en etapas activas de Selección (18, 19, 20, 21, 22 o 26).",
         )
 
     fecha_contratado_candidato = (
@@ -1125,40 +1144,8 @@ def vincular_candidato_rq(
             {"id_rq": id_rq_operaciones, "id_persona": id_registro_personal, "usuario": usuario, "salario": salario},
         )
 
-    # PERSONAL_NUEVO: guardar en RQCandidato NO modifica RegistroPersonal
-    # ni registra una entrega a Contratación. La acción final es independiente.
-    # REEMPLAZO conserva exactamente el comportamiento anterior.
-    if not es_personal_nuevo:
-        # Guardar el candidato seleccionado lo entrega formalmente a Contratación.
-        # Solo registramos historial cuando existe una transición real hacia estado 24.
-        if estado_actual_candidato != 24:
-            db.execute(
-                text(
-                    """
-                    UPDATE public."RegistroPersonal"
-                    SET "IdEstadoProceso" = 24
-                    WHERE "IdRegistroPersonal" = :id_persona;
-                    """
-                ),
-                {"id_persona": id_registro_personal},
-            )
-
-            db.execute(
-                text(
-                    """
-                    INSERT INTO public."HistorialEstadoContratacion"
-                        ("IdRegistroPersonal", "EstadoAnterior", "EstadoNuevo",
-                         "FechaMovimiento", "UsuarioMovimiento")
-                    VALUES
-                        (:id_persona, :estado_anterior, 24, CURRENT_TIMESTAMP, :usuario);
-                    """
-                ),
-                {
-                    "id_persona": id_registro_personal,
-                    "estado_anterior": estado_actual_candidato,
-                    "usuario": usuario,
-                },
-            )
+    # Tanto REEMPLAZO como PERSONAL_NUEVO conservan el estado del candidato
+    # hasta que Selección ejecute la entrega explícita a Contratación.
 
     # Al existir gestión real, la RQ pasa a EN_PROCESO salvo que ya esté cubierta.
     db.execute(
@@ -1181,21 +1168,114 @@ def vincular_candidato_rq(
     row = _validar_rq(db, id_rq_operaciones)
     return {
         "success": True,
-        "message": (
-            "Candidato asociado a la RQ sin cambiar su estado de Selección."
-            if es_personal_nuevo
-            else "Candidato guardado en la RQ y enviado a Contratación correctamente."
-        ),
+        "message": "Candidato asociado a la RQ sin cambiar su estado de Selección.",
         "data": _serializar_rq_seleccion(db, row),
     }
 
 
 # ============================================================
-# PERSONAL_NUEVO - ENTREGA EXPRESA A CONTRATACIÓN
+# EMPRESA DEL CANDIDATO POR SU RQ ACTIVA (SOLO CONSULTA)
+# ============================================================
+
+@router.get("/candidatos/empresas-contratantes")
+def consultar_empresas_candidatos_rq(
+    db: Session = Depends(get_db),
+    current=Depends(require_consulta_empresa_rq),
+):
+    """Consulta agrupada de empresas por RQ activa (solo lectura).
+
+    No inventa empresas ni elige una si hay varias RQ activas.
+    """
+    rows = db.execute(
+        text("""
+            SELECT rc."IdRegistroPersonal", rc."IdRQOperaciones",
+                   rq."IdEmpresaContratante",
+                   rq."IdTipoContrato",
+                   ec."Codigo" AS "CodigoEmpresaContratante",
+                   ec."Nombre" AS "NombreEmpresaContratante"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE COALESCE(rc."Activo", true) = true
+              AND COALESCE(rq."Activo", true) = true;
+        """)
+    ).mappings().all()
+
+    agrupados = {}
+    for row in rows:
+        agrupados.setdefault(str(row["IdRegistroPersonal"]), []).append(row)
+
+    empresas = {}
+    conflictos = []
+    for id_persona, asociaciones in agrupados.items():
+        if len(asociaciones) != 1:
+            conflictos.append(int(id_persona))
+            continue
+        row = asociaciones[0]
+        if row["IdEmpresaContratante"] is None:
+            continue
+        empresas[id_persona] = {
+            "IdRQOperaciones": int(row["IdRQOperaciones"]),
+            "IdEmpresaContratante": int(row["IdEmpresaContratante"]),
+            "IdTipoContrato": int(row["IdTipoContrato"]) if row["IdTipoContrato"] is not None else None,
+            "CodigoEmpresaContratante": row["CodigoEmpresaContratante"],
+            "NombreEmpresaContratante": row["NombreEmpresaContratante"],
+        }
+
+    return {"success": True, "data": empresas, "conflictos": conflictos}
+
+
+@router.get("/candidatos/{id_registro_personal}/empresa-contratante")
+def consultar_empresa_candidato_rq(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_consulta_empresa_rq),
+):
+    """Empresa de la RQ activa, sin crear ni alterar VinculacionLaboral.
+
+    El frontend de Seleccion puede usar este dato al consultar aspirantes.
+    Si no hay RQ activa, la empresa sigue sin asignar.
+    """
+    rows = db.execute(
+        text("""
+            SELECT rc."IdRQOperaciones", rq."IdEmpresaContratante",
+                   ec."Codigo" AS "CodigoEmpresaContratante",
+                   ec."Nombre" AS "NombreEmpresaContratante"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE rc."IdRegistroPersonal" = :id_persona
+              AND COALESCE(rc."Activo", true) = true
+              AND COALESCE(rq."Activo", true) = true
+            ORDER BY rc."FechaVinculacion" DESC, rc."IdRQCandidato" DESC
+            LIMIT 2;
+        """),
+        {"id_persona": id_registro_personal},
+    ).mappings().all()
+
+    if len(rows) > 1:
+        raise HTTPException(status_code=409, detail="El candidato tiene varias RQ activas; revise sus asociaciones.")
+    if not rows:
+        return {"success": True, "data": None}
+    row = rows[0]
+    return {"success": True, "data": {
+        "IdRQOperaciones": int(row["IdRQOperaciones"]),
+        "IdEmpresaContratante": int(row["IdEmpresaContratante"]) if row["IdEmpresaContratante"] is not None else None,
+        "CodigoEmpresaContratante": row["CodigoEmpresaContratante"],
+        "NombreEmpresaContratante": row["NombreEmpresaContratante"],
+    }}
+
+
+# ============================================================
+# REEMPLAZO Y PERSONAL_NUEVO - ENTREGA EXPRESA A CONTRATACIÓN
 # ============================================================
 
 @router.post("/{id_rq_operaciones}/candidatos/{id_registro_personal}/avanzar-contratacion")
-def avanzar_candidato_personal_nuevo_a_contratacion(
+def avanzar_candidato_rq_a_contratacion(
     id_rq_operaciones: int,
     id_registro_personal: int,
     db: Session = Depends(get_db),
@@ -1206,8 +1286,8 @@ def avanzar_candidato_personal_nuevo_a_contratacion(
     No cierra la RQ: la cobertura real continúa dependiendo del estado 25.
     """
     rq = _validar_rq(db, id_rq_operaciones)
-    if str(rq["TipoRQ"] or "").strip().upper() != "PERSONAL_NUEVO":
-        raise HTTPException(status_code=409, detail="Esta acción es exclusiva de PERSONAL_NUEVO.")
+    if str(rq["TipoRQ"] or "").strip().upper() not in {"PERSONAL_NUEVO", "REEMPLAZO"}:
+        raise HTTPException(status_code=409, detail="Tipo de RQ no admitido para esta acción.")
 
     if rq["IdEmpresaContratante"] is None:
         raise HTTPException(status_code=409, detail="La RQ no tiene empresa contratante definida.")

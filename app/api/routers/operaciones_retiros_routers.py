@@ -563,6 +563,58 @@ def _obtener_contexto_retiro_rq(
     return contexto
 
 
+def _empresa_contratante_activa_para_reemplazo(db: Session, id_registro_personal: int) -> dict:
+    """Obtiene la empresa real del ciclo laboral activo; nunca la infiere del cliente."""
+    filas = db.execute(
+        text("""
+            SELECT vl."IdEmpresaContratante", ec."Codigo", ec."Nombre"
+            FROM public."VinculacionLaboral" vl
+            INNER JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+            WHERE vl."IdRegistroPersonal" = :id_registro_personal
+              AND UPPER(TRIM(COALESCE(vl."EstadoVinculacion", ''))) = 'ACTIVO'
+              AND vl."FechaIngreso" IS NOT NULL
+            ORDER BY vl."IdVinculacionLaboral" DESC
+            LIMIT 2
+        """),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().all()
+    if len(filas) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=("No se encontró una única vinculación laboral ACTIVA con empresa "
+                    "contratante para el trabajador. Revisa su vinculación en Contratación."),
+        )
+    return dict(filas[0])
+
+
+def _contrato_original_para_reemplazo(db: Session, id_registro_personal: int) -> int:
+    """Consulta el contrato del ciclo activo; evita mezclar contrataciones anteriores."""
+    vl = db.execute(text("""
+        SELECT "FechaIngreso", "IdTipoContrato"
+        FROM public."VinculacionLaboral"
+        WHERE "IdRegistroPersonal" = :id
+          AND UPPER(TRIM(COALESCE("EstadoVinculacion", ''))) = 'ACTIVO'
+          AND "FechaIngreso" IS NOT NULL
+        ORDER BY "IdVinculacionLaboral" DESC LIMIT 2
+    """), {"id": id_registro_personal}).mappings().all()
+    if len(vl) != 1:
+        raise HTTPException(status_code=409, detail="No existe una única vinculación activa para heredar el contrato.")
+    contrato = vl[0]["IdTipoContrato"]
+    if contrato is None:
+        registros = db.execute(text("""
+            SELECT "IdTipoContrato" FROM public."ContratacionBasica"
+            WHERE "IdRegistroPersonal" = :id AND "FechaIngreso" = :fecha
+              AND "IdTipoContrato" IS NOT NULL
+            ORDER BY "IdContratacionBasica" DESC LIMIT 2
+        """), {"id": id_registro_personal, "fecha": vl[0]["FechaIngreso"]}).mappings().all()
+        if len(registros) != 1:
+            raise HTTPException(status_code=409, detail="No se encontró un contrato único del mismo ciclo laboral en ContratacionBasica.")
+        contrato = registros[0]["IdTipoContrato"]
+    _validar_tipo_contrato_rq_personal_nuevo(db, int(contrato))
+    return int(contrato)
+
+
 def _validar_datos_rq(
     *,
     tipo_notificacion: str,
@@ -824,6 +876,9 @@ def _serializar_rq(row) -> dict:
         "NombreCompleto": row.get("NombreCompleto"),
         "IdCliente": int(row["IdCliente"]),
         "NombreCliente": row.get("NombreCliente"),
+        "IdEmpresaContratante": row.get("IdEmpresaContratante"),
+        "CodigoEmpresaContratante": row.get("CodigoEmpresaContratante"),
+        "NombreEmpresaContratante": row.get("NombreEmpresaContratante"),
         "IdCargo": (
             int(row["IdCargo"])
             if row.get("IdCargo") is not None
@@ -854,6 +909,9 @@ def _serializar_rq(row) -> dict:
         "Ciudad": row["Ciudad"],
         "Turno": row["Turno"],
         "MotivoVacante": row["MotivoVacante"],
+        "IdMotivoVacanteRQ": row.get("IdMotivoVacanteRQ"),
+        "IdTipoContrato": row.get("IdTipoContrato"),
+        "CargoAprobadoPlanta": row.get("CargoAprobadoPlanta"),
         "ObservacionCliente": row["ObservacionCliente"],
         "FechaRegistro": row["FechaRegistro"],
         "EstadoRQ": row["EstadoRQ"],
@@ -1894,6 +1952,61 @@ def listar_clientes_operaciones_retiros(
             }
             for row in rows
         ],
+    }
+
+
+@router.get("/empresa-contratante/trabajador/{id_registro_personal}")
+def consultar_empresa_contratante_trabajador_retiros(
+    id_registro_personal: int,
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Consulta informativa de la empresa del ciclo laboral activo.
+
+    No altera la vinculación, el retiro ni la empresa seleccionada para la RQ.
+    """
+    trabajador = db.execute(
+        text('''
+            SELECT 1 FROM public."RegistroPersonal"
+            WHERE "IdRegistroPersonal" = :id_registro_personal
+            LIMIT 1
+        '''),
+        {"id_registro_personal": id_registro_personal},
+    ).first()
+    if not trabajador:
+        raise HTTPException(status_code=404, detail="Trabajador no encontrado.")
+
+    filas = db.execute(
+        text('''
+            SELECT
+                vl."IdVinculacionLaboral",
+                vl."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresaContratante",
+                ec."Nombre" AS "NombreEmpresaContratante"
+            FROM public."VinculacionLaboral" vl
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+            WHERE vl."IdRegistroPersonal" = :id_registro_personal
+              AND UPPER(TRIM(COALESCE(vl."EstadoVinculacion", ''))) = 'ACTIVO'
+            ORDER BY vl."IdVinculacionLaboral" DESC
+            LIMIT 2
+        '''),
+        {"id_registro_personal": id_registro_personal},
+    ).mappings().all()
+
+    # No se infiere la empresa cuando falta o hay más de un ciclo activo.
+    if len(filas) != 1 or filas[0]["IdEmpresaContratante"] is None or not filas[0]["NombreEmpresaContratante"]:
+        return {"success": True, "data": None}
+
+    fila = filas[0]
+    return {
+        "success": True,
+        "data": {
+            "IdVinculacionLaboral": int(fila["IdVinculacionLaboral"]),
+            "IdEmpresaContratante": int(fila["IdEmpresaContratante"]),
+            "CodigoEmpresaContratante": fila["CodigoEmpresaContratante"],
+            "NombreEmpresaContratante": fila["NombreEmpresaContratante"],
+        },
     }
 
 
@@ -3901,6 +4014,8 @@ def obtener_rq_por_retiro(
                     COALESCE(rp."Apellidos", '')
                 ) AS "NombreCompleto",
                 c."Nombre" AS "NombreCliente",
+                ec."Codigo" AS "CodigoEmpresaContratante",
+                ec."Nombre" AS "NombreEmpresaContratante",
                 acc."IdCargo" AS "IdCargoDerivado",
                 ca."NombreCargo",
                 u."NombreUsuario" AS "NombreLider",
@@ -3916,6 +4031,8 @@ def obtener_rq_por_retiro(
                 ON c."IdCliente" = rq."IdCliente"
             INNER JOIN public."Usuario" u
                 ON u."IdUsuario" = rq."IdUsuarioLider"
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
             LEFT JOIN public."PerfilRQ" prq
                 ON prq."IdPerfilRQ" = rq."IdPerfilRQ"
             LEFT JOIN LATERAL (
@@ -4000,6 +4117,8 @@ async def guardar_rq_operaciones(
     Ciudad: str | None = Form(None),
     Turno: str | None = Form(None),
     MotivoVacante: str | None = Form(None),
+    IdMotivoVacanteRQ: int | None = Form(None),
+    CargoAprobadoPlanta: bool | None = Form(None),
     ObservacionCliente: str | None = Form(None),
     cartaRetiroArchivo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
@@ -4095,10 +4214,33 @@ async def guardar_rq_operaciones(
 
         observacion = _normalizar_texto_opcional(Observacion)
 
+        empresa_reemplazo = None
+        if datos["RequiereReemplazo"]:
+            empresa_reemplazo = _empresa_contratante_activa_para_reemplazo(
+                db, int(contexto["IdRegistroPersonal"])
+            )
+
+        id_tipo_contrato_reemplazo = None
+        motivo_catalogo = None
+        if datos["RequiereReemplazo"]:
+            if CargoAprobadoPlanta is None or IdMotivoVacanteRQ is None:
+                raise HTTPException(status_code=400, detail="Cargo aprobado en planta y motivo de vacante son obligatorios para REEMPLAZO.")
+            motivo_catalogo = _validar_motivo_vacante_rq_personal_nuevo(db, IdMotivoVacanteRQ)
+            id_tipo_contrato_reemplazo = _contrato_original_para_reemplazo(db, int(contexto["IdRegistroPersonal"]))
+            if contexto["IdCargo"] is None or contexto["IdCliente"] is None:
+                raise HTTPException(status_code=409, detail="Faltan cargo o cliente del trabajador saliente para generar el reemplazo.")
+
         parametros_rq = {
+            "id_tipo_contrato": id_tipo_contrato_reemplazo,
+            "id_motivo_vacante_rq": int(IdMotivoVacanteRQ) if motivo_catalogo is not None else None,
+            "cargo_aprobado_planta": CargoAprobadoPlanta if datos["RequiereReemplazo"] else None,
             "id_paz_y_salvo": IdPazYSalvo,
             "id_registro_personal": contexto["IdRegistroPersonal"],
             "id_cliente": contexto["IdCliente"],
+            "id_empresa_contratante": (
+                int(empresa_reemplazo["IdEmpresaContratante"])
+                if empresa_reemplazo is not None else None
+            ),
             "id_usuario_lider": identidad["IdUsuario"],
             "id_perfil_rq": datos["IdPerfilRQ"],
             "tipo_notificacion": datos["TipoNotificacion"],
@@ -4137,6 +4279,9 @@ async def guardar_rq_operaciones(
                         "IdPazYSalvo" = :id_paz_y_salvo,
                         "IdRegistroPersonal" = :id_registro_personal,
                         "IdCliente" = :id_cliente,
+                        "IdEmpresaContratante" = COALESCE(
+                            "IdEmpresaContratante", :id_empresa_contratante
+                        ),
                         "IdUsuarioLider" = :id_usuario_lider,
                         "IdPerfilRQ" = :id_perfil_rq,
                         "TipoNotificacion" = :tipo_notificacion,
@@ -4155,6 +4300,9 @@ async def guardar_rq_operaciones(
                         "TipoRQ" = :tipo_rq,
                         "IdCargo" = :id_cargo,
                         "CantidadSolicitada" = :cantidad_solicitada,
+                        "IdTipoContrato" = :id_tipo_contrato,
+                        "IdMotivoVacanteRQ" = :id_motivo_vacante_rq,
+                        "CargoAprobadoPlanta" = :cargo_aprobado_planta,
                         "UsuarioActualizacion" = :usuario_actualizacion,
                         "FechaActualizacion" = CURRENT_TIMESTAMP
                     WHERE "IdRQOperaciones" = :id_rq_operaciones;
@@ -4173,6 +4321,7 @@ async def guardar_rq_operaciones(
                         "IdPazYSalvo",
                         "IdRegistroPersonal",
                         "IdCliente",
+                        "IdEmpresaContratante",
                         "IdUsuarioLider",
                         "IdPerfilRQ",
                         "TipoNotificacion",
@@ -4189,6 +4338,9 @@ async def guardar_rq_operaciones(
                         "TipoRQ",
                         "IdCargo",
                         "CantidadSolicitada",
+                        "IdTipoContrato",
+                        "IdMotivoVacanteRQ",
+                        "CargoAprobadoPlanta",
                         "EnviadoRRLL",
                         "Activo",
                         "UsuarioCreacion",
@@ -4199,6 +4351,7 @@ async def guardar_rq_operaciones(
                         :id_paz_y_salvo,
                         :id_registro_personal,
                         :id_cliente,
+                        :id_empresa_contratante,
                         :id_usuario_lider,
                         :id_perfil_rq,
                         :tipo_notificacion,
@@ -4215,6 +4368,9 @@ async def guardar_rq_operaciones(
                         :tipo_rq,
                         :id_cargo,
                         :cantidad_solicitada,
+                        :id_tipo_contrato,
+                        :id_motivo_vacante_rq,
+                        :cargo_aprobado_planta,
                         false,
                         true,
                         :usuario_creacion,
@@ -4369,6 +4525,7 @@ async def guardar_rq_operaciones(
                 "NombreCompleto": contexto["NombreCompleto"],
                 "IdCliente": int(contexto["IdCliente"]),
                 "NombreCliente": contexto["NombreCliente"],
+                "IdEmpresaContratante": parametros_rq["id_empresa_contratante"],
                 "IdCargo": (
                     int(contexto["IdCargo"])
                     if contexto["IdCargo"] is not None
