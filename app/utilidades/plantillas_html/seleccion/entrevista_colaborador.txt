@@ -227,7 +227,7 @@
                 <br>
 
                 <span class="bold">
-                    Ha trabajado en ALP?
+                    ¿Ha trabajado en @EMPRESA_NOMBRE?
                 </span>
 
                 @HA_TRABAJADO_EN_ALP
