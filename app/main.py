@@ -135,6 +135,12 @@ from api.routers.salidas_no_conformes_routers import (
     router as salidas_no_conformes_router,
 )
 from api.routers.pqrf_routers import router as pqrf_router
+from api.routers.contabilidad_centros_costo_routers import (
+    router as contabilidad_centros_costo_router,
+)
+from api.routers.contabilidad_asignacion_routers import (
+    router as contabilidad_asignacion_router,
+)
 
 
 app = FastAPI(
@@ -258,6 +264,8 @@ app.include_router(panel_gerencial_rrll_router)
 app.include_router(reintegros_router)
 app.include_router(salidas_no_conformes_router)
 app.include_router(pqrf_router)
+app.include_router(contabilidad_centros_costo_router)
+app.include_router(contabilidad_asignacion_router)
 
 
 # ─────────────────────────────────────────────
