@@ -6,6 +6,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pdfkit
 import base64
+from html import escape
+
+from api.routers.descargar_documentos_routers import (
+    obtener_empresa_contratante,
+    preparar_datos_empresa,
+)
 
 from infrastructure.db.deps import get_db
 from services.experiencia_laboral_validacion_service import ExperienciaLaboralValidacionService
@@ -111,50 +117,95 @@ def generar_consolidado_referencias(
                 "detail": "No hay referencias laborales validadas para este candidato."
             }
 
+        # El endpoint histórico recibe IdRegistroPersonal, no IdVinculacionLaboral.
+        # Se identifica el último ciclo laboral para seleccionar el logo.
+        # Si un candidato tiene varios ciclos, se debe validar que este sea
+        # el ciclo que corresponde al documento solicitado.
+        ciclo = db.execute(text("""
+            SELECT vl."IdVinculacionLaboral"
+            FROM public."VinculacionLaboral" vl
+            WHERE vl."IdRegistroPersonal" = :id_registro_personal
+            ORDER BY vl."IdVinculacionLaboral" DESC
+            LIMIT 1
+        """), {"id_registro_personal": id_registro_personal}).mappings().first()
+
+        if not ciclo:
+            raise HTTPException(
+                status_code=400,
+                detail="El candidato no tiene vinculación laboral para identificar la empresa."
+            )
+
+        empresa = obtener_empresa_contratante(db, ciclo["IdVinculacionLaboral"])
+        datos_empresa = preparar_datos_empresa({}, empresa)
+        logo = datos_empresa.get("LOGO", "")
+        nombre_empresa = escape(str(datos_empresa.get("EMPRESA_NOMBRE") or ""))
+
+        def valor(ref, campo):
+            dato = ref.get(campo)
+            if dato is None:
+                return ""
+            if hasattr(dato, "strftime"):
+                dato = dato.strftime("%Y-%m-%d")
+            return escape(str(dato))
+
+        def fila(etiqueta, contenido):
+            return f'<tr><td class="etiqueta">{etiqueta}</td><td>{contenido}</td></tr>'
+
         bloques_html = ""
         for i, ref in enumerate(referencias, start=1):
+            campos = [
+                ("EMPRESA REFERENCIADA", "Compania"),
+                ("CARGO", "Cargo"),
+                ("FUNCIONES", "Funciones"),
+                ("JEFE INMEDIATO", "JefeInmediato"),
+                ("TELÉFONO JEFE", "TelefonoJefe"),
+                ("TIEMPO LABORADO", "TiempoDuracion"),
+                ("CONCEPTO FINAL", "Concepto"),
+                ("EVALUACIÓN GENERAL DEL DESEMPEÑO", "DesempenoReportado"),
+                ("MOTIVO DEL RETIRO", "MotivoRetiroReal"),
+                ("PERSONA QUE DA LA REFERENCIA", "PersonaQueReferencia"),
+                ("TELÉFONO DE LA REFERENCIA", "Telefono"),
+                ("REFERENCIADO POR", "ReferenciadoPor"),
+                ("EPS", "Eps"),
+                ("FECHA EXPEDICIÓN DOCUMENTO", "FechaExpedicionDocumentoIdentidad"),
+                ("COMENTARIOS DEL REFERENCIADOR", "ComentariosDelReferenciado"),
+            ]
+            filas = "".join(fila(etiqueta, valor(ref, campo)) for etiqueta, campo in campos)
             bloques_html += f"""
-                <div style="margin-bottom: 30px; page-break-inside: avoid;">
-                    <h2 style="font-size: 16px; margin-bottom: 10px;">Referencia laboral {i}</h2>
-                    <p><strong>Empresa:</strong> {ref.get('Compania') or ''}</p>
-                    <p><strong>Cargo:</strong> {ref.get('Cargo') or ''}</p>
-                    <p><strong>Funciones:</strong> {ref.get('Funciones') or ''}</p>
-                    <p><strong>Jefe inmediato:</strong> {ref.get('JefeInmediato') or ''}</p>
-                    <p><strong>Teléfono jefe:</strong> {ref.get('TelefonoJefe') or ''}</p>
-                    <p><strong>Tiempo duración:</strong> {ref.get('TiempoDuracion') or ''}</p>
-                    <p><strong>Concepto:</strong> {ref.get('Concepto') or ''}</p>
-                    <p><strong>Desempeño reportado:</strong> {ref.get('DesempenoReportado') or ''}</p>
-                    <p><strong>Motivo retiro real:</strong> {ref.get('MotivoRetiroReal') or ''}</p>
-                    <p><strong>Persona que referencia:</strong> {ref.get('PersonaQueReferencia') or ''}</p>
-                    <p><strong>Teléfono referencia:</strong> {ref.get('Telefono') or ''}</p>
-                    <p><strong>Referenciado por:</strong> {ref.get('ReferenciadoPor') or ''}</p>
-                    <p><strong>EPS:</strong> {ref.get('Eps') or ''}</p>
-                    <p><strong>Fecha expedición documento:</strong> {ref.get('FechaExpedicionDocumentoIdentidad') or ''}</p>
-                    <p><strong>Comentarios del referenciado:</strong> {ref.get('ComentariosDelReferenciado') or ''}</p>
+                <div class="referencia">
+                    <table class="cabecera-tabla">
+                        <tr>
+                            <th>TIPO DE REFERENCIAS:</th><td>LABORALES</td>
+                            <th>N.º REFERENCIA:</th><td>{i}</td>
+                        </tr>
+                    </table>
+                    <table class="datos-tabla">{filas}</table>
                 </div>
             """
 
         html_content = f"""
-            <html>
+            <!DOCTYPE html>
+            <html lang="es">
                 <head>
                     <meta charset="utf-8">
                     <style>
-                        body {{
-                            font-family: Arial, sans-serif;
-                            font-size: 12px;
-                            margin: 30px;
-                        }}
-                        h1 {{
-                            text-align: center;
-                            margin-bottom: 25px;
-                        }}
-                        p {{
-                            margin: 4px 0;
-                        }}
+                        body {{ font-family: "DejaVu Sans", Arial, sans-serif; font-size: 12px; line-height: 1.5; color: #111; margin: 22px; }}
+                        .logo {{ max-height: 100px; max-width: 220px; height: auto; width: auto; }}
+                        .encabezado {{ height: 120px; }}
+                        h1 {{ font-size: 15px; line-height: 1.4; text-align: center; margin: 8px 0 20px; }}
+                        table {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin-bottom: 10px; }}
+                        th, td {{ border: 1px solid #111; padding: 8px 9px; vertical-align: top; line-height: 1.5; overflow-wrap: break-word; word-wrap: break-word; }}
+                        th {{ font-weight: bold; text-align: left; background: #f1f1f1; }}
+                        .cabecera-tabla th {{ width: 22%; }}
+                        .cabecera-tabla td {{ width: 28%; }}
+                        .etiqueta {{ font-weight: bold; font-size: 11px; letter-spacing: 0.1px; width: 35%; background: #f6f6f6; }}
+                        .referencia {{ margin-bottom: 24px; page-break-inside: avoid; }}
+                        .datos-tabla td {{ white-space: pre-wrap; }}
                     </style>
                 </head>
                 <body>
-                    <h1>Confirmación de referencias laborales</h1>
+                    <div class="encabezado"><img class="logo" src="{logo}" alt="{nombre_empresa}"></div>
+                    <h1>CONFIRMACIÓN REFERENCIAS - F-GTH03 V.03</h1>
                     {bloques_html}
                 </body>
             </html>
@@ -166,6 +217,9 @@ def generar_consolidado_referencias(
         pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
         return {"ok": True, "pdf_base64": pdf_base64}
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         return JSONResponse(
