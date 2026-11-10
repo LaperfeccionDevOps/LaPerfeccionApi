@@ -1611,6 +1611,10 @@ def consultar_eventos_enriquecidos(
             ag."EstadoAgenda",
             ag."ColorAgenda",
             pd."EstadoProceso",
+            vl."IdEmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa",
+            ec."Nombre" AS "NombreEmpresa",
+            ec."Logo" AS "LogoEmpresa",
             ag."UsuarioAgenda",
             ag."FechaCreacion",
             ag."FechaActualizacion",
@@ -1626,6 +1630,12 @@ def consultar_eventos_enriquecidos(
         INNER JOIN public."ProcesoDisciplinario" pd
             ON pd."IdProcesoDisciplinario" =
                ag."IdProcesoDisciplinario"
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" =
+               pd."IdVinculacionLaboral"
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" =
+               vl."IdEmpresaContratante"
         WHERE ag."Activo" = TRUE
         {condicion_sql}
         ORDER BY

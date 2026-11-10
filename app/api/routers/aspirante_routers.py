@@ -165,6 +165,11 @@ def crear_registro_personal(
         )
 
 
+class EmpresaContratanteSeleccion(BaseModel):
+    IdEmpresaContratante: int
+    UsuarioActualizacion: str | None = None
+
+
 class RegistroPersonalUpdate(BaseModel):
     IdFondoPensiones: int | None = None
     IdFondoCesantias: int | None = None
@@ -296,6 +301,15 @@ def listar_aspirantes(
             ) AS "FechaIngreso",
                 CL."Nombre" AS "NombreCliente",
                 CASE
+                    WHEN rp."IdEstadoProceso" IN (18, 19, 20, 21, 22, 24, 26)
+                    THEN COALESCE(RQ_ACTUAL."IdEmpresaContratante", VL_ACTUAL."IdEmpresaContratante")
+                    ELSE VL_ACTUAL."IdEmpresaContratante"
+                END AS "IdEmpresaContratante",
+                RQ_ACTUAL."IdRQOperaciones" AS "IdRQOperacionesAsociada",
+                EC."Codigo" AS "CodigoEmpresa",
+                EC."Nombre" AS "NombreEmpresa",
+                EC."Logo" AS "LogoEmpresa",
+                CASE
                     WHEN rp."IdEstadoProceso" = 25 THEN TRUE
                     WHEN rp."FechaIngresoHistorica" IS NOT NULL THEN TRUE
                     WHEN EXISTS (
@@ -318,6 +332,42 @@ def listar_aspirantes(
             LEFT JOIN "Cargo" CARG ON CARG."IdCargo" = ASCARGO."IdCargo"
             LEFT JOIN "ContratacionBasica" CB ON CB."IdRegistroPersonal" = rp."IdRegistroPersonal"
             LEFT JOIN "Cliente" CL ON CL."IdCliente" = ASCARGO."IdCliente"
+            LEFT JOIN LATERAL (
+                SELECT
+                    vl."IdVinculacionLaboral",
+                    vl."IdEmpresaContratante"
+                FROM public."VinculacionLaboral" vl
+                WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                ORDER BY
+                    CASE
+                        WHEN vl."EstadoVinculacion" IN ('EN_PROCESO', 'ACTIVO') THEN 0
+                        ELSE 1
+                    END,
+                    vl."NumeroCiclo" DESC,
+                    vl."IdVinculacionLaboral" DESC
+                LIMIT 1
+            ) VL_ACTUAL ON TRUE
+            -- Empresa heredada de la RQ PERSONAL_NUEVO activa. No modifica ciclos laborales.
+            LEFT JOIN LATERAL (
+                SELECT
+                    rq."IdRQOperaciones",
+                    rq."IdEmpresaContratante"
+                FROM public."RQCandidato" rc
+                INNER JOIN public."RQOperaciones" rq
+                    ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+                WHERE rc."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND rc."Activo" = TRUE
+                  AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+                  AND rq."IdEmpresaContratante" IS NOT NULL
+                ORDER BY rc."IdRQCandidato" DESC
+                LIMIT 1
+            ) RQ_ACTUAL ON TRUE
+            LEFT JOIN public."EmpresaContratante" EC
+                ON EC."IdEmpresaContratante" = CASE
+                    WHEN rp."IdEstadoProceso" IN (18, 19, 20, 21, 22, 24, 26)
+                    THEN COALESCE(RQ_ACTUAL."IdEmpresaContratante", VL_ACTUAL."IdEmpresaContratante")
+                    ELSE VL_ACTUAL."IdEmpresaContratante"
+                END
             WHERE 1=1
         """
 
@@ -371,8 +421,9 @@ def listar_aspirantes(
                     f"%{termino}%"
                 )
 
+# Mantener SELECT DISTINCT para evitar duplicados por relaciones JOIN.
+        # Conservar el orden estable y la paginación opcional de producción.
         sql += ' ORDER BY rp."FechaCreacion" DESC, rp."IdRegistroPersonal" DESC'
-        # Paginación optativa: las llamadas existentes siguen devolviendo una lista completa.
         if limit is not None:
             sql += " LIMIT :limit OFFSET :offset"
             params["limit"] = limit
@@ -436,6 +487,263 @@ def obtener_registro_personal(
     return referencias
 
 
+@router.post("/aspirantes/{id_registro}/empresa-contratante")
+def asignar_empresa_contratante_aspirante(
+    id_registro: int,
+    payload: EmpresaContratanteSeleccion,
+    db: Session = Depends(get_db),
+    current=Depends(
+        require_roles_ids(
+            ROL_SUPER_ADMIN,
+            ROL_SELECCION,
+            ROL_TALENTO_HUMANO,
+            ROL_DESARROLLADOR,
+        )
+    ),
+):
+    """
+    Asigna la empresa contratante al inicio del flujo de Selección.
+
+    Para aspirantes nuevos sin ciclo laboral:
+    - crea VinculacionLaboral ciclo 1
+    - TipoVinculacion = NUEVO
+    - EstadoVinculacion = EN_PROCESO
+
+    Si ya existe un ciclo abierto:
+    - devuelve la empresa ya asignada;
+    - si el ciclo aún no tiene empresa, la asigna;
+    - no crea ciclos duplicados.
+
+    No modifica RegistroPersonal.
+    """
+    usuario = (
+        (payload.UsuarioActualizacion or "").strip()
+        or str(current.get("email") or current.get("sub") or "seleccion")
+    )
+
+    try:
+        registro = db.execute(
+            text("""
+                SELECT "IdRegistroPersonal"
+                FROM public."RegistroPersonal"
+                WHERE "IdRegistroPersonal" = :id_registro
+                FOR UPDATE;
+            """),
+            {"id_registro": id_registro},
+        ).mappings().first()
+
+        if not registro:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Aspirante no encontrado",
+            )
+
+        empresa = db.execute(
+            text("""
+                SELECT
+                    "IdEmpresaContratante",
+                    "Codigo",
+                    "Nombre",
+                    "Logo"
+                FROM public."EmpresaContratante"
+                WHERE "IdEmpresaContratante" = :id_empresa
+                  AND "Activo" = TRUE
+                LIMIT 1;
+            """),
+            {"id_empresa": payload.IdEmpresaContratante},
+        ).mappings().first()
+
+        if not empresa:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La empresa contratante seleccionada no existe o no está activa.",
+            )
+
+        vinculacion_abierta = db.execute(
+            text("""
+                SELECT
+                    vl."IdVinculacionLaboral",
+                    vl."NumeroCiclo",
+                    vl."TipoVinculacion",
+                    vl."EstadoVinculacion",
+                    vl."IdEmpresaContratante"
+                FROM public."VinculacionLaboral" vl
+                WHERE vl."IdRegistroPersonal" = :id_registro
+                  AND vl."EstadoVinculacion" IN ('EN_PROCESO', 'ACTIVO')
+                ORDER BY
+                    vl."NumeroCiclo" DESC,
+                    vl."IdVinculacionLaboral" DESC
+                LIMIT 1
+                FOR UPDATE;
+            """),
+            {"id_registro": id_registro},
+        ).mappings().first()
+
+        creada = False
+        empresa_asignada = False
+
+        if vinculacion_abierta:
+            id_empresa_actual = vinculacion_abierta.get(
+                "IdEmpresaContratante"
+            )
+
+            if (
+                id_empresa_actual is not None
+                and int(id_empresa_actual)
+                != int(payload.IdEmpresaContratante)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "El ciclo laboral actual ya tiene una empresa "
+                        "contratante diferente asignada."
+                    ),
+                )
+
+            if id_empresa_actual is None:
+                db.execute(
+                    text("""
+                        UPDATE public."VinculacionLaboral"
+                        SET "IdEmpresaContratante" = :id_empresa,
+                            "FechaActualizacion" = NOW(),
+                            "UsuarioActualizacion" = :usuario
+                        WHERE "IdVinculacionLaboral" = :id_vinculacion;
+                    """),
+                    {
+                        "id_empresa": payload.IdEmpresaContratante,
+                        "usuario": usuario,
+                        "id_vinculacion": vinculacion_abierta[
+                            "IdVinculacionLaboral"
+                        ],
+                    },
+                )
+                empresa_asignada = True
+
+            id_vinculacion = int(
+                vinculacion_abierta["IdVinculacionLaboral"]
+            )
+            numero_ciclo = int(vinculacion_abierta["NumeroCiclo"])
+            tipo_vinculacion = vinculacion_abierta["TipoVinculacion"]
+            estado_vinculacion = vinculacion_abierta[
+                "EstadoVinculacion"
+            ]
+
+        else:
+            ultimo_ciclo = db.execute(
+                text("""
+                    SELECT COALESCE(MAX("NumeroCiclo"), 0) AS "UltimoCiclo"
+                    FROM public."VinculacionLaboral"
+                    WHERE "IdRegistroPersonal" = :id_registro;
+                """),
+                {"id_registro": id_registro},
+            ).mappings().first()
+
+            numero_ciclo = int(
+                (ultimo_ciclo or {}).get("UltimoCiclo") or 0
+            ) + 1
+
+            # Este endpoint inicia el ciclo NUEVO de un aspirante que
+            # todavía no tiene ciclo abierto. Los reintegros conservan
+            # su flujo específico y no pasan por este endpoint.
+            nueva_vinculacion = db.execute(
+                text("""
+                    INSERT INTO public."VinculacionLaboral"
+                    (
+                        "IdRegistroPersonal",
+                        "NumeroCiclo",
+                        "TipoVinculacion",
+                        "EstadoVinculacion",
+                        "FechaInicioProceso",
+                        "FechaIngreso",
+                        "FechaRetiro",
+                        "IdCargo",
+                        "IdCliente",
+                        "Salario",
+                        "IdTipoContrato",
+                        "FechaCreacion",
+                        "FechaActualizacion",
+                        "UsuarioActualizacion",
+                        "IdEmpresaContratante"
+                    )
+                    VALUES
+                    (
+                        :id_registro,
+                        :numero_ciclo,
+                        'NUEVO',
+                        'EN_PROCESO',
+                        NOW(),
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL,
+                        NOW(),
+                        NOW(),
+                        :usuario,
+                        :id_empresa
+                    )
+                    RETURNING
+                        "IdVinculacionLaboral",
+                        "NumeroCiclo",
+                        "TipoVinculacion",
+                        "EstadoVinculacion";
+                """),
+                {
+                    "id_registro": id_registro,
+                    "numero_ciclo": numero_ciclo,
+                    "usuario": usuario,
+                    "id_empresa": payload.IdEmpresaContratante,
+                },
+            ).mappings().first()
+
+            if not nueva_vinculacion:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="No fue posible crear el ciclo laboral inicial.",
+                )
+
+            id_vinculacion = int(
+                nueva_vinculacion["IdVinculacionLaboral"]
+            )
+            numero_ciclo = int(nueva_vinculacion["NumeroCiclo"])
+            tipo_vinculacion = nueva_vinculacion["TipoVinculacion"]
+            estado_vinculacion = nueva_vinculacion[
+                "EstadoVinculacion"
+            ]
+            creada = True
+            empresa_asignada = True
+
+        db.commit()
+
+        return {
+            "ok": True,
+            "IdRegistroPersonal": id_registro,
+            "IdVinculacionLaboral": id_vinculacion,
+            "NumeroCiclo": numero_ciclo,
+            "TipoVinculacion": tipo_vinculacion,
+            "EstadoVinculacion": estado_vinculacion,
+            "IdEmpresaContratante": int(
+                empresa["IdEmpresaContratante"]
+            ),
+            "CodigoEmpresa": empresa["Codigo"],
+            "NombreEmpresa": empresa["Nombre"],
+            "LogoEmpresa": empresa["Logo"],
+            "VinculacionCreada": creada,
+            "EmpresaAsignada": empresa_asignada,
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al asignar empresa contratante: {e!s}",
+        )
+
+
 @router.get("/aspirantes/{id_registro}", response_model=RegistroPersonalOut)
 def obtener_aspirante(
     id_registro: int,
@@ -461,12 +769,13 @@ def actualizar_estado_aspirante(
     """
     Actualiza el estado general del aspirante.
 
-    Cuando el aspirante entra por primera vez al estado 24
-    (Avanza a Contratación), registra el movimiento en
+    Cuando el aspirante entra realmente al estado 24
+    (Avanza a Contratación) o al estado 27
+    (Desiste del Proceso), registra el movimiento en
     HistorialEstadoContratacion dentro de la misma transacción.
 
     No altera los demás cambios de estado ni registra duplicados
-    cuando el registro ya se encuentra en estado 24.
+    cuando el registro ya se encuentra en el mismo estado.
     """
 
     usuario_movimiento = (usuario or "sistema").strip() or "sistema"
@@ -584,10 +893,13 @@ def actualizar_estado_aspirante(
 
         historial_registrado = False
 
-        # Registra únicamente el ingreso real al estado 24.
-        # Si ya estaba en 24 y vuelven a guardar el mismo estado,
+        # Registra únicamente transiciones reales hacia:
+        # 24 = Avanza a Contratación
+        # 27 = Desiste del Proceso
+        #
+        # Si ya se encuentra en el mismo estado y vuelven a guardar,
         # no genera una fila duplicada.
-        if nuevo_estado == 24 and estado_anterior != 24:
+        if nuevo_estado in (24, 27) and estado_anterior != nuevo_estado:
             db.execute(
                 text("""
                     INSERT INTO public."HistorialEstadoContratacion"
@@ -737,8 +1049,14 @@ def obtener_detalle_aspirante_por_ciclos(
                 vl."IdTipoContrato",
                 vl."FechaCreacion",
                 vl."FechaActualizacion",
-                vl."UsuarioActualizacion"
+                vl."UsuarioActualizacion",
+                vl."IdEmpresaContratante",
+                ec."Codigo" AS "CodigoEmpresa",
+                ec."Nombre" AS "NombreEmpresa",
+                ec."Logo" AS "LogoEmpresa"
             FROM public."VinculacionLaboral" vl
+            LEFT JOIN public."EmpresaContratante" ec
+                ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
             WHERE vl."IdRegistroPersonal" = :id
             ORDER BY
                 vl."NumeroCiclo" DESC,
@@ -876,9 +1194,32 @@ def obtener_detalle_aspirante_por_ciclos(
         )
     ]
 
+    # Consulta adicional: la empresa de una RQ de personal nuevo no debe
+    # confundirse con la empresa de un ciclo laboral anterior.
+    rq_empresa = db.execute(
+        text("""
+            SELECT rq."IdRQOperaciones", rq."IdEmpresaContratante",
+                   ec."Codigo" AS "CodigoEmpresa",
+                   ec."Nombre" AS "NombreEmpresa"
+            FROM public."RQCandidato" rc
+            JOIN public."RQOperaciones" rq
+              ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            JOIN public."EmpresaContratante" ec
+              ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE rc."IdRegistroPersonal" = :id
+              AND rc."Activo" = TRUE
+              AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+              AND rq."IdEmpresaContratante" IS NOT NULL
+            ORDER BY rc."IdRQCandidato" DESC
+            LIMIT 1;
+        """),
+        {"id": id},
+    ).mappings().first()
+
     return {
         "ok": True,
         "soloConsulta": True,
+        "empresaRequisicionActiva": dict(rq_empresa) if rq_empresa else None,
         "persona": dict(persona),
         "esReintegroActual": bool(
             vinculacion_actual

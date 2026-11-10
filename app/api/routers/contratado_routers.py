@@ -156,65 +156,119 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             )
 
         # ------------------------------------------------------------
-        # 3.1. Cerrar el ciclo de REINTEGRO cuando la contratación
+        # 3.1. Consolidar el ciclo laboral actual cuando la contratación
         #      llega al estado CONTRATADO.
         #
-        #      Este ajuste es intencionalmente limitado:
+        #      Aplica tanto para:
+        #      - NUEVO / EN_PROCESO
+        #      - REINTEGRO / EN_PROCESO
+        #
+        #      Reglas de seguridad:
         #      - solo aplica al trabajador actual;
-        #      - solo aplica a TipoVinculacion = REINTEGRO;
-        #      - solo aplica a EstadoVinculacion = EN_PROCESO;
-        #      - solo toma el ciclo abierto más reciente;
+        #      - solo toma el ciclo EN_PROCESO más reciente;
         #      - no modifica ciclos históricos;
-        #      - no modifica contrataciones normales;
+        #      - no modifica IdEmpresaContratante;
+        #      - conserva NumeroCiclo y TipoVinculacion;
+        #      - toma FechaIngreso e IdTipoContrato de ContratacionBasica;
+        #      - toma IdCargo, IdCliente y Salario de la asignación actual;
         #      - queda dentro de la misma transacción del botón C.
         # ------------------------------------------------------------
-        reintegro_activado = db.execute(
+        ciclo_activado = db.execute(
             text("""
-                UPDATE public."VinculacionLaboral"
-                SET
-                    "EstadoVinculacion" = 'ACTIVO',
-                    "FechaActualizacion" = NOW(),
-                    "UsuarioActualizacion" = 'contratacion'
-                WHERE "IdVinculacionLaboral" = (
+                WITH ciclo_actual AS (
                     SELECT vl."IdVinculacionLaboral"
                     FROM public."VinculacionLaboral" vl
                     WHERE vl."IdRegistroPersonal" = :id_registro
-                      AND vl."TipoVinculacion" = 'REINTEGRO'
+                      AND vl."TipoVinculacion" IN ('NUEVO', 'REINTEGRO')
                       AND vl."EstadoVinculacion" = 'EN_PROCESO'
                     ORDER BY
                         vl."NumeroCiclo" DESC,
                         vl."IdVinculacionLaboral" DESC
                     LIMIT 1
+                    FOR UPDATE
+                ),
+                contratacion_actual AS (
+                    SELECT
+                        cb."FechaIngreso",
+                        cb."IdTipoContrato"
+                    FROM public."ContratacionBasica" cb
+                    WHERE cb."IdRegistroPersonal" = :id_registro
+                    ORDER BY cb."IdContratacionBasica" DESC
+                    LIMIT 1
+                ),
+                asignacion_actual AS (
+                    SELECT
+                        acc."IdCargo",
+                        acc."IdCliente",
+                        acc."Salario"
+                    FROM public."AsignacionCargoCliente" acc
+                    WHERE acc."IdRegistroPersonal" = :id_registro
+                    ORDER BY acc."IdAsignacionCargoCliente" DESC
+                    LIMIT 1
                 )
+                UPDATE public."VinculacionLaboral" vl
+                SET
+                    "FechaIngreso" = COALESCE(
+                        ca."FechaIngreso",
+                        vl."FechaIngreso"
+                    ),
+                    "IdCargo" = COALESCE(
+                        aa."IdCargo",
+                        vl."IdCargo"
+                    ),
+                    "IdCliente" = COALESCE(
+                        aa."IdCliente",
+                        vl."IdCliente"
+                    ),
+                    "Salario" = COALESCE(
+                        aa."Salario",
+                        vl."Salario"
+                    ),
+                    "IdTipoContrato" = COALESCE(
+                        ca."IdTipoContrato",
+                        vl."IdTipoContrato"
+                    ),
+                    "EstadoVinculacion" = 'ACTIVO',
+                    "FechaActualizacion" = NOW(),
+                    "UsuarioActualizacion" = 'contratacion'
+                FROM ciclo_actual cc
+                LEFT JOIN contratacion_actual ca ON TRUE
+                LEFT JOIN asignacion_actual aa ON TRUE
+                WHERE vl."IdVinculacionLaboral" = cc."IdVinculacionLaboral"
                 RETURNING
-                    "IdVinculacionLaboral",
-                    "IdRegistroPersonal",
-                    "NumeroCiclo",
-                    "TipoVinculacion",
-                    "EstadoVinculacion",
-                    "FechaIngreso",
-                    "FechaRetiro",
-                    "FechaActualizacion",
-                    "UsuarioActualizacion";
+                    vl."IdVinculacionLaboral",
+                    vl."IdRegistroPersonal",
+                    vl."NumeroCiclo",
+                    vl."TipoVinculacion",
+                    vl."EstadoVinculacion",
+                    vl."FechaIngreso",
+                    vl."FechaRetiro",
+                    vl."IdCargo",
+                    vl."IdCliente",
+                    vl."Salario",
+                    vl."IdTipoContrato",
+                    vl."IdEmpresaContratante",
+                    vl."FechaActualizacion",
+                    vl."UsuarioActualizacion";
             """),
             {
                 "id_registro": payload.IdRegistroPersonal,
             },
         ).mappings().first()
 
-        if reintegro_activado:
+        if ciclo_activado:
             logger.info(
-                "Ciclo de reintegro activado al contratar: "
-                f"{dict(reintegro_activado)}"
+                "Ciclo laboral activado al contratar: "
+                f"{dict(ciclo_activado)}"
             )
         else:
             logger.info(
-                "No existe ciclo REINTEGRO / EN_PROCESO para activar. "
-                "Se conserva el flujo normal de contratación."
+                "No existe ciclo NUEVO/REINTEGRO EN_PROCESO para activar. "
+                "Se conserva compatibilidad con registros históricos."
             )
 
         # UPDATE de RegistroPersonal, INSERT del historial y, cuando aplica,
-        # activación del ciclo de reintegro quedan confirmados juntos
+        # consolidación/activación del ciclo laboral quedan confirmados juntos
         # en la misma transacción.
         db.commit()
         logger.info("Commit BD exitoso")

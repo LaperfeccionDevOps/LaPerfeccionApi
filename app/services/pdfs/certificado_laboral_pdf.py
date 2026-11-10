@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
 LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA_NIT.png"
+LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
@@ -204,9 +205,45 @@ LOGO_EMPRESA_LIMPIO = limpiar_fondo_imagen(
 FIRMA_LIMPIA = FIRMA
 
 
+def seleccionar_logo_empresa(datos):
+    """Selecciona el logo únicamente de la empresa confirmada del retiro."""
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    id_empresa = str(datos.get("IdEmpresaContratante") or "").strip()
+    if not datos.get("IdVinculacionLaboral") or not id_empresa:
+        raise ValueError("El retiro no tiene ciclo laboral y empresa contratante confirmados.")
+    empresas = {"ALP": ("1", LOGO_EMPRESA_LIMPIO), "MI": ("2", LOGO_MANTENER)}
+    if codigo not in empresas or id_empresa != empresas[codigo][0]:
+        raise ValueError("La empresa contratante no coincide con la vinculación laboral del retiro.")
+    logo = empresas[codigo][1]
+    if not logo.is_file():
+        raise FileNotFoundError(f"No se encontró el logotipo autorizado para {codigo}: {logo}")
+    return logo
+
+
+
+def validar_empresa_certificado(datos):
+    """Evita emitir un certificado con la papelería ALP para otra empresa.
+
+    La identidad de la empresa debe proceder del ciclo laboral asociado
+    al retiro, no del registro personal ni de una vinculación posterior.
+    """
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    if not datos.get("IdVinculacionLaboral") or not datos.get("IdEmpresaContratante"):
+        raise ValueError(
+            "El retiro no tiene un ciclo laboral y una empresa contratante confirmados. "
+            "No se puede emitir el certificado laboral."
+        )
+    if codigo not in ("ALP", "MI"):
+        raise ValueError("Empresa contratante no reconocida para este documento.")
+    # Verificar identidad, correspondencia ID/código y disponibilidad del logo.
+    seleccionar_logo_empresa(datos)
+
+
 class CertificadoLaboralPDF:
     def __init__(self, datos):
+        validar_empresa_certificado(datos)
         self.datos = datos
+        self.logo_empresa = seleccionar_logo_empresa(datos)
         self.width, self.height = letter
         self.fecha = datetime.now()
 
@@ -246,9 +283,9 @@ class CertificadoLaboralPDF:
         return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
 
     def encabezado(self):
-        if LOGO_EMPRESA_LIMPIO.exists():
+        if self.logo_empresa.exists():
             self.pdf.drawImage(
-                ImageReader(str(LOGO_EMPRESA_LIMPIO)),
+                ImageReader(str(self.logo_empresa)),
                 45,
                 self.height - 95,
                 width=160,
@@ -350,11 +387,24 @@ class CertificadoLaboralPDF:
             salario,
         )
 
-        texto_info = (
-            "Para mayor información de ser necesario, se pueden comunicar al PBX "
-            "4204893 EXT 1046, ó al numero celular 3176456953, ó al correo "
-            "electronico contratacion@aseoslaperfeccion.com ."
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
+
+        if codigo == "ALP":
+            texto_info = (
+                "Para mayor información de ser necesario, se pueden comunicar al PBX "
+                "4204893 EXT 1046, ó al numero celular 3176456953, ó al correo "
+                "electronico contratacion@aseoslaperfeccion.com ."
+            )
+        elif codigo == "MI":
+            texto_info = (
+                "Para mayor información de ser necesario, se pueden comunicar al número "
+                "+57 318 430 7338, ó al correo electronico comercial@manteneringenieria.com ."
+            )
+        else:
+            raise ValueError(
+                f"Empresa contratante no reconocida para la información de contacto: "
+                f"{codigo or 'SIN CÓDIGO'}"
+            )
 
         self.parrafo_justificado(
             texto_info,
@@ -405,30 +455,78 @@ class CertificadoLaboralPDF:
         )
 
     def pie(self):
-        self.pdf.setFont("Helvetica", 5.6)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            72,
-            "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            63,
-            "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
 
-        self.pdf.line(40, 55, self.width - 40, 55)
+        if codigo == "ALP":
+            # Pie institucional de Aseos La Perfección.
+            self.pdf.setFont("Helvetica", 5.4)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                58,
+                "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                50,
+                "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
+            )
 
-        self.pdf.setFont("Helvetica", 6.5)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            40,
-            "Calle 4 Bis No. 53C-50 • PBX: 420 48 93 - 261 32 74 - 261 46 25 • Bogotá, D.C. - Colombia",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            27,
-            "www.aseoslaperfeccion.com        comercial@aseoslaperfeccion.com",
+            self.pdf.line(55, 44, self.width - 55, 44)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                32,
+                "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                21,
+                "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                11,
+                "www.aseoslaperfeccion.com",
+            )
+            return
+
+        if codigo == "MI":
+            # Pie institucional oficial de Mantener Ingeniería.
+            self.pdf.setFont("Helvetica", 5.2)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                61,
+                "Soluciones integrales para el sector residencial, comercial e institucional, anticipándose a las necesidades de sus clientes con innovación, gestión eficiente y tecnología de vanguardia.",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                53,
+                "Contamos con un equipo calificado y un firme compromiso con la calidad, el medio ambiente y el desarrollo sostenible.",
+            )
+
+            self.pdf.line(55, 46, self.width - 55, 46)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                34,
+                "Calle 25 # 32-22 de Bogotá D.C. - Colombia - +57 318 430 7338",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                23,
+                "comercial@manteneringenieria.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                12,
+                "www.manteneringenieria.com",
+            )
+            return
+
+        raise ValueError(
+            f"Empresa contratante no reconocida para el pie de página: {codigo or 'SIN CÓDIGO'}"
         )
 
     def generar(self):
