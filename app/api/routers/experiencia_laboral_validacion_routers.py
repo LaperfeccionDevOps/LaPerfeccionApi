@@ -10,6 +10,7 @@ from html import escape
 
 from api.routers.descargar_documentos_routers import (
     obtener_empresa_contratante,
+    obtener_empresa_contratante_desde_rq,
     preparar_datos_empresa,
 )
 
@@ -129,13 +130,14 @@ def generar_consolidado_referencias(
             LIMIT 1
         """), {"id_registro_personal": id_registro_personal}).mappings().first()
 
-        if not ciclo:
-            raise HTTPException(
-                status_code=400,
-                detail="El candidato no tiene vinculación laboral para identificar la empresa."
-            )
-
-        empresa = obtener_empresa_contratante(db, ciclo["IdVinculacionLaboral"])
+        if ciclo:
+            # Mantiene la ruta existente de quienes ya tienen un ciclo laboral.
+            empresa = obtener_empresa_contratante(db, ciclo["IdVinculacionLaboral"])
+        else:
+            # Aspirantes nuevos: la empresa se consulta en la RQ activa,
+            # sin crear una vinculación ni confiar en datos del frontend.
+            # El servicio existente valida que haya una única RQ activa.
+            empresa = obtener_empresa_contratante_desde_rq(db, id_registro_personal)
         datos_empresa = preparar_datos_empresa({}, empresa)
         logo = datos_empresa.get("LOGO", "")
         nombre_empresa = escape(str(datos_empresa.get("EMPRESA_NOMBRE") or ""))
@@ -171,8 +173,13 @@ def generar_consolidado_referencias(
                 ("COMENTARIOS DEL REFERENCIADOR", "ComentariosDelReferenciado"),
             ]
             filas = "".join(fila(etiqueta, valor(ref, campo)) for etiqueta, campo in campos)
+            # Cada referencia inicia en una hoja nueva, con su propio logo y título.
+            # Sin ruptura antes de la primera para evitar una página vacía.
+            salto_pagina = "always" if i > 1 else "auto"
             bloques_html += f"""
-                <div class="referencia">
+                <div class="referencia" style="page-break-before: {salto_pagina};">
+                    <div class="encabezado"><img class="logo" src="{logo}" alt="{nombre_empresa}"></div>
+                    <h1>CONFIRMACIÓN REFERENCIAS - F-GTH03 V.03</h1>
                     <table class="cabecera-tabla">
                         <tr>
                             <th>TIPO DE REFERENCIAS:</th><td>LABORALES</td>
@@ -204,8 +211,6 @@ def generar_consolidado_referencias(
                     </style>
                 </head>
                 <body>
-                    <div class="encabezado"><img class="logo" src="{logo}" alt="{nombre_empresa}"></div>
-                    <h1>CONFIRMACIÓN REFERENCIAS - F-GTH03 V.03</h1>
                     {bloques_html}
                 </body>
             </html>
