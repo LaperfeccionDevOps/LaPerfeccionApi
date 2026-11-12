@@ -291,6 +291,7 @@ def listar_responsables(
     ]
 # Fase 2: registro de PQRF e historial en una sola transacción.
 class CrearPQRF(BaseModel):
+    fecha_pqrf: date
     id_tipo_pqrf: int = Field(gt=0)
     correo_remitente: str = Field(min_length=3, max_length=180)
     correo_respuesta_cliente: str = Field(min_length=3, max_length=180)
@@ -300,6 +301,13 @@ class CrearPQRF(BaseModel):
     id_proceso_pqrf: int = Field(gt=0)
     id_correo_pqrf: int = Field(gt=0)
     id_usuario_responsable: UUID | None = None
+
+    @field_validator('fecha_pqrf')
+    @classmethod
+    def validar_fecha_novedad(cls, valor: date) -> date:
+        if valor > datetime.now(timezone(timedelta(hours=-5))).date():
+            raise ValueError('La fecha de la novedad no puede ser futura.')
+        return valor
 
     @field_validator('correo_remitente', 'correo_respuesta_cliente', 'nombre_remitente', 'descripcion_pqrf')
     @classmethod
@@ -447,12 +455,13 @@ def registrar_pqrf(
             INSERT INTO public."PQRF" (
                 "IdTipoPQRF", "CorreoRemitente", "CorreoRespuestaCliente", "NombreRemitente",
                 "IdCliente", "DescripcionPQRF", "IdProcesoPQRF",
-                "IdCorreoPQRF", "IdUsuarioRegistro", "IdUsuarioResponsable", "Estado"
+                "IdCorreoPQRF", "IdUsuarioRegistro", "IdUsuarioResponsable", "Estado", "FechaPQRF"
             ) VALUES (
                 :tipo, :correo, :correo_respuesta, :nombre, :cliente, :descripcion,
-                :proceso, :destinatario, :registrador, :responsable, 'ABIERTA'
+                :proceso, :destinatario, :registrador, :responsable, 'ABIERTA', :fecha_pqrf
             ) RETURNING "IdPQRF"
         '''), {
+            'fecha_pqrf': datos.fecha_pqrf,
             'tipo': datos.id_tipo_pqrf,
             'correo': datos.correo_remitente,
             'correo_respuesta': datos.correo_respuesta_cliente,
@@ -1457,6 +1466,9 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."FechaCreacion" AS fecha_creacion, p."FechaActualizacion" AS fecha_actualizacion,
  (SELECT MIN(g."FechaGestion") FROM public."GestionPQRF" g
   WHERE g."IdPQRF" = p."IdPQRF") AS fecha_primera_respuesta,
+ (SELECT MIN(h."FechaMovimiento") FROM public."HistorialPQRF" h
+  WHERE h."IdPQRF" = p."IdPQRF" AND h."TipoMovimiento" = 'CIERRE'
+    AND h."EstadoNuevo" = 'CERRADA') AS fecha_cierre,
  p."Estado" AS estado, p."Activo" AS activo, p."NombreRemitente" AS nombre_remitente,
  p."CorreoRemitente" AS correo_remitente,
         p."CorreoRespuestaCliente" AS correo_respuesta_cliente, p."DescripcionPQRF" AS descripcion_pqrf,
@@ -1470,10 +1482,15 @@ _PQRF_GENERAL_SELECT = '''p."IdPQRF" AS id, p."FechaPQRF" AS fecha_pqrf,
  p."IdUsuarioResponsable" AS id_usuario_responsable'''
 
 
-def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=False):
+def _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=False, relacion=""):
     parts, params = [], {}
     if len(busqueda) > 150 or (fecha_desde and fecha_hasta and fecha_desde > fecha_hasta):
         raise HTTPException(status_code=422, detail='Filtros inválidos.')
+    if relacion not in ('', 'INTERNA', 'EXTERNA'):
+        raise HTTPException(status_code=422, detail='Relación inválida.')
+    if relacion:
+        parts.append('p."OrigenPQRF" = :relacion')
+        params['relacion'] = relacion
     if busqueda.strip():
         parts.append('''(CAST(p."IdPQRF" AS TEXT) ILIKE :q OR
           p."NombreRemitente" ILIKE :q OR COALESCE(c."Nombre", p."NombreClienteExterno", '') ILIKE :q OR
@@ -1511,7 +1528,7 @@ def pqrf_general(
     busqueda: str = '', id_proceso: int | None = None,
     id_tipo: int | None = None, id_cliente: int | None = None,
     fecha_desde: date | None = None, fecha_hasta: date | None = None,
-    estado: str = '', pagina: int = 1, limite: int = 15,
+    estado: str = '', relacion: str = '', pagina: int = 1, limite: int = 15,
     db: Session = Depends(get_db), current: dict = Depends(get_current_user),
 ):
     _pqrf_admin(db, current)
@@ -1519,7 +1536,7 @@ def pqrf_general(
         raise HTTPException(status_code=422, detail='Estado o paginación inválidos.')
     # La bandeja permite consultar inhabilitadas, sin mezclarlas con estados de gestión.
     # La vista general ya exige autorización mediante _pqrf_admin.
-    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=True)
+    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, incluir_inactivas=True, relacion=relacion)
     if estado == 'INHABILITADAS':
         _pqrf_superadmin(db, current)
         where = (where + ' AND ' if where else '') + 'p."Activo" = FALSE'
@@ -1540,11 +1557,11 @@ def pqrf_general(
 def pqrf_general_indicadores(
     busqueda: str = '', id_proceso: int | None = None,
     id_tipo: int | None = None, id_cliente: int | None = None,
-    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None, relacion: str = '',
     db: Session = Depends(get_db), current: dict = Depends(get_current_user),
 ):
     _pqrf_admin(db, current)
-    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta)
+    where, params = _pqrf_general_filters(busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta, relacion=relacion)
     base = _PQRF_GENERAL_FROM + ' WHERE ' + where
     def grouped(column, label, limit=''):
         sql = 'SELECT ' + column + ' AS nombre, COUNT(*) AS total ' + base + ' GROUP BY ' + column + ' ORDER BY total DESC ' + limit
@@ -1566,7 +1583,7 @@ def pqrf_general_indicadores(
             for r in tiempos if r['fecha_primera_respuesta'] is not None]
     where_todas, params_todas = _pqrf_general_filters(
         busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta,
-        incluir_inactivas=True,
+        incluir_inactivas=True, relacion=relacion,
     )
     es_superadmin_indicadores = db.execute(text('SELECT 1 FROM public."UsuarioRoles" WHERE "IdUsuario" = :u AND "IdRol" = :r LIMIT 1'), {'u': _usuario_actual_pqrf(current), 'r': ROL_SUPERADMIN_PQRF}).scalar_one_or_none() is not None
     total_inhabilitadas = db.execute(text(
