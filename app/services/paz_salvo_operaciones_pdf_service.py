@@ -60,8 +60,9 @@ RUTA_LOGO_CERTIFICACIONES = (
     / "LOGO_CERTIFICACIONES.jpeg"
 )
 
-# Importante:
-# El Paz y Salvo NO utiliza logo de Mantener Ingeniería.
+# El logo de Mantener Ingeniería se toma del catálogo EmpresaContratante,
+# asociado al ciclo laboral exacto del retiro. ALP conserva sus logos oficiales.
+# BASE_DIR ya apunta a la raíz donde funcionan los logos actuales de ALP.
 
 CODIGO_DOCUMENTO = "F-TH-019"
 VERSION_DOCUMENTO = "08"
@@ -343,6 +344,10 @@ def _obtener_datos_paz_salvo(
             ) AS "NombreCompleto",
 
             rl."IdCliente",
+            rl."IdVinculacionLaboral",
+            ec."Codigo" AS "CodigoEmpresaContratante",
+            ec."Nombre" AS "NombreEmpresaContratante",
+            ec."Logo" AS "LogoEmpresaContratante",
             rl."IdMotivoRetiro",
             rl."FechaProceso",
             rl."FechaRetiro",
@@ -391,6 +396,13 @@ def _obtener_datos_paz_salvo(
         LEFT JOIN public."RetiroLaboral" rl
             ON rl."IdRetiroLaboral"
             = pso."IdRetiroLaboral"
+
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+           AND vl."IdRegistroPersonal" = pso."IdRegistroPersonal"
+
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
 
         LEFT JOIN public."Cliente" c
             ON c."IdCliente"
@@ -776,6 +788,84 @@ def _estilo_tabla(
     return TableStyle(instrucciones)
 
 
+def _resolver_logo_mantener_ingenieria(ruta_catalogo: Any) -> Path:
+    """Resuelve el logo oficial de MI sin usar rutas enviadas por el frontend.
+
+    EmpresaContratante.Logo guarda una ruta relativa a la raíz del backend.
+    Se utiliza la misma raíz BASE_DIR de los logos ALP existentes.
+    Nunca se permite salir de esa carpeta.
+    """
+    ruta_texto = _texto(ruta_catalogo).replace("\\", "/")
+    if not ruta_texto:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Mantener Ingeniería no tiene logo configurado en "
+                "EmpresaContratante. No se generará un PDF con logo de ALP."
+            ),
+        )
+
+    relativa = Path(ruta_texto)
+    if relativa.is_absolute() or ":" in ruta_texto or ".." in relativa.parts:
+        raise HTTPException(
+            status_code=409,
+            detail="La ruta del logo de Mantener Ingeniería no es válida.",
+        )
+
+    # Algunas instalaciones guardan 'app/assets/...'; app es la raíz.
+    if relativa.parts and relativa.parts[0].lower() == "app":
+        relativa = Path(*relativa.parts[1:])
+
+    ruta = (BASE_DIR / relativa).resolve()
+    try:
+        ruta.relative_to(BASE_DIR.resolve())
+    except ValueError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="La ruta del logo de Mantener Ingeniería sale del directorio autorizado.",
+        ) from error
+    if ruta.is_file():
+        try:
+            with PILImage.open(ruta) as imagen:
+                imagen.verify()
+        except (OSError, ValueError) as error:
+            raise HTTPException(
+                status_code=500,
+                detail="El archivo del logo de Mantener Ingeniería no es una imagen válida.",
+            ) from error
+        return ruta
+
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "No se encontró el archivo del logo de Mantener Ingeniería "
+            "configurado en EmpresaContratante.Logo. Verifique el asset en QA."
+        ),
+    )
+
+
+def _empresa_para_encabezado(datos) -> tuple[str, Path | None]:
+    """Usa exclusivamente la empresa del ciclo enlazado a RetiroLaboral."""
+    codigo = _texto(datos.get("CodigoEmpresaContratante")).upper()
+    if codigo == "ALP":
+        return codigo, None
+    if codigo == "MI":
+        return codigo, _resolver_logo_mantener_ingenieria(
+            datos.get("LogoEmpresaContratante")
+        )
+
+    # Sin ciclo o sin empresa no se debe imprimir por defecto el logo de ALP:
+    # podría pertenecer a MI. No modifica registros históricos ni adjuntos.
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "No se pudo identificar ALP o MI en la vinculación laboral "
+            "asociada a este retiro. Revise RetiroLaboral.IdVinculacionLaboral "
+            "y EmpresaContratante antes de generar el PDF."
+        ),
+    )
+
+
 # ============================================================
 # BLOQUES DEL DOCUMENTO
 # ============================================================
@@ -783,43 +873,50 @@ def _estilo_tabla(
 def _crear_encabezado(
     estilos,
     solo_logos: bool = False,
+    codigo_empresa: str = "ALP",
+    ruta_logo_mi: Path | None = None,
 ):
-    """
-    Encabezado corporativo del formato oficial.
+    """Encabezado F-TH-019: ALP conserva sus tres logos; MI solo el suyo."""
 
-    Orden visual:
-    1. Aseos La Perfección
-    2. Certificaciones ICONTEC / IQNET
-    3. ISSA
+    if codigo_empresa == "MI":
+        if ruta_logo_mi is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No se resolvió el logo de Mantener Ingeniería.",
+            )
+        logo_empresa = _imagen_logo(
+            ruta_logo_mi,
+            5.85 * cm,
+            1.78 * cm,
+            limpiar_fondo=False,
+        )
+        # MI no utiliza logos de ALP, ICONTEC, IQNET ni ISSA.
+        logo_certificaciones = ""
+        logo_issa = ""
+    elif codigo_empresa == "ALP":
+        # Diseño oficial ALP: se mantiene sin cambios.
+        logo_empresa = _imagen_logo(
+            RUTA_LOGO_EMPRESA,
+            5.85 * cm,
+            1.78 * cm,
+            limpiar_fondo=True,
+        )
+        logo_certificaciones = _imagen_logo(
+            RUTA_LOGO_CERTIFICACIONES,
+            2.75 * cm,
+            1.48 * cm,
+        )
+        logo_issa = _imagen_logo(
+            RUTA_LOGO_ISSA,
+            1.55 * cm,
+            1.30 * cm,
+        )
 
-    Los logos se muestran más grandes, juntos y conservando su proporción
-    original para acercarse al formato físico de referencia.
-
-    Importante:
-    - No se incluye Mantener Ingeniería.
-    """
-
-    # Logo principal con mayor presencia, como en el formato original.
-    logo_empresa = _imagen_logo(
-        RUTA_LOGO_EMPRESA,
-        5.85 * cm,
-        1.78 * cm,
-        limpiar_fondo=True,
-    )
-
-    # El recurso de certificaciones contiene ICONTEC / IQNET.
-    logo_certificaciones = _imagen_logo(
-        RUTA_LOGO_CERTIFICACIONES,
-        2.75 * cm,
-        1.48 * cm,
-    )
-
-    # ISSA se ubica inmediatamente después de las certificaciones.
-    logo_issa = _imagen_logo(
-        RUTA_LOGO_ISSA,
-        1.55 * cm,
-        1.30 * cm,
-    )
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="Código de empresa contratante no admitido en el Paz y Salvo.",
+        )
 
     # Se deja el bloque compacto y alineado hacia la izquierda,
     # tal como se aprecia en el formato original.
@@ -1559,6 +1656,8 @@ def generar_paz_salvo_operaciones_pdf(
         id_paz_y_salvo=id_paz_y_salvo,
     )
 
+    codigo_empresa, ruta_logo_mi = _empresa_para_encabezado(datos)
+
     estilos = _crear_estilos()
     requisitos_perfil = _obtener_requisitos_perfil_pdf(db, id_paz_y_salvo)
 
@@ -1582,7 +1681,11 @@ def generar_paz_salvo_operaciones_pdf(
     elementos = []
 
     elementos.extend(
-        _crear_encabezado(estilos)
+        _crear_encabezado(
+            estilos,
+            codigo_empresa=codigo_empresa,
+            ruta_logo_mi=ruta_logo_mi,
+        )
     )
 
     elementos.append(
@@ -1657,7 +1760,12 @@ def generar_paz_salvo_operaciones_pdf(
         # Compatibilidad con perfiles todavía no migrados a requisitos dinámicos.
         elementos.append(_tabla_entrega_elementos(datos, estilos))
         elementos.append(PageBreak())
-        elementos.extend(_crear_encabezado(estilos, solo_logos=True))
+        elementos.extend(_crear_encabezado(
+            estilos,
+            solo_logos=True,
+            codigo_empresa=codigo_empresa,
+            ruta_logo_mi=ruta_logo_mi,
+        ))
         elementos.append(_tabla_uniformes_alp_vacunas(datos, estilos))
 
     elementos.append(

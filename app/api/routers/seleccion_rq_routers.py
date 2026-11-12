@@ -732,6 +732,183 @@ def _validar_rq(db: Session, id_rq_operaciones: int):
     return row
 
 
+
+def _asegurar_vinculacion_inicial_rq(
+    db: Session,
+    id_registro_personal: int,
+    rq,
+    usuario: str,
+    salario: Optional[float] = None,
+) -> dict:
+    """Inicia el ciclo NUEVO/EN_PROCESO para un aspirante sin historia laboral.
+
+    REEMPLAZO y PERSONAL_NUEVO describen la requisicion; ambos pueden
+    originar un ingreso laboral NUEVO. El registro personal debe estar
+    bloqueado FOR UPDATE por el endpoint que llama a este helper.
+
+    No activa el trabajador, no crea reintegros y no reescribe historicos.
+    La operacion participa de la transaccion del endpoint llamador.
+    """
+    tipo_rq = str(rq["TipoRQ"] or "").strip().upper()
+    if tipo_rq not in {"REEMPLAZO", "PERSONAL_NUEVO"}:
+        return {"accion": "TIPO_RQ_NO_APLICA", "IdVinculacionLaboral": None}
+
+    id_empresa = rq["IdEmpresaContratante"]
+    if id_empresa is None:
+        raise HTTPException(
+            status_code=409,
+            detail="La RQ debe tener una empresa contratante definida.",
+        )
+    id_empresa = int(id_empresa)
+
+    empresa_activa = db.execute(
+        text("""
+            SELECT 1
+            FROM public."EmpresaContratante"
+            WHERE "IdEmpresaContratante" = :id_empresa
+              AND "Activo" = TRUE
+            LIMIT 1;
+        """),
+        {"id_empresa": id_empresa},
+    ).first()
+    if not empresa_activa:
+        raise HTTPException(
+            status_code=409,
+            detail="La empresa contratante de la RQ no existe o no esta activa.",
+        )
+
+    ultimo_ciclo = db.execute(
+        text("""
+            SELECT "IdVinculacionLaboral", "NumeroCiclo",
+                   "TipoVinculacion", "EstadoVinculacion",
+                   "IdEmpresaContratante"
+            FROM public."VinculacionLaboral"
+            WHERE "IdRegistroPersonal" = :id_registro
+            ORDER BY "NumeroCiclo" DESC, "IdVinculacionLaboral" DESC
+            LIMIT 1
+            FOR UPDATE;
+        """),
+        {"id_registro": id_registro_personal},
+    ).mappings().first()
+
+    if ultimo_ciclo:
+        id_vinculacion = int(ultimo_ciclo["IdVinculacionLaboral"])
+        estado = str(ultimo_ciclo["EstadoVinculacion"] or "").upper()
+        tipo = str(ultimo_ciclo["TipoVinculacion"] or "").upper()
+        empresa_actual = ultimo_ciclo["IdEmpresaContratante"]
+
+        if estado == "EN_PROCESO":
+            if empresa_actual is not None and int(empresa_actual) != id_empresa:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Ya existe un ciclo laboral EN_PROCESO con otra empresa. "
+                        "Revise su origen antes de cambiar la RQ; no se sobreescribio."
+                    ),
+                )
+            # Los reintegros tienen su propio ciclo; no se convierten en NUEVO.
+            if tipo != "NUEVO":
+                return {
+                    "accion": "CICLO_NO_NUEVO_EXISTENTE_NO_MODIFICADO",
+                    "IdVinculacionLaboral": id_vinculacion,
+                }
+            if empresa_actual is None:
+                db.execute(
+                    text("""
+                        UPDATE public."VinculacionLaboral"
+                        SET "IdEmpresaContratante" = :id_empresa,
+                            "FechaActualizacion" = NOW(),
+                            "UsuarioActualizacion" = :usuario
+                        WHERE "IdVinculacionLaboral" = :id_vinculacion
+                          AND "EstadoVinculacion" = 'EN_PROCESO'
+                          AND "IdEmpresaContratante" IS NULL;
+                    """),
+                    {
+                        "id_empresa": id_empresa,
+                        "usuario": usuario,
+                        "id_vinculacion": id_vinculacion,
+                    },
+                )
+                accion = "EMPRESA_ASIGNADA_A_CICLO_ABIERTO"
+            else:
+                accion = "CICLO_ABIERTO_EXISTENTE"
+            return {"accion": accion, "IdVinculacionLaboral": id_vinculacion}
+
+        if estado == "ACTIVO":
+            # Un trabajador con ciclo ACTIVO no debe entrar como NUEVO
+            # mediante una RQ de Seleccion, aunque RegistroPersonal este
+            # desactualizado. Su caso requiere revisar el ciclo existente.
+            raise HTTPException(
+                status_code=409,
+                detail="La persona ya tiene una vinculacion laboral ACTIVA; revise el ciclo antes de asociarla.",
+            )
+
+        # RETIRADO y otros estados: corresponde validar el reintegro.
+        return {
+            "accion": "HISTORICO_NO_MODIFICADO",
+            "IdVinculacionLaboral": id_vinculacion,
+        }
+
+    # Un migrado sin VinculacionLaboral no debe convertirse en un ingreso NUEVO.
+    antecedente = db.execute(
+        text("""
+            SELECT (
+                EXISTS (
+                    SELECT 1 FROM public."RetiroLaboral"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                )
+                OR EXISTS (
+                    SELECT 1 FROM public."ContratacionBasica"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                )
+                OR EXISTS (
+                    SELECT 1 FROM public."RegistroPersonal"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                      AND "FechaIngresoHistorica" IS NOT NULL
+                )
+            ) AS "EsHistorico";
+        """),
+        {"id_registro": id_registro_personal},
+    ).scalar()
+
+    if antecedente:
+        return {"accion": "HISTORICO_NO_MODIFICADO", "IdVinculacionLaboral": None}
+
+    nuevo_ciclo = db.execute(
+        text("""
+            INSERT INTO public."VinculacionLaboral"
+            (
+                "IdRegistroPersonal", "NumeroCiclo", "TipoVinculacion",
+                "EstadoVinculacion", "FechaInicioProceso", "FechaIngreso",
+                "FechaRetiro", "IdCargo", "IdCliente", "Salario",
+                "IdTipoContrato", "FechaCreacion", "FechaActualizacion",
+                "UsuarioActualizacion", "IdEmpresaContratante"
+            )
+            VALUES
+            (
+                :id_registro, 1, 'NUEVO', 'EN_PROCESO', NOW(),
+                NULL, NULL, :id_cargo, :id_cliente, :salario,
+                :id_tipo_contrato, NOW(), NOW(), :usuario, :id_empresa
+            )
+            RETURNING "IdVinculacionLaboral";
+        """),
+        {
+            "id_registro": id_registro_personal,
+            "id_cargo": rq["IdCargo"],
+            "id_cliente": rq["IdCliente"],
+            "salario": salario,
+            "id_tipo_contrato": rq["IdTipoContrato"],
+            "usuario": usuario,
+            "id_empresa": id_empresa,
+        },
+    ).scalar_one()
+    return {
+        "accion": "CICLO_CREADO_DESDE_RQ",
+        "IdVinculacionLaboral": int(nuevo_ciclo),
+        "IdEmpresaContratante": id_empresa,
+    }
+
+
 # ============================================================
 # CATALOGOS
 # ============================================================
@@ -922,13 +1099,17 @@ def vincular_candidato_rq(
     if salario <= 0:
         raise HTTPException(status_code=400, detail="El salario debe ser mayor a cero.")
 
+    # Los festivos pueden autoprovisionarse con COMMIT: calcularlos ANTES
+    # de bloquear el aspirante para mantener el bloqueo hasta el COMMIT final.
+    fecha_recibido_rq = _fecha_recibido_seleccion(db, row_rq["FechaEnvioSeleccion"])
+
     persona = db.execute(
         text(
             """
             SELECT "IdRegistroPersonal"
             FROM public."RegistroPersonal"
             WHERE "IdRegistroPersonal" = :id
-            LIMIT 1;
+            FOR UPDATE;
             """
         ),
         {"id": id_registro_personal},
@@ -960,13 +1141,12 @@ def vincular_candidato_rq(
         {"id": id_registro_personal},
     ).mappings().first()
 
-    fecha_recibido_rq = _fecha_recibido_seleccion(db, row_rq["FechaEnvioSeleccion"])
     estado_actual_candidato = (
         int(estado_candidato["IdEstadoProceso"])
         if estado_candidato and estado_candidato["IdEstadoProceso"] is not None
         else None
     )
-    # PERSONAL_NUEVO: asociar es distinto de entregar a Contratación.
+    # REEMPLAZO y PERSONAL_NUEVO: asociar es distinto de entregar a Contratación.
     # No permitir asociar candidatos que ya salieron del flujo de Selección.
     if estado_actual_candidato not in {18, 19, 20, 21, 22, 26}:
         raise HTTPException(
@@ -1144,6 +1324,18 @@ def vincular_candidato_rq(
             {"id_rq": id_rq_operaciones, "id_persona": id_registro_personal, "usuario": usuario, "salario": salario},
         )
 
+    # La RQ fija la empresa desde la asociacion. Solo para aspirantes
+    # sin historia laboral se crea el ciclo NUEVO/EN_PROCESO; no se activa.
+    # El bloqueo de RegistroPersonal y la insercion de RQCandidato
+    # mantienen ambas operaciones dentro de la misma transaccion.
+    try:
+        _asegurar_vinculacion_inicial_rq(
+            db, id_registro_personal, row_rq, usuario, salario
+        )
+    except Exception:
+        db.rollback()
+        raise
+
     # Tanto REEMPLAZO como PERSONAL_NUEVO conservan el estado del candidato
     # hasta que Selección ejecute la entrega explícita a Contratación.
 
@@ -1292,6 +1484,18 @@ def avanzar_candidato_rq_a_contratacion(
     if rq["IdEmpresaContratante"] is None:
         raise HTTPException(status_code=409, detail="La RQ no tiene empresa contratante definida.")
 
+    persona = db.execute(
+        text('''
+            SELECT "IdEstadoProceso"
+            FROM public."RegistroPersonal"
+            WHERE "IdRegistroPersonal" = :id_persona
+            FOR UPDATE;
+        '''),
+        {"id_persona": id_registro_personal},
+    ).mappings().first()
+    if not persona:
+        raise HTTPException(status_code=404, detail="El candidato no existe.")
+
     vinculo = db.execute(
         text('''
             SELECT "IdRQCandidato", "Salario"
@@ -1308,18 +1512,6 @@ def avanzar_candidato_rq_a_contratacion(
     if vinculo["Salario"] is None or float(vinculo["Salario"]) <= 0:
         raise HTTPException(status_code=409, detail="Debe registrar un salario válido antes de avanzar.")
 
-    persona = db.execute(
-        text('''
-            SELECT "IdEstadoProceso"
-            FROM public."RegistroPersonal"
-            WHERE "IdRegistroPersonal" = :id_persona
-            FOR UPDATE;
-        '''),
-        {"id_persona": id_registro_personal},
-    ).mappings().first()
-    if not persona:
-        raise HTTPException(status_code=404, detail="El candidato no existe.")
-
     estado_anterior = persona["IdEstadoProceso"]
     if estado_anterior == 24:
         raise HTTPException(status_code=409, detail="El candidato ya fue enviado a Contratación.")
@@ -1327,6 +1519,16 @@ def avanzar_candidato_rq_a_contratacion(
         raise HTTPException(status_code=409, detail="El candidato no está en un estado activo de Selección.")
 
     usuario = _usuario_actual(current)
+    # Respaldo para candidatos asociados antes de este ajuste o por
+    # otros flujos. Nunca crea un ciclo duplicado.
+    try:
+        _asegurar_vinculacion_inicial_rq(
+            db, id_registro_personal, rq, usuario, float(vinculo["Salario"])
+        )
+    except Exception:
+        db.rollback()
+        raise
+
     db.execute(
         text('''
             UPDATE public."RegistroPersonal"

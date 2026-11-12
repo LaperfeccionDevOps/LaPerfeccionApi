@@ -879,12 +879,15 @@ def finalizar_retiro_nomina(
             SELECT
                 rl."IdRetiroLaboral",
                 rl."IdRegistroPersonal",
+                rl."IdVinculacionLaboral",
+                rl."FechaRetiro",
                 rl."EstadoCasoRRLL",
                 rp."IdEstadoProceso"
             FROM public."RetiroLaboral" rl
             INNER JOIN public."RegistroPersonal" rp
                 ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
-            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral;
+            WHERE rl."IdRetiroLaboral" = :id_retiro_laboral
+            FOR UPDATE OF rl, rp;
         """)
 
         retiro = db.execute(
@@ -947,6 +950,102 @@ def finalizar_retiro_nomina(
                 }
             )
 
+        # Cierre del ciclo laboral EXACTO que originó este retiro.
+        # Si es un retiro histórico sin IdVinculacionLaboral, se conserva
+        # el comportamiento anterior: no se adivina ni se crea otro ciclo.
+        id_vinculacion_laboral = retiro["IdVinculacionLaboral"]
+        estado_vinculacion = None
+        fecha_retiro_vinculacion = None
+
+        if id_vinculacion_laboral is not None:
+            fecha_retiro_laboral = retiro["FechaRetiro"]
+            if fecha_retiro_laboral is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "El retiro está vinculado a un ciclo laboral, pero no tiene "
+                        "FechaRetiro. Revise el retiro antes de finalizarlo."
+                    ),
+                )
+
+            vinculacion = db.execute(
+                text("""
+                    SELECT
+                        "IdVinculacionLaboral",
+                        "IdRegistroPersonal",
+                        "EstadoVinculacion",
+                        "FechaRetiro"
+                    FROM public."VinculacionLaboral"
+                    WHERE "IdVinculacionLaboral" = :id_vinculacion_laboral
+                    FOR UPDATE;
+                """),
+                {"id_vinculacion_laboral": id_vinculacion_laboral},
+            ).mappings().first()
+
+            if vinculacion is None or (
+                int(vinculacion["IdRegistroPersonal"])
+                != int(retiro["IdRegistroPersonal"])
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "La vinculación asociada al retiro no existe o pertenece "
+                        "a otro trabajador. No se modificó ningún ciclo laboral."
+                    ),
+                )
+
+            estado_vinculacion = str(
+                vinculacion["EstadoVinculacion"] or ""
+            ).strip().upper()
+            fecha_retiro_vinculacion = vinculacion["FechaRetiro"]
+
+            if estado_vinculacion not in ("ACTIVO", "EN_PROCESO", "RETIRADO"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "El ciclo laboral asociado tiene un estado inesperado. "
+                        "Revíselo antes de finalizar el retiro."
+                    ),
+                )
+
+            if (
+                fecha_retiro_vinculacion is not None
+                and fecha_retiro_vinculacion != fecha_retiro_laboral
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "La fecha de retiro del ciclo laboral es distinta de la "
+                        "registrada en el retiro. Se requiere revisión manual."
+                    ),
+                )
+
+            # Evitar retirar al trabajador si ya existe otro ciclo abierto
+            # (por ejemplo, un reintegro posterior). Nunca cerrar ese otro ciclo.
+            otro_ciclo_abierto = db.execute(
+                text("""
+                    SELECT "IdVinculacionLaboral"
+                    FROM public."VinculacionLaboral"
+                    WHERE "IdRegistroPersonal" = :id_registro_personal
+                      AND "IdVinculacionLaboral" <> :id_vinculacion_laboral
+                      AND "EstadoVinculacion" IN ('ACTIVO', 'EN_PROCESO')
+                    LIMIT 1;
+                """),
+                {
+                    "id_registro_personal": retiro["IdRegistroPersonal"],
+                    "id_vinculacion_laboral": id_vinculacion_laboral,
+                },
+            ).mappings().first()
+
+            if otro_ciclo_abierto is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "El trabajador tiene otro ciclo laboral abierto. "
+                        "Revise el reintegro antes de finalizar este retiro."
+                    ),
+                )
+
         query_update_retiro = text("""
             UPDATE public."RetiroLaboral"
             SET
@@ -983,6 +1082,49 @@ def finalizar_retiro_nomina(
                 "id_registro_personal": retiro["IdRegistroPersonal"],
             }
         )
+
+        # La vinculación, el caso RRLL y el estado del trabajador se
+        # confirman en la MISMA transacción. Se usa FechaRetiro del caso
+        # (último día laborado), NO FechaPagoLiquidacion ni la fecha de hoy.
+        # No se compara con hoy: QA puede usar fechas de prueba futuras.
+        if id_vinculacion_laboral is not None and (
+            estado_vinculacion != "RETIRADO"
+            or fecha_retiro_vinculacion is None
+        ):
+            vinculacion_actualizada = db.execute(
+                text("""
+                    UPDATE public."VinculacionLaboral"
+                    SET
+                        "EstadoVinculacion" = 'RETIRADO',
+                        "FechaRetiro" = :fecha_retiro,
+                        "FechaActualizacion" = NOW(),
+                        "UsuarioActualizacion" = 'nomina'
+                    WHERE "IdVinculacionLaboral" = :id_vinculacion_laboral
+                      AND "IdRegistroPersonal" = :id_registro_personal
+                      AND "EstadoVinculacion" IN (
+                          'ACTIVO', 'EN_PROCESO', 'RETIRADO'
+                      )
+                      AND (
+                          "FechaRetiro" IS NULL
+                          OR "FechaRetiro" = :fecha_retiro
+                      )
+                    RETURNING "IdVinculacionLaboral";
+                """),
+                {
+                    "id_vinculacion_laboral": id_vinculacion_laboral,
+                    "id_registro_personal": retiro["IdRegistroPersonal"],
+                    "fecha_retiro": retiro["FechaRetiro"],
+                },
+            ).mappings().first()
+
+            if vinculacion_actualizada is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No se pudo cerrar de forma segura el ciclo laboral "
+                        "asociado. La finalización del retiro fue revertida."
+                    ),
+                )
 
         db.commit()
 

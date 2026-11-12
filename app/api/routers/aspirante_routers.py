@@ -347,7 +347,7 @@ def listar_aspirantes(
                     vl."IdVinculacionLaboral" DESC
                 LIMIT 1
             ) VL_ACTUAL ON TRUE
-            -- Empresa heredada de la RQ PERSONAL_NUEVO activa. No modifica ciclos laborales.
+            -- Empresa heredada de la RQ activa (REEMPLAZO o PERSONAL_NUEVO). No modifica ciclos laborales.
             LEFT JOIN LATERAL (
                 SELECT
                     rq."IdRQOperaciones",
@@ -357,7 +357,7 @@ def listar_aspirantes(
                     ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
                 WHERE rc."IdRegistroPersonal" = rp."IdRegistroPersonal"
                   AND rc."Activo" = TRUE
-                  AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+                  AND rq."TipoRQ" IN ('PERSONAL_NUEVO', 'REEMPLAZO')
                   AND rq."IdEmpresaContratante" IS NOT NULL
                 ORDER BY rc."IdRQCandidato" DESC
                 LIMIT 1
@@ -744,6 +744,154 @@ def asignar_empresa_contratante_aspirante(
         )
 
 
+def _asegurar_vinculacion_nueva_desde_rq(
+    db: Session, id_registro: int, usuario: str
+) -> dict:
+    """Respaldo al pasar a Contratación: vincula la empresa de una RQ inequívoca.
+
+    La asignación inicial debe ocurrir al asociar el candidato a la RQ.
+    Este respaldo NO crea reintegros ni modifica ciclos históricos.
+    Se llama con RegistroPersonal bloqueado y dentro de la transacción actual.
+    """
+    empresas = db.execute(
+        text("""
+            SELECT DISTINCT rq."IdEmpresaContratante"
+            FROM public."RQCandidato" rc
+            JOIN public."RQOperaciones" rq
+              ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            JOIN public."EmpresaContratante" ec
+              ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE rc."IdRegistroPersonal" = :id_registro
+              AND rc."Activo" = TRUE
+              AND rq."TipoRQ" IN ('PERSONAL_NUEVO', 'REEMPLAZO')
+              AND rq."IdEmpresaContratante" IS NOT NULL
+              AND ec."Activo" = TRUE;
+        """),
+        {"id_registro": id_registro},
+    ).scalars().all()
+
+    if len(empresas) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "El aspirante tiene RQ activas de diferentes empresas. "
+                "Revise la asociación antes de avanzar a Contratación."
+            ),
+        )
+    if not empresas:
+        return {"accion": "SIN_RQ_UNIVOCA", "IdVinculacionLaboral": None}
+
+    id_empresa = int(empresas[0])
+    ciclo_abierto = db.execute(
+        text("""
+            SELECT "IdVinculacionLaboral", "IdEmpresaContratante"
+            FROM public."VinculacionLaboral"
+            WHERE "IdRegistroPersonal" = :id_registro
+              AND "EstadoVinculacion" IN ('EN_PROCESO', 'ACTIVO')
+            ORDER BY "NumeroCiclo" DESC, "IdVinculacionLaboral" DESC
+            LIMIT 1 FOR UPDATE;
+        """),
+        {"id_registro": id_registro},
+    ).mappings().first()
+
+    if ciclo_abierto:
+        empresa_actual = ciclo_abierto["IdEmpresaContratante"]
+        if empresa_actual is not None and int(empresa_actual) != id_empresa:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "La empresa de la RQ no coincide con la del ciclo "
+                    "laboral abierto. No se modificó la vinculación."
+                ),
+            )
+        if empresa_actual is None:
+            db.execute(
+                text("""
+                    UPDATE public."VinculacionLaboral"
+                    SET "IdEmpresaContratante" = :id_empresa,
+                        "FechaActualizacion" = NOW(),
+                        "UsuarioActualizacion" = :usuario
+                    WHERE "IdVinculacionLaboral" = :id_vinculacion;
+                """),
+                {
+                    "id_empresa": id_empresa,
+                    "usuario": usuario,
+                    "id_vinculacion": ciclo_abierto["IdVinculacionLaboral"],
+                },
+            )
+            accion = "EMPRESA_ASIGNADA_A_CICLO_ABIERTO"
+        else:
+            accion = "CICLO_ABIERTO_EXISTENTE"
+        return {
+            "accion": accion,
+            "IdVinculacionLaboral": int(ciclo_abierto["IdVinculacionLaboral"]),
+            "IdEmpresaContratante": id_empresa,
+        }
+
+    # Si hay un ciclo anterior, el nuevo proceso puede ser un REINTEGRO.
+    # Nunca crear automáticamente un ciclo NUEVO sobre ese histórico.
+    existe_historico = db.execute(
+        text("""
+            SELECT 1 FROM public."VinculacionLaboral"
+            WHERE "IdRegistroPersonal" = :id_registro LIMIT 1;
+        """),
+        {"id_registro": id_registro},
+    ).first()
+    if existe_historico:
+        return {"accion": "HISTORICO_NO_MODIFICADO", "IdVinculacionLaboral": None}
+
+    # También protege históricos migrados que todavía no tienen ciclo laboral.
+    # Si ya hubo retiro o ingreso histórico, corresponde al flujo de reintegros.
+    antecedente_laboral = db.execute(
+        text("""
+            SELECT (
+                EXISTS (
+                    SELECT 1 FROM public."RetiroLaboral"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                )
+                OR EXISTS (
+                    SELECT 1 FROM public."ContratacionBasica"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                )
+                OR EXISTS (
+                    SELECT 1 FROM public."RegistroPersonal"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                      AND "FechaIngresoHistorica" IS NOT NULL
+                )
+            ) AS "EsHistorico";
+        """),
+        {"id_registro": id_registro},
+    ).scalar()
+    if antecedente_laboral:
+        return {"accion": "HISTORICO_NO_MODIFICADO", "IdVinculacionLaboral": None}
+
+    nuevo_ciclo = db.execute(
+        text("""
+            INSERT INTO public."VinculacionLaboral"
+            (
+                "IdRegistroPersonal", "NumeroCiclo", "TipoVinculacion",
+                "EstadoVinculacion", "FechaInicioProceso", "FechaIngreso",
+                "FechaRetiro", "IdCargo", "IdCliente", "Salario",
+                "IdTipoContrato", "FechaCreacion", "FechaActualizacion",
+                "UsuarioActualizacion", "IdEmpresaContratante"
+            )
+            VALUES
+            (
+                :id_registro, 1, 'NUEVO', 'EN_PROCESO', NOW(),
+                NULL, NULL, NULL, NULL, NULL, NULL,
+                NOW(), NOW(), :usuario, :id_empresa
+            )
+            RETURNING "IdVinculacionLaboral";
+        """),
+        {"id_registro": id_registro, "usuario": usuario, "id_empresa": id_empresa},
+    ).scalar_one()
+    return {
+        "accion": "CICLO_CREADO_DESDE_RQ",
+        "IdVinculacionLaboral": int(nuevo_ciclo),
+        "IdEmpresaContratante": id_empresa,
+    }
+
+
 @router.get("/aspirantes/{id_registro}", response_model=RegistroPersonalOut)
 def obtener_aspirante(
     id_registro: int,
@@ -875,6 +1023,15 @@ def actualizar_estado_aspirante(
                 ),
             )
 
+        # Respaldo: si el aspirante tiene una RQ REEMPLAZO o PERSONAL_NUEVO con
+        # empresa inequívoca, el ciclo debe existir antes de Contratación.
+        # No afecta estados de retiro ni convierte históricos en NUEVO.
+        resultado_vinculacion_rq = None
+        if nuevo_estado == 24 and estado_anterior not in (25, 30, 31, 32, 33, 35):
+            resultado_vinculacion_rq = _asegurar_vinculacion_nueva_desde_rq(
+                db, id_registro, usuario_movimiento
+            )
+
         db.execute(
             text("""
                 UPDATE "RegistroPersonal"
@@ -947,6 +1104,7 @@ def actualizar_estado_aspirante(
         "nuevoEstado": nuevo_estado,
         "usuario": usuario_movimiento,
         "historialContratacionRegistrado": historial_registrado,
+        "vinculacionRQ": resultado_vinculacion_rq,
     }
 
 
@@ -1208,7 +1366,7 @@ def obtener_detalle_aspirante_por_ciclos(
               ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
             WHERE rc."IdRegistroPersonal" = :id
               AND rc."Activo" = TRUE
-              AND rq."TipoRQ" = 'PERSONAL_NUEVO'
+              AND rq."TipoRQ" IN ('PERSONAL_NUEVO', 'REEMPLAZO')
               AND rq."IdEmpresaContratante" IS NOT NULL
             ORDER BY rc."IdRQCandidato" DESC
             LIMIT 1;

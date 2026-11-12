@@ -45,6 +45,157 @@ class ContratadoUpdate(BaseModel):
     IdRegistroPersonal: int
 
 
+def _asegurar_vinculacion_antes_de_contratar(
+    db: Session, id_registro: int, estado_anterior: int | None
+) -> dict | None:
+    """Respaldo del botón C cuando falta un ciclo inicial con empresa de RQ.
+
+    No crea ciclos para contrataciones legacy sin RQ ni sobre históricos
+    (posibles reintegros). La persona ya está bloqueada FOR UPDATE.
+    """
+    if estado_anterior not in (24, ESTADO_CONTRATADO):
+        return None
+
+    ciclo_existente = db.execute(
+        text("""
+            SELECT "IdVinculacionLaboral", "EstadoVinculacion",
+                   "IdEmpresaContratante"
+            FROM public."VinculacionLaboral"
+            WHERE "IdRegistroPersonal" = :id_registro
+            ORDER BY "NumeroCiclo" DESC, "IdVinculacionLaboral" DESC
+            LIMIT 1 FOR UPDATE;
+        """),
+        {"id_registro": id_registro},
+    ).mappings().first()
+    if ciclo_existente:
+        # Validar que un ciclo EN_PROCESO no vaya a activarse con la empresa
+        # equivocada si la RQ fue modificada despues de asociar al candidato.
+        if ciclo_existente["EstadoVinculacion"] == "EN_PROCESO":
+            empresas_ciclo = db.execute(
+                text("""
+                    SELECT DISTINCT rq."IdEmpresaContratante"
+                    FROM public."RQCandidato" rc
+                    JOIN public."RQOperaciones" rq
+                      ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+                    JOIN public."EmpresaContratante" ec
+                      ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+                    WHERE rc."IdRegistroPersonal" = :id_registro
+                      AND rc."Activo" = TRUE
+                      AND rq."TipoRQ" IN ('PERSONAL_NUEVO', 'REEMPLAZO')
+                      AND rq."IdEmpresaContratante" IS NOT NULL
+                      AND ec."Activo" = TRUE;
+                """),
+                {"id_registro": id_registro},
+            ).scalars().all()
+            if len(empresas_ciclo) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Hay RQ activas asociadas a distintas empresas.",
+                )
+            if empresas_ciclo:
+                id_empresa_rq = int(empresas_ciclo[0])
+                id_empresa_ciclo = ciclo_existente["IdEmpresaContratante"]
+                if id_empresa_ciclo is not None and int(id_empresa_ciclo) != id_empresa_rq:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="La empresa de la RQ no coincide con el ciclo EN_PROCESO.",
+                    )
+                if id_empresa_ciclo is None:
+                    db.execute(
+                        text("""
+                            UPDATE public."VinculacionLaboral"
+                            SET "IdEmpresaContratante" = :id_empresa,
+                                "FechaActualizacion" = NOW(),
+                                "UsuarioActualizacion" = 'contratacion'
+                            WHERE "IdVinculacionLaboral" = :id_vinculacion
+                              AND "EstadoVinculacion" = 'EN_PROCESO'
+                              AND "IdEmpresaContratante" IS NULL;
+                        """),
+                        {
+                            "id_empresa": id_empresa_rq,
+                            "id_vinculacion": ciclo_existente["IdVinculacionLaboral"],
+                        },
+                    )
+        # Nunca recrear ciclos historicos ni sobreescribir empresa diferente.
+        return {"accion": "CICLO_EXISTENTE_NO_MODIFICADO",
+                "IdVinculacionLaboral": int(ciclo_existente["IdVinculacionLaboral"])}
+
+    empresas = db.execute(
+        text("""
+            SELECT DISTINCT rq."IdEmpresaContratante"
+            FROM public."RQCandidato" rc
+            JOIN public."RQOperaciones" rq
+              ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            JOIN public."EmpresaContratante" ec
+              ON ec."IdEmpresaContratante" = rq."IdEmpresaContratante"
+            WHERE rc."IdRegistroPersonal" = :id_registro
+              AND rc."Activo" = TRUE
+              AND rq."TipoRQ" IN ('PERSONAL_NUEVO', 'REEMPLAZO')
+              AND rq."IdEmpresaContratante" IS NOT NULL
+              AND ec."Activo" = TRUE;
+        """),
+        {"id_registro": id_registro},
+    ).scalars().all()
+    if len(empresas) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Hay RQ activas asociadas a distintas empresas. "
+                "No es seguro crear el ciclo laboral automáticamente."
+            ),
+        )
+    if not empresas:
+        return {"accion": "SIN_RQ_UNIVOCA", "IdVinculacionLaboral": None}
+
+    # No interpretar como contratación NUEVA a un retirado o migrado
+    # cuyo ciclo histórico todavía no se haya cargado en QA.
+    antecedente_laboral = db.execute(
+        text("""
+            SELECT (
+                EXISTS (
+                    SELECT 1 FROM public."RetiroLaboral"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                )
+                OR EXISTS (
+                    SELECT 1 FROM public."RegistroPersonal"
+                    WHERE "IdRegistroPersonal" = :id_registro
+                      AND "FechaIngresoHistorica" IS NOT NULL
+                )
+            ) AS "EsHistorico";
+        """),
+        {"id_registro": id_registro},
+    ).scalar()
+    if antecedente_laboral:
+        return {"accion": "HISTORICO_NO_MODIFICADO", "IdVinculacionLaboral": None}
+
+    id_empresa = int(empresas[0])
+    nuevo_ciclo = db.execute(
+        text("""
+            INSERT INTO public."VinculacionLaboral"
+            (
+                "IdRegistroPersonal", "NumeroCiclo", "TipoVinculacion",
+                "EstadoVinculacion", "FechaInicioProceso", "FechaIngreso",
+                "FechaRetiro", "IdCargo", "IdCliente", "Salario",
+                "IdTipoContrato", "FechaCreacion", "FechaActualizacion",
+                "UsuarioActualizacion", "IdEmpresaContratante"
+            )
+            VALUES
+            (
+                :id_registro, 1, 'NUEVO', 'EN_PROCESO', NOW(),
+                NULL, NULL, NULL, NULL, NULL, NULL,
+                NOW(), NOW(), 'contratacion', :id_empresa
+            )
+            RETURNING "IdVinculacionLaboral";
+        """),
+        {"id_registro": id_registro, "id_empresa": id_empresa},
+    ).scalar_one()
+    return {
+        "accion": "CICLO_CREADO_DESDE_RQ",
+        "IdVinculacionLaboral": int(nuevo_ciclo),
+        "IdEmpresaContratante": id_empresa,
+    }
+
+
 @router.put("/contratado")
 def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
     try:
@@ -154,6 +305,15 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             logger.info(
                 "No se registra historial porque el aspirante ya estaba en estado 25."
             )
+
+        # Respaldo para flujos que llegaron a 24/25 sin vinculación inicial.
+        # Si existe una RQ inequívoca, crea el ciclo antes de activarlo.
+        # Los históricos y reintegros se conservan sin alteraciones.
+        vinculacion_respaldo = _asegurar_vinculacion_antes_de_contratar(
+            db, payload.IdRegistroPersonal, estado_anterior
+        )
+        if vinculacion_respaldo:
+            logger.info(f"Respaldo vinculación desde RQ: {vinculacion_respaldo}")
 
         # ------------------------------------------------------------
         # 3.1. Consolidar el ciclo laboral actual cuando la contratación
@@ -357,6 +517,7 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
             "message": "Aspirante marcado como CONTRATADO.",
             "data": updated,
             "historialContratacionRegistrado": historial_contratacion_registrado,
+            "vinculacionRQ": vinculacion_respaldo,
             "estadoAnterior": estado_anterior,
             "nuevoEstado": ESTADO_CONTRATADO,
             "archivoGenerado": nombre_archivo,

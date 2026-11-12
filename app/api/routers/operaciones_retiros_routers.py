@@ -16,7 +16,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -2017,13 +2017,36 @@ def obtener_cliente_actual_operaciones_retiros(
     current=Depends(require_operaciones_retiros),
 ):
     """
-    Devuelve el último cliente asignado al trabajador según
-    AsignacionCargoCliente.
+    Devuelve el último cliente de AsignacionCargoCliente. Si no existe,
+    consulta el cliente del único ciclo laboral ACTIVO del trabajador.
+    Consulta de solo lectura: no cambia la selección manual del formulario.
     """
     id_cliente = _obtener_cliente_actual(
         db=db,
         id_registro_personal=id_registro_personal,
     )
+
+    if id_cliente is None:
+        # Respaldo para contratados cuya asignación no tiene IdCliente,
+        # pero cuyo ciclo laboral ACTIVO sí conserva el cliente asignado.
+        # No se modifica ningún registro ni se mezclan ciclos históricos.
+        vinculaciones_activas = db.execute(
+            text("""
+                SELECT vl."IdCliente"
+                FROM public."VinculacionLaboral" vl
+                WHERE vl."IdRegistroPersonal" = :id_registro_personal
+                  AND UPPER(TRIM(COALESCE(vl."EstadoVinculacion", ''))) = 'ACTIVO'
+                ORDER BY vl."NumeroCiclo" DESC NULLS LAST,
+                         vl."IdVinculacionLaboral" DESC
+                LIMIT 2;
+            """),
+            {"id_registro_personal": id_registro_personal},
+        ).mappings().all()
+        if (
+            len(vinculaciones_activas) == 1
+            and vinculaciones_activas[0]["IdCliente"] is not None
+        ):
+            id_cliente = int(vinculaciones_activas[0]["IdCliente"])
 
     if id_cliente is None:
         return {
@@ -5754,3 +5777,84 @@ def regenerar_pdf_ingrith_qa(
             except OSError:
                 pass
         raise
+
+
+# ============================================================================
+# QA - VISTA PREVIA DE PAZ Y SALVO DE STEFANIA (SOLO LECTURA)
+# ============================================================================
+# Este endpoint NO regenera ni reemplaza el adjunto oficial.
+# No escribe archivos, no ejecuta UPDATE/INSERT/DELETE y no cambia estados.
+# Su unico proposito es verificar el logo MI con los datos ya registrados.
+# Retirar este endpoint despues de completar la validacion QA.
+
+@router.get("/qa/paz-salvo/71/vista-previa-pdf")
+def vista_previa_paz_salvo_stefania_qa(
+    db: Session = Depends(get_db),
+    current=Depends(require_operaciones_retiros),
+):
+    """Previsualiza el F-TH-019 de Stefania sin modificar el retiro ni adjuntos."""
+    if os.getenv("ENABLE_QA_PAZ_SALVO_PDF_PREVIEW", "").strip() != "1":
+        raise HTTPException(status_code=404, detail="Vista previa QA deshabilitada.")
+
+    roles = _roles_ids_actuales(current)
+    if not roles.intersection({ROL_SUPER_ADMIN, ROL_DESARROLLADOR}):
+        raise HTTPException(status_code=403, detail="Solo SuperAdmin o Desarrollador.")
+
+    nombre_bd = db.execute(text("SELECT current_database()")).scalar_one()
+    if str(nombre_bd).upper() != "LA_PERFECCION_QA":
+        raise HTTPException(status_code=403, detail="Exclusivo de LA_PERFECCION_QA.")
+
+    caso = db.execute(text("""
+        SELECT
+            ps."IdPazYSalvo",
+            ps."IdRetiroLaboral",
+            ps."IdRegistroPersonal",
+            rp."NumeroIdentificacion",
+            rl."IdVinculacionLaboral",
+            vl."IdEmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa"
+        FROM public."PazYSalvoOperaciones" ps
+        INNER JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = ps."IdRegistroPersonal"
+        INNER JOIN public."RetiroLaboral" rl
+            ON rl."IdRetiroLaboral" = ps."IdRetiroLaboral"
+        INNER JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+           AND vl."IdRegistroPersonal" = ps."IdRegistroPersonal"
+        INNER JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
+        WHERE ps."IdPazYSalvo" = :id_paz_y_salvo
+    """), {"id_paz_y_salvo": 71}).mappings().first()
+
+    if (
+        not caso
+        or int(caso["IdPazYSalvo"]) != 71
+        or int(caso["IdRetiroLaboral"]) != 101
+        or int(caso["IdRegistroPersonal"]) != 1876
+        or str(caso["NumeroIdentificacion"]).strip() != "78324"
+        or int(caso["IdVinculacionLaboral"]) != 40
+        or int(caso["IdEmpresaContratante"]) != 2
+        or str(caso["CodigoEmpresa"]).strip().upper() != "MI"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="El caso no coincide con la identidad QA de Stefania / MI.",
+        )
+
+    buffer_pdf = generar_paz_salvo_operaciones_pdf(db=db, id_paz_y_salvo=71)
+    try:
+        contenido = buffer_pdf.getvalue()
+    finally:
+        buffer_pdf.close()
+
+    if not contenido.startswith(b"%PDF"):
+        raise HTTPException(status_code=500, detail="El servicio no produjo un PDF valido.")
+
+    return Response(
+        content=contenido,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'inline; filename="paz_salvo_stefania_MI_QA_vista_previa.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
