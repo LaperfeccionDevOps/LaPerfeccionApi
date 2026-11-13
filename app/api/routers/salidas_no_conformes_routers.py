@@ -1340,15 +1340,61 @@ def indicadores_snc_general(
                COUNT(*) FILTER (WHERE estado = 'CERRADO') AS cerradas
         FROM relaciones GROUP BY area ORDER BY COUNT(*) DESC, area
     '''), global_params).mappings().all()
+    # Analítica interactiva: un registro por SNC actual, sin unir movimientos
+    # del historial ni depender de la paginación de la bandeja.
+    detalle_graficas = db.execute(text('''
+        SELECT TO_CHAR(DATE_TRUNC('month', fecha_creacion), 'YYYY-MM') AS mes,
+               estado, COALESCE(NULLIF(TRIM(responsable), ''), 'Sin responsable') AS responsable,
+               COUNT(*) AS total,
+               ARRAY_AGG(id ORDER BY id) AS ids
+        FROM (SELECT DISTINCT ON (id) * FROM (''' + base + ''') casos ORDER BY id) datos
+        GROUP BY DATE_TRUNC('month', fecha_creacion), estado,
+                 COALESCE(NULLIF(TRIM(responsable), ''), 'Sin responsable')
+        ORDER BY mes, estado, responsable
+    '''), params).mappings().all()
     return {
         'inhabilitadas': int(total_inhabilitadas),
         'grupos': [dict(f) for f in filas],
         'totales': {e: sum(f['total'] for f in filas if f['estado'] == e)
                     for e in ('ABIERTO', 'RESPONDIDO', 'DEVUELTO', 'CERRADO')},
         'mensual': [dict(f) for f in meses],
+        'detalle_graficas': [dict(f) for f in detalle_graficas],
         'resumen': dict(resumen), 'desglose': dict(desglose),
         'ranking': [dict(f) for f in ranking],
     }
+
+
+@router.get('/general/ranking-detalle')
+def detalle_ranking_snc_general(
+    area: str, direccion: str, busqueda: str | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    pagina: int = 1, limite: int = 15,
+    db: Session = Depends(get_db), current: dict = Depends(get_current_user),
+):
+    # Detalle de una barra del ranking; consulta solo SNC actuales y activas.
+    _validar_consulta_general_snc(db, current)
+    if direccion not in ('EMITIDAS', 'RECIBIDAS'):
+        raise HTTPException(status_code=422, detail='Dirección del ranking inválida.')
+    if not area.strip() or len(area) > 250 or pagina < 1 or not 1 <= limite <= 50:
+        raise HTTPException(status_code=422, detail='Parámetros del ranking inválidos.')
+    where, params = _filtros_generales(None, busqueda, None, fecha_desde, fecha_hasta, 'TODAS')
+    base = _SNC_GENERAL_SELECT + _SNC_GENERAL_FROM + where
+    relacion = ('id_area_origen_snc IS NOT NULL AND id_area_origen_snc <> id_area_responsable_snc '
+                'AND area_origen = :area' if direccion == 'EMITIDAS' else
+                'id_area_origen_snc IS DISTINCT FROM id_area_responsable_snc '
+                "AND COALESCE(area_responsable, 'Origen sin parametrizar') = :area")
+    # La consulta parte de los mismos filtros y relaciones que el ranking.
+    # DISTINCT ON evita que asignaciones múltiples del creador dupliquen una SNC.
+    consulta = '''WITH datos AS (''' + base + '''), filtrados AS (
+        SELECT DISTINCT ON (id) * FROM datos WHERE ''' + relacion + ''' ORDER BY id
+    ) '''
+    bind = {**params, 'area': area.strip(), 'limite': limite, 'offset': (pagina-1)*limite}
+    total = db.execute(text(consulta + 'SELECT COUNT(*) FROM filtrados'), bind).scalar_one()
+    filas = db.execute(text(consulta + '''SELECT * FROM filtrados
+        ORDER BY fecha_creacion DESC, id DESC LIMIT :limite OFFSET :offset'''), bind).mappings().all()
+    return {'total': int(total), 'pagina': pagina, 'limite': limite,
+            'paginas': max(1, (total + limite - 1) // limite),
+            'registros': [_serializar_snc(f) for f in filas]}
 
 
 @router.get('/general/{id_snc}')

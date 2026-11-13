@@ -1553,6 +1553,35 @@ def pqrf_general(
             'pagina': pagina, 'paginas': max(1, (total + limite - 1) // limite)}
 
 
+@router.get('/general/analisis-interactivo')
+def pqrf_general_analisis_interactivo(
+    busqueda: str = '', id_proceso: int | None = None,
+    id_tipo: int | None = None, id_cliente: int | None = None,
+    fecha_desde: date | None = None, fecha_hasta: date | None = None,
+    relacion: str = '', db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    """Casos activos únicos para análisis interactivo; sin historial duplicado."""
+    _pqrf_admin(db, current)
+    where, params = _pqrf_general_filters(
+        busqueda, id_proceso, id_tipo, id_cliente, fecha_desde, fecha_hasta,
+        relacion=relacion,
+    )
+    sql = ("SELECT p.\"IdPQRF\" AS id, p.\"FechaCreacion\" AS fecha_creacion, "
+           "p.\"FechaPQRF\" AS fecha_pqrf, p.\"Estado\" AS estado, "
+           "pr.\"NombreProceso\" AS proceso, "
+           "ur.\"NombreUsuario\" AS usuario_registro, "
+           "ua.\"NombreUsuario\" AS usuario_responsable, "
+           "t.\"NombreTipo\" AS tipo_pqrf, "
+           "COALESCE(c.\"Nombre\", p.\"NombreClienteExterno\") AS cliente "
+           + _PQRF_GENERAL_FROM + " WHERE " + (where or 'TRUE')
+           + ' ORDER BY p."FechaCreacion" DESC, p."IdPQRF" DESC LIMIT 10001')
+    filas = db.execute(text(sql), params).mappings().all()
+    if len(filas) > 10000:
+        raise HTTPException(status_code=422, detail='El análisis supera 10.000 PQRF. Aplique filtros más específicos.')
+    return {'registros': [dict(fila) for fila in filas]}
+
+
 @router.get('/general/indicadores')
 def pqrf_general_indicadores(
     busqueda: str = '', id_proceso: int | None = None,
@@ -1592,6 +1621,7 @@ def pqrf_general_indicadores(
     ), params_todas).scalar_one() if es_superadmin_indicadores else 0
     return {'inhabilitadas': int(total_inhabilitadas), 'cantidad_con_respuesta': len(dias),
             'promedio_dias_respuesta': round(sum(dias) / len(dias), 2) if dias else None,
+            'promedio_dias_calendario_respuesta': round(sum(dias) / len(dias), 2) if dias else None,
             'total': sum(counts.values()), 'totales': counts,
             'tipos': grouped('t."NombreTipo"', 'tipo'),
             'procesos': grouped('pr."NombreProceso"', 'proceso'),
