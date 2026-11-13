@@ -20,6 +20,7 @@ from repositories.contador_registro_personal_repo import contador_registro_perso
 from services.vinculacion_laboral_service import obtener_vinculacion_abierta
 
 import base64
+import binascii
 import re
 
 
@@ -175,8 +176,59 @@ def _buscar_experiencia_en_ciclo(
     return int(row["IdExperienciaLaboral"])
 
 
+def _validar_documentos_registro_nuevo(payload: RegistroPersonalCreate) -> None:
+    """Valida el alta inicial sin alterar los flujos de actualización/reintegro."""
+    if payload.AceptoTratamientoDatos is not True or payload.ConflictoInteres is not True:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe aceptar expresamente Tratamiento de datos y Conflicto de interés.",
+        )
+
+    documentos_por_tipo = {}
+    for doc in payload.Documentacion:
+        tipo = doc.IdTipoDocumentacion
+        if tipo in (42, 73):
+            if tipo in documentos_por_tipo:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"El documento obligatorio {tipo} está duplicado.",
+                )
+            documentos_por_tipo[tipo] = doc
+
+    for tipo in (42, 73):
+        doc = documentos_por_tipo.get(tipo)
+        if doc is None or not doc.DocumentoCargado:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Falta el documento obligatorio {tipo} con contenido.",
+            )
+        try:
+            contenido = base64.b64decode(limpiar_base64(doc.DocumentoCargado), validate=True)
+        except (ValueError, TypeError, UnicodeError, binascii.Error):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"El documento {tipo} contiene base64 inválido.",
+            )
+        if tipo == 73 and (not contenido.startswith(b"%PDF-") or len(contenido) < 100):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El documento 73 no contiene un PDF válido.",
+            )
+        if tipo == 42 and not (
+            contenido.startswith(b"\x89PNG\r\n\x1a\n")
+            or contenido.startswith(b"\xff\xd8\xff")
+            or contenido.startswith((b"GIF87a", b"GIF89a"))
+            or (contenido.startswith(b"RIFF") and contenido[8:12] == b"WEBP")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El documento 42 no contiene una imagen válida.",
+            )
+
+
 def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
     try:
+        _validar_documentos_registro_nuevo(payload)
         nuevo = RegistroPersonal(
             **payload.dict(
                 exclude={
@@ -185,6 +237,8 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
                     "ExperienciaLaboral",
                     "Documentacion",
                     "DatosAdicionales",
+                    "AceptoTratamientoDatos",
+                    "ConflictoInteres",
                 }
             )
         )
@@ -237,9 +291,11 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
             try:
                 base64_str = limpiar_base64(base64_str)
                 doc_data["DocumentoCargado"] = base64.b64decode(base64_str)
-            except Exception as e:
-                print(f"Error al procesar base64: {e}")
-                doc_data["DocumentoCargado"] = None
+            except (ValueError, TypeError, UnicodeError, binascii.Error) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"No se pudo procesar el documento {doc_data.get('IdTipoDocumentacion')}: base64 inválido.",
+                ) from e
 
             doc_obj = DocumentacionORM(**doc_data)
             db.add(doc_obj)
@@ -256,6 +312,25 @@ def crear_registro(db: Session, payload: RegistroPersonalCreate) -> None:
             datos_adicionales_dict["IdRegistroPersonal"] = nuevo.IdRegistroPersonal
             datos_adicionales = DatosAdicionalesORM(**datos_adicionales_dict)
             db.add(datos_adicionales)
+
+        # Registrar únicamente el consentimiento explícito del registro nuevo.
+        # No se presume aceptación ni se modifica información histórica.
+        if payload.AceptoTratamientoDatos is not None:
+            db.execute(
+                text(
+                    '''
+                    INSERT INTO public."TratamientoDatos"
+                        ("IdRegistroPersonal", "AceptoTratamientoDatos", "ConflictoInteres", "FechaCreacion")
+                    VALUES
+                        (:id_registro, :acepto, :conflicto, NOW());
+                    '''
+                ),
+                {
+                    "id_registro": nuevo.IdRegistroPersonal,
+                    "acepto": payload.AceptoTratamientoDatos,
+                    "conflicto": payload.ConflictoInteres,
+                },
+            )
 
         db.commit()
         db.refresh(nuevo)
@@ -331,6 +406,8 @@ def actualizar_registro(
                 "ExperienciaLaboral",
                 "Documentacion",
                 "DatosAdicionales",
+                "AceptoTratamientoDatos",
+                "ConflictoInteres",
             }
         ).items():
             setattr(registro, key, value)

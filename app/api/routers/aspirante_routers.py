@@ -158,6 +158,8 @@ def crear_registro_personal(
     try:
         crear_registro(db, payload)
         return [{"mensaje": "Registro creado con exito"}]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -362,6 +362,10 @@ class RegistroPersonalCreate(BaseModel):
     Documentacion: list[DocumentacionSchema] = []
     DatosAdicionales: DatosAdicionalesCreate | None = None
 
+    # Consentimientos explícitos; opcionales para compatibilidad con clientes existentes.
+    AceptoTratamientoDatos: bool | None = None
+    ConflictoInteres: bool | None = None
+
     class Config:
         from_attributes = True
 
