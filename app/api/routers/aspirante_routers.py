@@ -537,6 +537,58 @@ def actualizar_estado_aspirante(
                     ),
                 )
 
+        # QA: entrevista obligatoria para entrar al estado 24.
+        # Se conserva la entrevista cuando el mismo proceso vuelve desde Contratación.
+        # En reintegros, no se acepta una entrevista de un ciclo laboral anterior.
+        if nuevo_estado == 24:
+            entrevista_cols = {
+                fila[0] for fila in db.execute(text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'EntrevistaCandidato'
+                """)).fetchall()
+            }
+            fk_entrevista = [
+                col for col in ('IdRegistroPersonal', 'IdRegistroPerso')
+                if col in entrevista_cols
+            ]
+            if not fk_entrevista:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail='No se puede verificar la entrevista del aspirante.',
+                )
+
+            vinculacion_actual = db.execute(text("""
+                SELECT "IdVinculacionLaboral", "NumeroCiclo"
+                FROM public."VinculacionLaboral"
+                WHERE "IdRegistroPersonal" = :id
+                  AND "EstadoVinculacion" IN ('EN_PROCESO', 'ACTIVO')
+                ORDER BY "NumeroCiclo" DESC NULLS LAST, "IdVinculacionLaboral" DESC
+                LIMIT 1
+            """), {"id": id_registro}).mappings().first()
+
+            condiciones_fk = ' OR '.join(f'"{col}" = :id' for col in fk_entrevista)
+            parametros_entrevista = {"id": id_registro}
+            filtro_ciclo = ''
+            if (vinculacion_actual and 'IdVinculacionLaboral' in entrevista_cols
+                    and (vinculacion_actual.get('NumeroCiclo') or 1) > 1):
+                filtro_ciclo = ' AND "IdVinculacionLaboral" = :vinculacion'
+                parametros_entrevista['vinculacion'] = vinculacion_actual['IdVinculacionLaboral']
+
+            existe_entrevista = db.execute(text(f"""
+                SELECT 1 FROM public."EntrevistaCandidato"
+                WHERE ({condiciones_fk}) {filtro_ciclo}
+                LIMIT 1
+            """), parametros_entrevista).scalar()
+            if not existe_entrevista:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        'No es posible avanzar a Contratación. '
+                        'Debe realizar y guardar la entrevista de Selección '
+                        'correspondiente al proceso actual.'
+                    ),
+                )
+
         # Protección exclusiva para usuarios que operan únicamente con rol de Selección.
         # No interfiere con los cambios realizados por Contratación o Talento Humano.
         roles_ids = {
