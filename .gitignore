@@ -258,4 +258,5 @@ app/credentials/token.pickle
 *.env
 app/logs/
 *.log
-logs/
+logs/__pycache__/
+*.pyc
