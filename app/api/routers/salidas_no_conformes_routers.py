@@ -347,6 +347,31 @@ class CrearSNC(BaseModel):
         return valor
 
 
+def _puede_crear_snc(db: Session, usuario_id: UUID) -> bool:
+    """Permiso explícito y activo para registrar SNC, sin modificar la gestión existente."""
+    return db.execute(text('''
+        SELECT 1
+        FROM public."UsuarioPermiso" up
+        JOIN public."Permiso" p ON p."IdPermiso" = up."IdPermiso"
+        JOIN public."Usuario" u ON u."IdUsuario" = up."IdUsuario"
+        WHERE up."IdUsuario" = :usuario
+          AND up."Activo" = TRUE
+          AND p."Activo" = TRUE
+          AND p."Codigo" = 'SNC_CREAR'
+          AND UPPER(TRIM(COALESCE(u."HashEstado", ''))) = 'ACTIVO'
+        LIMIT 1
+    '''), {"usuario": usuario_id}).scalar_one_or_none() is not None
+
+
+@router.get("/permisos")
+def permisos_snc(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    _validar_acceso(db, current)
+    return {"puede_crear": _puede_crear_snc(db, _id_usuario_actual(current))}
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def registrar_snc(
     datos: CrearSNC,
@@ -360,6 +385,9 @@ def registrar_snc(
         id_creador = UUID(str(current["usuario"].IdUsuario))
     except (KeyError, AttributeError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=401, detail="Sesión sin usuario válido.") from exc
+
+    if not _puede_crear_snc(db, id_creador):
+        raise HTTPException(status_code=403, detail="No tiene autorización para registrar nuevas SNC.")
 
     # Los valores de catálogos siempre se verifican contra la BD, no se confía
     # en el frontend. Se bloquea el responsable para evitar cambios concurrentes.

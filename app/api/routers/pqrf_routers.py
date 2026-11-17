@@ -345,6 +345,15 @@ def _puede_crear_pqrf(db: Session, usuario_id: UUID) -> bool:
                   :sandra, :sandra_qa, :derly, :edilma, :diyer, :olga, :alix
               )
               OR u."IdUsuario" = :william
+              OR EXISTS (
+                  SELECT 1
+                  FROM public."UsuarioPermiso" up
+                  JOIN public."Permiso" per ON per."IdPermiso" = up."IdPermiso"
+                  WHERE up."IdUsuario" = u."IdUsuario"
+                    AND up."Activo" = TRUE
+                    AND per."Activo" = TRUE
+                    AND per."Codigo" = 'PQRF_CREAR'
+              )
               OR (
                   u."IdUsuario" IN (:victoria_qa, :victoria_prod)
                   AND EXISTS (

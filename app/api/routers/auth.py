@@ -752,7 +752,9 @@ def actualizar_usuario(
     ).first():
         raise HTTPException(status_code=400, detail="Ya existe un usuario registrado con ese nombre completo")
 
-    if correo_corporativo and db.query(Usuario).filter(
+    # Mantener correos historicos cuando el usuario no los modifica.
+    correo_actual = ((usuario.CorreoCorporativo or "").strip().lower() or None)
+    if correo_corporativo != correo_actual and correo_corporativo and db.query(Usuario).filter(
         Usuario.IdUsuario != usuario.IdUsuario,
         func.lower(Usuario.CorreoCorporativo) == correo_corporativo,
     ).first():
