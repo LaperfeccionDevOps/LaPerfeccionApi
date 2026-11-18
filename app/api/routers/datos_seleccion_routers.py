@@ -2600,8 +2600,9 @@ def _obtener_dashboard_contratacion_individual(
         },
     }
 
-@router.get("/dashboard-contratacion")
-def obtener_dashboard_contratacion(
+
+# Implementacion anterior conservada como referencia, sin ruta publica.
+def _obtener_dashboard_contratacion_anterior(
     db: Annotated[Session, Depends(get_db)],
     anio: int | None = None,
     mes: int | None = None,
@@ -3553,6 +3554,225 @@ def obtener_dashboard_contratacion(
             "legacy_achill_no_reconstruido": True,
             "registros_prueba_no_reconstruidos": True,
         },
+    }
+
+
+@router.get("/dashboard-contratacion")
+def obtener_dashboard_contratacion(
+    db: Annotated[Session, Depends(get_db)],
+    anio: int | None = None,
+    mes: int | None = None,
+    id_registro_personal: int | None = None,
+):
+    """Indicador historico por avance real al estado 24, sin escrituras.
+
+    Cada avance inicia una cohorte. La siguiente entrada al estado 24
+    delimita el proceso anterior para no mezclar reintegros.
+    El estado 24 no se renombra como 'pendiente'.
+    """
+    if mes is not None and not 1 <= mes <= 12:
+        raise HTTPException(status_code=400, detail="El mes debe estar entre 1 y 12.")
+    if anio is not None and anio < 2000:
+        raise HTTPException(status_code=400, detail="El año consultado no es válido.")
+    if id_registro_personal is not None:
+        if id_registro_personal <= 0:
+            raise HTTPException(status_code=400, detail="El IdRegistroPersonal consultado no es válido.")
+        return _obtener_dashboard_contratacion_individual(
+            id_registro_personal=id_registro_personal, db=db,
+        )
+
+    # Los filtros se aplican sobre la fecha del avance, no sobre el desenlace.
+    # El historial completo permite resolver contrataciones de cohortes previas.
+    rows = db.execute(text("""
+        WITH avances AS (
+            SELECT
+                h."IdRegistroPersonal" AS id_registro_personal,
+                h."FechaMovimiento" AS fecha_avance,
+                h."IdHistorialEstadoContratacion" AS id_movimiento,
+                LEAD(h."FechaMovimiento") OVER (
+                    PARTITION BY h."IdRegistroPersonal"
+                    ORDER BY h."FechaMovimiento", h."IdHistorialEstadoContratacion"
+                ) AS siguiente_avance
+            FROM public."HistorialEstadoContratacion" h
+            WHERE h."EstadoNuevo" = 24
+        ),
+        cohortes AS (
+            SELECT a.*, rp."Nombres" AS nombres,
+                   rp."Apellidos" AS apellidos,
+                   rp."NumeroIdentificacion"::text AS numero_identificacion,
+                   rp."IdEstadoProceso" AS estado_actual
+            FROM avances a
+            JOIN public."RegistroPersonal" rp
+              ON rp."IdRegistroPersonal" = a.id_registro_personal
+            WHERE a.fecha_avance >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+              AND (:anio IS NULL OR EXTRACT(YEAR FROM a.fecha_avance AT TIME ZONE 'America/Bogota') = :anio)
+              AND (:mes IS NULL OR EXTRACT(MONTH FROM a.fecha_avance AT TIME ZONE 'America/Bogota') = :mes)
+              AND rp."NumeroIdentificacion"::text NOT IN ('91011506', '0987654', '951357')
+              AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
+              AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
+              AND COALESCE(rp."UsuarioActualizacion", '') <> 'ajuste_no_activos_maestro_2026_06_22'
+              AND NOT EXISTS (
+                  SELECT 1 FROM public."HistorialLaboral" hl
+                  WHERE hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                    AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
+              )
+        )
+        SELECT c.*,
+               contrato.fecha_contratacion,
+               rechazo.fecha_rechazo,
+               rechazo.motivo_rechazo,
+               CASE
+                   WHEN contrato.fecha_contratacion IS NOT NULL
+                        AND (rechazo.fecha_rechazo IS NULL OR contrato.fecha_contratacion <= rechazo.fecha_rechazo)
+                   THEN 'CONTRATADO'
+                   WHEN rechazo.fecha_rechazo IS NOT NULL
+                        AND (contrato.fecha_contratacion IS NULL OR rechazo.fecha_rechazo < contrato.fecha_contratacion)
+                   THEN 'RECHAZADO'
+                   WHEN contrato.fecha_contratacion IS NOT NULL THEN 'CONTRATADO'
+                   ELSE 'AVANZA A CONTRATACION'
+               END AS resultado_proceso
+        FROM cohortes c
+        LEFT JOIN LATERAL (
+            SELECT MIN(h25."FechaMovimiento") AS fecha_contratacion
+            FROM public."HistorialEstadoContratacion" h25
+            WHERE h25."IdRegistroPersonal" = c.id_registro_personal
+              AND h25."EstadoNuevo" = 25
+              AND h25."FechaMovimiento" >= c.fecha_avance
+              AND (c.siguiente_avance IS NULL OR h25."FechaMovimiento" < c.siguiente_avance)
+        ) contrato ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT h28."FechaMovimiento" AS fecha_rechazo,
+                   COALESCE(NULLIF(TRIM(orc."ObservacionesRechazo"), ''),
+                            NULLIF(TRIM(mcp."MotivoCierre"), ''),
+                            'Sin motivo registrado') AS motivo_rechazo
+            FROM public."HistorialEstadoContratacion" h28
+            LEFT JOIN LATERAL (
+                SELECT o."ObservacionesRechazo"
+                FROM public."ObsRechazoContratacion" o
+                WHERE o."IdRegistroPersonal" = c.id_registro_personal
+                ORDER BY o."IdObsRechazoContratacion" DESC LIMIT 1
+            ) orc ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT m."MotivoCierre"
+                FROM public."MotivoCierreProceso" m
+                WHERE m."IdRegistroPersonal" = c.id_registro_personal
+                  AND COALESCE(m."FechaActualizacion", m."FechaCreacion") >= c.fecha_avance
+                  AND (c.siguiente_avance IS NULL OR COALESCE(m."FechaActualizacion", m."FechaCreacion") < c.siguiente_avance)
+                ORDER BY COALESCE(m."FechaActualizacion", m."FechaCreacion") DESC,
+                         m."IdMotivoCierre" DESC LIMIT 1
+            ) mcp ON TRUE
+            WHERE h28."IdRegistroPersonal" = c.id_registro_personal
+              AND h28."EstadoNuevo" = 28
+              AND h28."FechaMovimiento" >= c.fecha_avance
+              AND (c.siguiente_avance IS NULL OR h28."FechaMovimiento" < c.siguiente_avance)
+              AND (UPPER(TRIM(COALESCE(h28."Modulo", ''))) = 'CONTRATACION'
+                   OR h28."EstadoAnterior" = 24)
+            ORDER BY h28."FechaMovimiento", h28."IdHistorialEstadoContratacion"
+            LIMIT 1
+        ) rechazo ON TRUE
+        ORDER BY c.fecha_avance, c.id_registro_personal, c.id_movimiento
+    """), {"anio": anio, "mes": mes}).mappings().all()
+
+    def fecha_iso(valor):
+        return valor.isoformat() if valor is not None else None
+
+    detalles = []
+    for r in rows:
+        detalles.append({
+            "id_registro_personal": r["id_registro_personal"],
+            "id_movimiento": r["id_movimiento"],
+            "nombre_completo": " ".join(filter(None, [r["nombres"], r["apellidos"]])).strip(),
+            "numero_identificacion": r["numero_identificacion"],
+            "fecha_avance": fecha_iso(r["fecha_avance"]),
+            "fecha_contratacion": fecha_iso(r["fecha_contratacion"]),
+            "fecha_rechazo": fecha_iso(r["fecha_rechazo"]),
+            "motivo_rechazo": r["motivo_rechazo"],
+            "resultado": r["resultado_proceso"],
+            "estado_actual": r["estado_actual"],
+        })
+
+    avanzan = len(detalles)
+    contratados = sum(d["resultado"] == "CONTRATADO" for d in detalles)
+    rechazados = sum(d["resultado"] == "RECHAZADO" for d in detalles)
+    en_estado_24 = avanzan - contratados - rechazados
+    porcentaje = lambda cantidad: round(100 * cantidad / avanzan, 2) if avanzan else 0.0
+
+    motivos = {}
+    for d in detalles:
+        if d["resultado"] == "RECHAZADO":
+            motivo = d["motivo_rechazo"] or "Sin motivo registrado"
+            motivos[motivo] = motivos.get(motivo, 0) + 1
+    motivos_rechazo = [
+        {"motivo": k, "cantidad": v,
+         "porcentaje": round(100 * v / rechazados, 2) if rechazados else 0.0}
+        for k, v in sorted(motivos.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+    # Serie para graficas: la cohorte se conserva en su mes de avance.
+    mensual = {}
+    for d in detalles:
+        clave = d["fecha_avance"][:7]
+        item = mensual.setdefault(clave, {"mes": clave, "avanzan_contratacion": 0,
+                                          "contratados": 0, "rechazados": 0,
+                                          "en_estado_24": 0})
+        item["avanzan_contratacion"] += 1
+        if d["resultado"] == "CONTRATADO":
+            item["contratados"] += 1
+        elif d["resultado"] == "RECHAZADO":
+            item["rechazados"] += 1
+        else:
+            item["en_estado_24"] += 1
+    serie_mensual = sorted(mensual.values(), key=lambda item: item["mes"])
+    for item in serie_mensual:
+        base = item["avanzan_contratacion"]
+        item["porcentaje_contratados"] = round(100 * item["contratados"] / base, 2)
+        item["porcentaje_rechazados"] = round(100 * item["rechazados"] / base, 2)
+
+    # Campo historico de compatibilidad: no representa un estado nuevo.
+    # Se entrega para no romper vistas anteriores mientras se actualiza JSX.
+    return {
+        "modo_consulta": "general",
+        "filtros": {"anio": anio, "mes": mes},
+        "fecha_inicio_aplicativo": "2026-03-01",
+        "registrados_seleccion": None,
+        "comparativo_avanzan_contratados": {
+            "avanzan_contratacion": avanzan, "contratados": contratados,
+            "porcentaje_contratados": porcentaje(contratados),
+            "nota": "Cohorte por fecha de avance al estado 24; incluye desenlaces posteriores.",
+        },
+        "comparativo_registrados_contratados": {
+            "registrados_seleccion": None, "contratados": contratados,
+            "porcentaje_contratados": None, "aplica_porcentaje": False,
+        },
+        "contrataciones_finalizadas_periodo": {
+            "total": contratados, "de_cohorte_periodo": contratados,
+            "total_operativo_periodo": None, "provenientes_periodos_anteriores": None,
+        },
+        "rechazados": {"total": rechazados, "motivos": motivos_rechazo},
+        "pendientes_contratacion": {"total": en_estado_24, "estado_actual": 24,
+                                    "nota": "Compatibilidad; no es un estado del aplicativo."},
+        "tarjetas": {
+            "avanzan_contratacion": {"cantidad": avanzan, "porcentaje": 100.0 if avanzan else 0.0},
+            "contratados": {"cantidad": contratados, "porcentaje": porcentaje(contratados)},
+            "rechazados_contratacion": {"cantidad": rechazados, "porcentaje": porcentaje(rechazados)},
+        },
+        "serie_mensual": serie_mensual,
+        "detalle_trabajadores": detalles,
+        "auditoria_cohorte": {"avanzan": avanzan, "contratados": contratados,
+                              "rechazados": rechazados, "en_estado_24": en_estado_24,
+                              "suma_resultados": avanzan, "es_consistente": True},
+        "tiempo_contratacion": {
+            "promedio_minutos": None, "promedio_segundos": None,
+            "promedio_formateado": None, "casos_medidos": 0,
+            "disponible": False,
+            "mensaje": "No calculado en esta version de cohorte historica.",
+        },
+        "criterio_fecha": {
+            "avanzan_contratacion": "HistorialEstadoContratacion.EstadoNuevo=24, fecha local Bogota",
+            "contratados": "Estado 25 posterior al avance y anterior al siguiente avance",
+            "rechazados_contratacion": "Estado 28 posterior, originado en Contratacion o desde estado 24",
+        },
+        "solo_consulta": True,
     }
 
 
