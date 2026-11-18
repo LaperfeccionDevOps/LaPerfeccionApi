@@ -31,6 +31,9 @@ class ContratacionBasicaIn(BaseModel):
     IdBanco: int | None = None
     IdTipoContrato: int | None = None
     FechaIngreso: datetime.date | None = None
+    # Solo aplica a contratos a término fijo (IdTipoContrato = 2).
+    # Se mantiene opcional para no afectar registros y flujos existentes.
+    FechaVencimientoContrato: datetime.date | None = None
     RiesgoLaboral: str | None = None
 
     Posicion: str | None = Field(
@@ -100,7 +103,7 @@ def upsert(
     try:
         result = service.guardar(
             db,
-            payload.model_dump(),
+            {**payload.model_dump(), '_FechaVencimientoContratoEnviada': 'FechaVencimientoContrato' in payload.model_fields_set},
         )
 
         if result is None:

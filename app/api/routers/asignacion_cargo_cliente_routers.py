@@ -13,7 +13,7 @@ router = APIRouter(
 )
 
 #  Cambia esta versión cada vez que modifiques el archivo, para validar en Postman
-ROUTER_VERSION = "V6-POST-RETORNA-ASIGNACION-ACTUALIZADA"
+ROUTER_VERSION = "V7-RQ-SELECCION-CON-FALLBACK-TRADICIONAL"
 
 # ----------------------------
 # Schemas
@@ -170,9 +170,90 @@ def version():
     response_model_exclude_none=False,
 )
 def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db)):
-    print(f"[asignacion-cargo-cliente] {ROUTER_VERSION} - GET: {id_registro_personal}")
+    """
+    Obtiene cargo/cliente/salario para Contratación.
+
+    1) Si existe una vinculación ACTIVA a una RQ enviada a Selección:
+       - Cargo y Cliente: RQOperaciones
+       - Salario: RQCandidato
+    2) Si no existe una RQ aplicable:
+       conserva el flujo tradicional desde AsignacionCargoCliente.
+
+    Este GET es de solo lectura.
+    """
+    print(
+        f"[asignacion-cargo-cliente] {ROUTER_VERSION} - GET: "
+        f"{id_registro_personal}"
+    )
 
     try:
+        # ------------------------------------------------------------
+        # 1) FLUJO NUEVO: RQ DE SELECCIÓN
+        # ------------------------------------------------------------
+        rq_row = db.execute(text("""
+            SELECT
+                rc."IdRegistroPersonal" AS "IdRegistroPersonal",
+                rq."IdCargo" AS "IdCargo",
+                rq."IdCliente" AS "IdCliente",
+                rc."Salario" AS "Salario",
+                rc."UsuarioActualizacion" AS "UsuarioActualizacion",
+                rc."FechaVinculacion" AS "FechaCreacion",
+                rc."FechaActualizacion" AS "FechaActualizacion"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            WHERE rc."IdRegistroPersonal" = :id
+              AND rc."Activo" = true
+              AND rq."Activo" = true
+              AND rq."EnviadoSeleccion" = true
+              AND rq."IdCargo" IS NOT NULL
+              AND rq."IdCliente" IS NOT NULL
+              AND rc."Salario" IS NOT NULL
+              AND COALESCE(rq."EstadoRQ", '') NOT IN ('CANCELADA', 'ANULADA')
+            ORDER BY
+                COALESCE(
+                    rc."FechaActualizacion",
+                    rc."FechaVinculacion"
+                ) DESC,
+                rc."IdRQCandidato" DESC
+            LIMIT 1
+        """), {"id": id_registro_personal}).mappings().first()
+
+        if rq_row:
+            id_cargo = rq_row.get("IdCargo")
+            id_cliente = rq_row.get("IdCliente")
+
+            cargo_nombre = _resolver_cargo_nombre(db, id_cargo)
+            cliente_nombre = _resolver_cliente_nombre(db, id_cliente)
+
+            print(
+                f" asignacion origen=RQ | "
+                f"id_cargo={id_cargo} | "
+                f"id_cliente={id_cliente} | "
+                f"salario={rq_row.get('Salario')}"
+            )
+
+            return AsignacionOut(
+                IdRegistroPersonal=rq_row["IdRegistroPersonal"],
+                IdCargo=int(id_cargo) if id_cargo is not None else 0,
+                IdCliente=int(id_cliente) if id_cliente is not None else 0,
+                Salario=(
+                    float(rq_row["Salario"])
+                    if rq_row.get("Salario") is not None
+                    else 0.0
+                ),
+                UsuarioActualizacion=rq_row.get("UsuarioActualizacion"),
+                FechaCreacion=_dt_to_iso(rq_row.get("FechaCreacion")),
+                FechaActualizacion=_dt_to_iso(
+                    rq_row.get("FechaActualizacion")
+                ),
+                CargoNombre=cargo_nombre,
+                ClienteNombre=cliente_nombre,
+            )
+
+        # ------------------------------------------------------------
+        # 2) FLUJO TRADICIONAL: SE CONSERVA
+        # ------------------------------------------------------------
         row = db.execute(text("""
             SELECT
                 "IdRegistroPersonal",
@@ -188,12 +269,18 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
             LIMIT 1
         """), {"id": id_registro_personal}).mappings().first()
 
-        print(f" row crudo para {id_registro_personal}: {row}")
+        print(
+            f" asignacion origen=TRADICIONAL | "
+            f"row para {id_registro_personal}: {row}"
+        )
 
         if not row:
             raise HTTPException(
                 status_code=404,
-                detail="No existe asignación (cargo/cliente/salario) para este aspirante."
+                detail=(
+                    "No existe asignación (cargo/cliente/salario) "
+                    "para este aspirante."
+                ),
             )
 
         id_cargo = row.get("IdCargo")
@@ -204,7 +291,10 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
         cargo_nombre = _resolver_cargo_nombre(db, id_cargo)
         cliente_nombre = _resolver_cliente_nombre(db, id_cliente)
 
-        print(f" cargo_nombre={cargo_nombre} | cliente_nombre={cliente_nombre}")
+        print(
+            f" cargo_nombre={cargo_nombre} | "
+            f"cliente_nombre={cliente_nombre}"
+        )
 
         return AsignacionOut(
             IdRegistroPersonal=row["IdRegistroPersonal"],
@@ -221,10 +311,13 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
     except HTTPException:
         raise
     except Exception as e:
-        print(f" ERROR REAL en obtener_asignacion({id_registro_personal}): {repr(e)}")
+        print(
+            f" ERROR REAL en obtener_asignacion"
+            f"({id_registro_personal}): {repr(e)}"
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Error interno consultando asignación: {str(e)}"
+            detail=f"Error interno consultando asignación: {str(e)}",
         )
 
 # ----------------------------

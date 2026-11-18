@@ -315,6 +315,10 @@ class RegistroPersonalCreate(BaseModel):
     IdTipoGenero: int
     IdEstadoProceso: int
 
+    # Empresa contratante del ciclo laboral.
+    # Opcional para mantener compatibilidad con flujos existentes.
+    IdEmpresaContratante: int | None = None
+
     NumeroIdentificacion: str
     FechaExpedicion: date | None = None
     FechaNacimiento: date | None = None

@@ -2,7 +2,7 @@ from pathlib import Path
 from datetime import datetime
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from sqlalchemy import text
 import re
 
@@ -129,7 +129,369 @@ def _iter_document_paragraph_groups(doc):
                 yield cell.paragraphs
 
 
-def _insertar_firma_yeny(doc, modo_compacto: bool = False):
+def _replace_text_across_runs(paragraph, old_text: str, new_text: str):
+    """Reemplaza texto aunque Word lo haya dividido entre varios runs."""
+    if old_text not in paragraph.text:
+        return False
+
+    full_text = paragraph.text.replace(old_text, new_text)
+
+    if paragraph.runs:
+        paragraph.runs[0].text = full_text
+        for run in paragraph.runs[1:]:
+            run.text = ""
+    else:
+        paragraph.add_run(full_text)
+
+    return True
+
+
+def _resolve_empresa_logo(empresa_logo) -> Path:
+    """Resuelve la ruta del logo guardada en EmpresaContratante."""
+    logo_value = _clean_text(empresa_logo)
+    if not logo_value:
+        raise ValueError("La empresa contratante no tiene logo configurado.")
+
+    logo_path = Path(logo_value.replace("\\", "/"))
+    if not logo_path.is_absolute():
+        logo_path = BASE_DIR / logo_path
+
+    if not logo_path.exists():
+        raise FileNotFoundError(f"No se encontró el logo de la empresa: {logo_path}")
+
+    return logo_path
+
+
+def _validar_empresa_rrll(datos: dict) -> str:
+    """Valida que RRLL conozca la empresa exacta del ciclo laboral del retiro."""
+    codigo = _upper_text(datos.get("EmpresaCodigo"))
+
+    if codigo not in {"ALP", "MI"}:
+        raise ValueError(
+            "No fue posible determinar la empresa contratante del retiro. "
+            "El documento RRLL no se generará para evitar usar un membrete incorrecto. "
+            f"IdRetiroLaboral={datos.get('IdRetiroLaboral')}, "
+            f"IdVinculacionLaboral={datos.get('IdVinculacionLaboral') or 'SIN VINCULACIÓN'}, "
+            f"EmpresaCodigo={codigo or 'SIN CÓDIGO'}."
+        )
+
+    return codigo
+
+
+def _configurar_encabezado_empresa(doc, datos: dict):
+    """
+    Conserva el encabezado ALP original de la plantilla.
+    Para Mantener reemplaza únicamente el logo del encabezado.
+    """
+    codigo = _validar_empresa_rrll(datos)
+    if codigo == "ALP":
+        return
+
+    logo_path = _resolve_empresa_logo(datos.get("EmpresaLogo"))
+
+    for section in doc.sections:
+        header = section.header
+        paragraphs = header.paragraphs
+
+        if not paragraphs:
+            paragraph = header.add_paragraph()
+        else:
+            paragraph = paragraphs[0]
+
+        for p in paragraphs:
+            for drawing in p._p.xpath(".//w:drawing"):
+                parent = drawing.getparent()
+                if parent is not None:
+                    parent.remove(drawing)
+            for pict in p._p.xpath(".//w:pict"):
+                parent = pict.getparent()
+                if parent is not None:
+                    parent.remove(pict)
+
+        _clear_paragraph(paragraph)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = paragraph.add_run()
+        run.add_picture(str(logo_path), width=Inches(2.15))
+
+
+def _configurar_pie_empresa(doc, datos: dict):
+    """
+    Conserva el pie ALP original de la plantilla.
+    Para Mantener usa el mismo pie institucional validado en Nómina.
+    """
+    codigo = _validar_empresa_rrll(datos)
+    if codigo == "ALP":
+        return
+
+    lineas = [
+        (
+            "Soluciones integrales para el sector residencial, comercial e institucional, "
+            "anticipándose a las necesidades de sus clientes con innovación, gestión eficiente "
+            "y tecnología de vanguardia."
+        ),
+        (
+            "Contamos con un equipo calificado y un firme compromiso con la calidad, "
+            "el medio ambiente y el desarrollo sostenible."
+        ),
+        "______________________________________________________________________________________________",
+        "Calle 25 # 32-22 de Bogotá D.C. – Colombia – +57 318 430 7338",
+        "comercial@manteneringenieria.com",
+        "www.manteneringenieria.com",
+    ]
+
+    for section in doc.sections:
+        footer = section.footer
+        paragraphs = footer.paragraphs
+
+        if not paragraphs:
+            paragraphs = [footer.add_paragraph()]
+
+        # Limpia el contenido ALP existente, sin tocar el cuerpo del documento.
+        for paragraph in paragraphs:
+            _clear_paragraph(paragraph)
+
+        while len(footer.paragraphs) < len(lineas):
+            footer.add_paragraph()
+
+        for index, linea in enumerate(lineas):
+            paragraph = footer.paragraphs[index]
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = 0
+            paragraph.paragraph_format.space_after = 0
+            run = paragraph.add_run(linea)
+            run.font.size = Pt(5.5 if index < 2 else 6.5)
+
+        # Si la plantilla tenía más párrafos en el pie, se dejan vacíos.
+        for paragraph in footer.paragraphs[len(lineas):]:
+            _clear_paragraph(paragraph)
+
+
+def _configurar_texto_empresa_abandono(doc, datos: dict):
+    """Ajusta la referencia a las oficinas según la empresa contratante."""
+    codigo = _validar_empresa_rrll(datos)
+    if codigo == "ALP":
+        return
+
+    texto_alp = "Aseos la perfección (Calle 4 bis N. 53 c – 50)"
+    texto_mi = "Mantener Ingeniería (Calle 25 # 32-22)"
+
+    for paragraph in doc.paragraphs:
+        _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+
+def _aplicar_membrete_rrll(doc, datos: dict):
+    """Aplica el branding empresarial únicamente a documentos RRLL de abandono."""
+    _configurar_encabezado_empresa(doc, datos)
+    _configurar_pie_empresa(doc, datos)
+    _configurar_texto_empresa_abandono(doc, datos)
+
+
+def _configurar_texto_empresa_finalizacion(doc, datos: dict):
+    """Ajusta las referencias empresariales de la carta de finalización."""
+    codigo = _validar_empresa_rrll(datos)
+    if codigo == "ALP":
+        return
+
+    reemplazos_empresa = {
+        "Aseos la perfección S.A.S": "Mantener Ingeniería",
+        "Aseos La Perfección S.A.S": "Mantener Ingeniería",
+        "Aseos la Perfección": "Mantener Ingeniería",
+        "Aseos La Perfección": "Mantener Ingeniería",
+    }
+
+    for paragraph in doc.paragraphs:
+        for texto_alp, texto_mi in reemplazos_empresa.items():
+            _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for texto_alp, texto_mi in reemplazos_empresa.items():
+                        _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+
+def _aplicar_membrete_finalizacion(doc, datos: dict):
+    """Aplica logo, pie y textos empresariales a la carta de finalización RRLL."""
+    _configurar_encabezado_empresa(doc, datos)
+    _configurar_pie_empresa(doc, datos)
+    _configurar_texto_empresa_finalizacion(doc, datos)
+
+
+def _configurar_texto_empresa_paquete(doc, datos: dict):
+    """
+    Ajusta únicamente las referencias textuales de empresa dentro del paquete
+    de retiro. Conserva intacto el contenido jurídico y funcional del formato.
+    """
+    codigo = _validar_empresa_rrll(datos)
+    if codigo == "ALP":
+        return
+
+    reemplazos_empresa = {
+        "Aseos La Perfección S.A.S.": "Mantener Ingeniería",
+        "Aseos la Perfección S.A.S.": "Mantener Ingeniería",
+        "Aseos La Perfección S.A.S": "Mantener Ingeniería",
+        "Aseos la Perfección S.A.S": "Mantener Ingeniería",
+        "Aseos La Perfección": "Mantener Ingeniería",
+        "Aseos la Perfección": "Mantener Ingeniería",
+    }
+
+    for paragraph in doc.paragraphs:
+        for texto_alp, texto_mi in reemplazos_empresa.items():
+            _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for texto_alp, texto_mi in reemplazos_empresa.items():
+                        _replace_text_across_runs(paragraph, texto_alp, texto_mi)
+
+
+def _aplicar_membrete_paquete(doc, datos: dict):
+    """
+    Aplica branding ALP/MI al paquete completo de retiro.
+    Los encabezados y pies se procesan por sección, por lo que cubre las
+    tres páginas del paquete sin alterar su estructura.
+    """
+    _configurar_encabezado_empresa(doc, datos)
+    _configurar_pie_empresa(doc, datos)
+    _configurar_texto_empresa_paquete(doc, datos)
+
+
+def _compactar_informacion_paquete_mantener(doc, empresa_codigo: str, es_voluntario: bool = False):
+    """
+    Compacta exclusivamente el bloque INFOR­MACIÓN IMPORTANTE del paquete MI.
+    ALP queda intacto. No agrega ni elimina saltos de página.
+    """
+    if _upper_text(empresa_codigo) != "MI":
+        return
+
+    inicio_encontrado = False
+
+    # Tomamos una sola instantánea de los párrafos. No usamos
+    # doc.paragraphs.index(paragraph), porque python-docx crea objetos Paragraph
+    # nuevos en cada acceso y eso puede producir ValueError / HTTP 500.
+    paragraphs = list(doc.paragraphs)
+
+    for indice_actual, paragraph in enumerate(paragraphs):
+        texto = _clean_text(paragraph.text).upper()
+
+        if "INFORMACIÓN IMPORTANTE" in texto or "INFORMACION IMPORTANTE" in texto:
+            # Este recorte de párrafos vacíos corresponde EXCLUSIVAMENTE a la
+            # plantilla de retiro VOLUNTARIO de Mantener. El paquete NORMAL
+            # conserva intacta su estructura original.
+            if es_voluntario:
+                for previo in paragraphs[max(0, indice_actual - 4):indice_actual]:
+                    if not previo.text.strip() and not _paragraph_has_image(previo):
+                        parent = previo._p.getparent()
+                        if parent is not None:
+                            parent.remove(previo._p)
+
+            inicio_encontrado = True
+            paragraph.paragraph_format.space_before = 0
+            paragraph.paragraph_format.space_after = Pt(2)
+            paragraph.paragraph_format.keep_with_next = True
+
+        if not inicio_encontrado:
+            continue
+
+        # Recupera espacio vertical únicamente en las hojas informativas de MI.
+        paragraph.paragraph_format.space_before = 0
+        paragraph.paragraph_format.space_after = 0
+        paragraph.paragraph_format.line_spacing = 0.86
+
+        # Conserva el título visible; compacta ligeramente el texto informativo.
+        es_titulo = (
+            "INFORMACIÓN IMPORTANTE" in texto
+            or "INFORMACION IMPORTANTE" in texto
+        )
+        for run in paragraph.runs:
+            if es_titulo:
+                if run.font.size is None or run.font.size.pt > 8:
+                    run.font.size = Pt(8)
+            else:
+                if run.font.size is None or run.font.size.pt > 7.5:
+                    run.font.size = Pt(7.5)
+
+
+
+def _ajustar_informacion_paquete_voluntario_alp(doc, empresa_codigo: str, es_voluntario: bool = False):
+    """
+    Ajusta exclusivamente ALP + retiro voluntario.
+    Sube el inicio de INFORMACIÓN IMPORTANTE y distribuye mejor el texto
+    entre las hojas informativas, sin tocar el paquete normal ni Mantener.
+    """
+    if _upper_text(empresa_codigo) != "ALP" or not es_voluntario:
+        return
+
+    paragraphs = list(doc.paragraphs)
+    inicio = None
+
+    for i, paragraph in enumerate(paragraphs):
+        texto = _clean_text(paragraph.text).upper()
+        if "INFORMACIÓN IMPORTANTE" in texto or "INFORMACION IMPORTANTE" in texto:
+            inicio = i
+            break
+
+    if inicio is None:
+        return
+
+    # Elimina únicamente los párrafos vacíos inmediatamente anteriores al
+    # encabezado informativo. Esto hace que el bloque suba en la hoja 2.
+    for previo in paragraphs[max(0, inicio - 8):inicio]:
+        if not previo.text.strip() and not _paragraph_has_image(previo):
+            parent = previo._p.getparent()
+            if parent is not None:
+                parent.remove(previo._p)
+
+    # Vuelve a tomar la lista porque acabamos de retirar párrafos vacíos.
+    paragraphs = list(doc.paragraphs)
+    inicio_encontrado = False
+
+    for paragraph in paragraphs:
+        texto = _clean_text(paragraph.text).upper()
+
+        if "INFORMACIÓN IMPORTANTE" in texto or "INFORMACION IMPORTANTE" in texto:
+            inicio_encontrado = True
+            paragraph.paragraph_format.space_before = 0
+            paragraph.paragraph_format.space_after = Pt(3)
+            paragraph.paragraph_format.keep_with_next = True
+
+        if not inicio_encontrado:
+            continue
+
+        # ALP voluntario: letra un poco mayor que la compactación de Mantener,
+        # pero con espacios controlados para aprovechar mejor las hojas 2-4.
+        paragraph.paragraph_format.space_before = 0
+        paragraph.paragraph_format.space_after = 0
+        paragraph.paragraph_format.line_spacing = 0.95
+
+        es_titulo = (
+            "INFORMACIÓN IMPORTANTE" in texto
+            or "INFORMACION IMPORTANTE" in texto
+        )
+
+        for run in paragraph.runs:
+            if es_titulo:
+                if run.font.size is None or run.font.size.pt < 8.5:
+                    run.font.size = Pt(8.5)
+            else:
+                if run.font.size is None or run.font.size.pt < 8:
+                    run.font.size = Pt(8)
+
+def _insertar_firma_yeny(
+    doc,
+    modo_compacto: bool = False,
+    empresa_codigo: str = "ALP",
+    preservar_estructura_paginas: bool = False,
+):
     """
     Reemplaza los placeholders de nombre/cargo por la imagen completa de Yeny.
     Si existe una firma vieja inmediatamente antes de los placeholders,
@@ -164,21 +526,63 @@ def _insertar_firma_yeny(doc, modo_compacto: bool = False):
                 paragraph.paragraph_format.space_after = 0
                 ancho_firma = Inches(2.10)
             else:
-                # Se conserva exactamente el formato que ya quedó validado
-                # para primer llamado, segundo llamado y paquetes de retiro.
-                paragraph.paragraph_format.keep_together = True
-                paragraph.paragraph_format.keep_with_next = True
-                ancho_firma = Inches(2.35)
+                # Primer y segundo llamado: firma compacta para conservar una sola hoja.
+                paragraph.paragraph_format.keep_together = False
+                paragraph.paragraph_format.keep_with_next = False
+                paragraph.paragraph_format.space_before = 0
+                paragraph.paragraph_format.space_after = 0
+                ancho_firma = Inches(2.10)
+
+            # Solo el paquete de Mantener necesita recuperar un poco de espacio
+            # vertical. Los documentos ALP y las cartas individuales quedan intactos.
+            if preservar_estructura_paginas and _upper_text(empresa_codigo) == "MI":
+                ancho_firma = Inches(1.82)
 
             run = paragraph.add_run()
             run.add_picture(str(FIRMA_YENY), width=ancho_firma)
 
-            texto_firma = paragraph.add_run(
-                "\nYENY CUESTO"
-                "\nANALISTA TALENTO HUMANO"
-                "\nAseos La Perfección S.A.S."
+            empresa_firma = (
+                "Mantener Ingeniería"
+                if _upper_text(empresa_codigo) == "MI"
+                else "Aseos La Perfección S.A.S."
             )
-            texto_firma.bold = True
+
+            # En los paquetes de Mantener compactamos exclusivamente el bloque
+            # de firma para que nombre, cargo y empresa no salten a la hoja siguiente.
+            # ALP queda exactamente con el comportamiento actual validado.
+            es_paquete_mantener = (
+                preservar_estructura_paginas
+                and _upper_text(empresa_codigo) == "MI"
+            )
+
+            if es_paquete_mantener:
+                # La imagen un poco más compacta recupera espacio vertical sin
+                # alterar el contenido ni introducir saltos de página artificiales.
+                inline_shape = paragraph.runs[-1]._r.xpath(".//wp:inline")
+                if inline_shape:
+                    # La imagen ya fue insertada arriba; el ancho se controla
+                    # desde el run gráfico mediante el tamaño inicial.
+                    pass
+
+                texto_firma = paragraph.add_run(
+                    "\nYENY CUESTO"
+                    "\nANALISTA TALENTO HUMANO"
+                    f"\n{empresa_firma}"
+                )
+                texto_firma.bold = True
+                texto_firma.font.size = Pt(7.5)
+                paragraph.paragraph_format.line_spacing = 0.85
+                paragraph.paragraph_format.space_before = 0
+                paragraph.paragraph_format.space_after = 0
+                paragraph.paragraph_format.keep_together = True
+                paragraph.paragraph_format.keep_with_next = False
+            else:
+                texto_firma = paragraph.add_run(
+                    "\nYENY CUESTO"
+                    "\nANALISTA TALENTO HUMANO"
+                    f"\n{empresa_firma}"
+                )
+                texto_firma.bold = True
 
             firma_insertada = True
 
@@ -193,14 +597,17 @@ def _insertar_firma_yeny(doc, modo_compacto: bool = False):
                     # completo de la firma nueva.
                     if index + 2 < len(paragraphs):
                         company_paragraph = paragraphs[index + 2]
-                        if company_paragraph.text.strip().upper() == "ASEOS LA PERFECCIÓN S.A.S.":
+                        if company_paragraph.text.strip().upper() in {
+                            "ASEOS LA PERFECCIÓN S.A.S.",
+                            "MANTENER INGENIERÍA",
+                        }:
                             _clear_paragraph(company_paragraph)
 
-            if modo_compacto:
-                # La plantilla de finalización ya cabe en una sola hoja.
-                # Al insertar la firma quedan párrafos vacíos al final del cuerpo
-                # que Word puede desplazar a una segunda página. Se eliminan solo
-                # esos párrafos vacíos posteriores al bloque de firma.
+            # En cartas individuales retiramos párrafos vacíos posteriores
+            # a la firma para evitar una hoja residual. En el paquete de retiro
+            # preservamos esos párrafos porque pueden formar parte de la
+            # estructura/paginación original de la plantilla Word.
+            if not preservar_estructura_paginas:
                 _remove_trailing_empty_paragraphs(paragraphs, index + 1)
 
     if not firma_insertada:
@@ -225,6 +632,11 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
     query = text("""
         SELECT
             rl."IdRetiroLaboral",
+            rl."IdVinculacionLaboral",
+            vl."IdEmpresaContratante",
+            ec."Codigo" AS "EmpresaCodigo",
+            ec."Nombre" AS "EmpresaNombre",
+            ec."Logo" AS "EmpresaLogo",
             rp."NumeroIdentificacion" AS "NumeroDocumento",
             TRIM(
                 COALESCE(rp."Nombres", '') || ' ' ||
@@ -238,6 +650,10 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
         FROM public."RetiroLaboral" rl
         INNER JOIN public."RegistroPersonal" rp
             ON rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
         LEFT JOIN public."DatosAdicionales" da
             ON rp."IdRegistroPersonal" = da."IdRegistroPersonal"
         LEFT JOIN public."AsignacionCargoCliente" acc
@@ -262,6 +678,9 @@ def obtener_datos_primer_llamado(db, id_retiro_laboral: int):
     datos["Barrio"] = _clean_text(datos.get("Barrio"))
     datos["Telefono"] = _clean_text(datos.get("Telefono"))
     datos["Cargo"] = _clean_text(datos.get("Cargo"))
+    datos["EmpresaCodigo"] = _upper_text(datos.get("EmpresaCodigo"))
+    datos["EmpresaNombre"] = _clean_text(datos.get("EmpresaNombre"))
+    datos["EmpresaLogo"] = _clean_text(datos.get("EmpresaLogo"))
 
     return datos
 
@@ -271,8 +690,11 @@ def generar_primer_llamado(db, id_retiro_laboral: int):
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_PRIMER_LLAMADO}")
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
+    empresa_codigo = _validar_empresa_rrll(datos)
+
     doc = Document(str(TEMPLATE_PRIMER_LLAMADO))
-    _insertar_firma_yeny(doc)
+    _aplicar_membrete_rrll(doc, datos)
+    _insertar_firma_yeny(doc, empresa_codigo=empresa_codigo)
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -312,8 +734,11 @@ def generar_segundo_llamado(db, id_retiro_laboral: int):
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_SEGUNDO_LLAMADO}")
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
+    empresa_codigo = _validar_empresa_rrll(datos)
+
     doc = Document(str(TEMPLATE_SEGUNDO_LLAMADO))
-    _insertar_firma_yeny(doc)
+    _aplicar_membrete_rrll(doc, datos)
+    _insertar_firma_yeny(doc, empresa_codigo=empresa_codigo)
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -353,8 +778,15 @@ def generar_carta_finalizacion(db, id_retiro_laboral: int):
         raise FileNotFoundError(f"No se encontró la plantilla: {TEMPLATE_CARTA_FINALIZACION}")
 
     datos = obtener_datos_primer_llamado(db, id_retiro_laboral)
+    empresa_codigo = _validar_empresa_rrll(datos)
+
     doc = Document(str(TEMPLATE_CARTA_FINALIZACION))
-    _insertar_firma_yeny(doc, modo_compacto=True)
+    _aplicar_membrete_finalizacion(doc, datos)
+    _insertar_firma_yeny(
+        doc,
+        modo_compacto=True,
+        empresa_codigo=empresa_codigo,
+    )
 
     fecha_ausencia = datos.get("FechaAusencia")
     if fecha_ausencia:
@@ -427,7 +859,94 @@ def generar_paquete_retiro(db, id_retiro_laboral: int):
         print("DEBUG PAQUETE: usando plantilla NORMAL")
         doc = Document(str(TEMPLATE_PAQUETE_RETIRO))
 
-    _insertar_firma_yeny(doc)
+    empresa_codigo = _validar_empresa_rrll(datos)
+    _aplicar_membrete_paquete(doc, datos)
+    _insertar_firma_yeny(
+        doc,
+        modo_compacto=False,
+        empresa_codigo=empresa_codigo,
+        preservar_estructura_paginas=True,
+    )
+
+    # Solo Mantener: sube y compacta el bloque informativo para conservar
+    # el paquete en tres hojas. ALP no entra en este ajuste.
+    _compactar_informacion_paquete_mantener(
+        doc,
+        empresa_codigo,
+        es_voluntario=es_voluntario,
+    )
+
+    # ALP + retiro voluntario: mantiene carta y examen en hojas independientes,
+    # y hace que INFORMACIÓN IMPORTANTE comience obligatoriamente en la hoja siguiente.
+    if empresa_codigo == "ALP" and es_voluntario:
+        paragraphs = list(doc.paragraphs)
+        inicio_info = None
+
+        for paragraph in paragraphs:
+            texto = _clean_text(paragraph.text).upper()
+            if "INFORMACIÓN IMPORTANTE" in texto or "INFORMACION IMPORTANTE" in texto:
+                inicio_info = paragraph
+                break
+
+        if inicio_info is not None:
+            # El título nunca puede quedar pegado al final de la hoja del examen.
+            inicio_info.paragraph_format.page_break_before = True
+            inicio_info.paragraph_format.space_before = 0
+            inicio_info.paragraph_format.space_after = Pt(3)
+            inicio_info.paragraph_format.keep_with_next = True
+
+            # Desde INFORMACIÓN IMPORTANTE en adelante aumentamos ligeramente
+            # la letra para aprovechar mejor las hojas 3 y 4 y mejorar legibilidad.
+            encontrado = False
+            for paragraph in paragraphs:
+                texto = _clean_text(paragraph.text).upper()
+                if paragraph._p is inicio_info._p:
+                    encontrado = True
+
+                if not encontrado:
+                    continue
+
+                paragraph.paragraph_format.space_before = 0
+                paragraph.paragraph_format.space_after = 0
+                paragraph.paragraph_format.line_spacing = 1.0
+
+                es_titulo = (
+                    "INFORMACIÓN IMPORTANTE" in texto
+                    or "INFORMACION IMPORTANTE" in texto
+                )
+
+                for run in paragraph.runs:
+                    if es_titulo:
+                        if run.font.size is None or run.font.size.pt < 9:
+                            run.font.size = Pt(9)
+                    else:
+                        if run.font.size is None or run.font.size.pt < 8.5:
+                            run.font.size = Pt(8.5)
+
+            # Recupera apenas el espacio necesario para que el bloque final
+            # RECIBIDO / FECHA permanezca en la hoja 4. No toca hojas 1-2
+            # ni modifica otros tipos de documento.
+            for paragraph in paragraphs:
+                texto = _clean_text(paragraph.text).upper()
+                if "RECIBIDO" in texto or "{{FECHA_FIN}}" in paragraph.text:
+                    paragraph.paragraph_format.space_before = 0
+                    paragraph.paragraph_format.space_after = 0
+                    paragraph.paragraph_format.line_spacing = 0.90
+                    paragraph.paragraph_format.keep_together = False
+                    paragraph.paragraph_format.keep_with_next = False
+
+            # Compacta ligeramente el bloque informativo ALP voluntario.
+            # La reducción es mínima para conservar la legibilidad ya validada,
+            # pero evita que la fecha final quede sola en una quinta hoja.
+            encontrado = False
+            for paragraph in paragraphs:
+                if paragraph._p is inicio_info._p:
+                    encontrado = True
+                if not encontrado:
+                    continue
+                texto = _clean_text(paragraph.text).upper()
+                if "INFORMACIÓN IMPORTANTE" not in texto and "INFORMACION IMPORTANTE" not in texto:
+                    paragraph.paragraph_format.line_spacing = 0.94
 
     fecha_fin = datos.get("FechaAusencia")
     if fecha_fin:

@@ -70,6 +70,16 @@ RUTA_LOGO_EMPRESA = (
     / "LOGO_EMPRESA_NIT.png"
 )
 
+# Logo institucional de Mantener Ingeniería. Es el mismo archivo usado
+# en el frontend: public/LOGO/LOGO_MANTENER_INGENIERIA.png.
+# En el backend se instala junto al logo actual de ALP.
+RUTA_LOGO_MANTENER = (
+    APP_DIR
+    / "assets"
+    / "comunicaciones"
+    / "LOGO_MANTENER_INGENIERIA.png"
+)
+
 RUTA_LOGO_ISSA = (
     APP_DIR
     / "assets"
@@ -2118,28 +2128,31 @@ def _dibujar_logo_canvas(
 def _dibujar_encabezado_carta_descargos(
     canvas,
     documento,
+    codigo_empresa: str = "ALP",
 ):
     """
-    Encabezado y pie institucional del Acta de Descargos.
+    Encabezado y pie del Acta según la empresa contratante.
 
-    Reglas del formato vigente:
-    - Solo se muestra el logo de Aseos La Perfección con NIT.
-    - No se muestran logos de ISSA, ICONTEC ni IQNET.
-    - El pie de página conserva la información institucional del
-      formato suministrado por Relaciones Laborales.
+    ALP mantiene íntegro su membrete vigente. Para MI se utiliza
+    su logotipo y no se imprimen los datos comerciales de ALP.
+    El valor por defecto conserva otros usos históricos del helper.
     """
 
     canvas.saveState()
 
     # ========================================================
-    # ENCABEZADO - SOLO ASEOS LA PERFECCIÓN CON NIT
+    # ENCABEZADO - EMPRESA CONTRATANTE DEL EXPEDIENTE
     # ========================================================
 
     y_base = LETTER[1] - 2.55 * cm
 
     _dibujar_logo_canvas(
         canvas=canvas,
-        ruta=RUTA_LOGO_EMPRESA,
+        ruta=(
+            RUTA_LOGO_MANTENER
+            if codigo_empresa == "MI"
+            else RUTA_LOGO_EMPRESA
+        ),
         x=1.85 * cm,
         y=y_base,
         ancho_maximo=5.75 * cm,
@@ -2153,6 +2166,28 @@ def _dibujar_encabezado_carta_descargos(
 
     ancho_pagina = LETTER[0]
     centro_x = ancho_pagina / 2
+
+    # No mezclar la papelería legal de Aseos La Perfección con
+    # documentos de Mantener Ingeniería. Sus datos comerciales
+    # completos se incorporarán solo cuando estén confirmados.
+    if codigo_empresa == "MI":
+        canvas.setStrokeColor(colors.HexColor("#4B5563"))
+        canvas.setLineWidth(0.35)
+        canvas.line(
+            1.85 * cm,
+            1.20 * cm,
+            ancho_pagina - 1.85 * cm,
+            1.20 * cm,
+        )
+        canvas.setFillColor(colors.HexColor("#4B5563"))
+        canvas.setFont("Helvetica-Bold", 7)
+        canvas.drawCentredString(
+            centro_x,
+            0.78 * cm,
+            "MANTENER INGENIERÍA",
+        )
+        canvas.restoreState()
+        return
 
     canvas.setFillColor(colors.black)
 
@@ -2500,6 +2535,106 @@ def _obtener_datos_trabajador(
     return datos
 
 
+def _obtener_empresa_contratante_acta(
+    db: Session,
+    proceso: ProcesoDisciplinario,
+) -> dict:
+    """Resuelve la empresa del expediente, no el cliente del trabajador.
+
+    Prioridad: vinculación laboral asociada al proceso. Cuando no tiene
+    empresa, se acepta la RQ del trabajador únicamente si todas las RQ
+    activas que informan empresa coinciden (misma regla de Agenda).
+    Nunca se asigna ALP por defecto a un expediente sin empresa.
+    """
+    sql = text(
+        """
+        SELECT
+            ec."IdEmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa",
+            ec."Nombre" AS "NombreEmpresa"
+        FROM public."ProcesoDisciplinario" pd
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" = pd."IdVinculacionLaboral"
+        LEFT JOIN LATERAL (
+            SELECT MIN(rq."IdEmpresaContratante") AS "IdEmpresaContratante"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            WHERE rc."IdRegistroPersonal" = pd."IdRegistroPersonal"
+              AND rc."Activo" = TRUE
+              AND rq."IdEmpresaContratante" IS NOT NULL
+            HAVING COUNT(DISTINCT rq."IdEmpresaContratante") = 1
+        ) rq_empresa ON vl."IdEmpresaContratante" IS NULL
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = COALESCE(
+                vl."IdEmpresaContratante",
+                rq_empresa."IdEmpresaContratante"
+            )
+        WHERE pd."IdProcesoDisciplinario" = :id_proceso
+        LIMIT 1
+        """
+    )
+
+    fila = (
+        db.execute(
+            sql,
+            {"id_proceso": proceso.IdProcesoDisciplinario},
+        )
+        .mappings()
+        .first()
+    )
+
+    if not fila or fila["IdEmpresaContratante"] is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No se pudo identificar la empresa contratante del "
+                "expediente disciplinario. Verifique su vinculación "
+                "laboral antes de generar el Acta de Descargos."
+            ),
+        )
+
+    empresa = dict(fila)
+    codigo = _texto_seguro(empresa.get("CodigoEmpresa")).upper()
+    nombre = _texto_seguro(empresa.get("NombreEmpresa")).upper()
+    nombre = (
+        nombre.replace("Á", "A").replace("É", "E")
+        .replace("Í", "I").replace("Ó", "O")
+        .replace("Ú", "U")
+    )
+
+    if codigo == "MI" or "MANTENER" in nombre:
+        empresa["TipoMembrete"] = "MI"
+    elif codigo == "ALP" or "ASEOS LA PERFECCION" in nombre:
+        empresa["TipoMembrete"] = "ALP"
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "La empresa contratante del expediente no tiene un "
+                "membrete configurado para el Acta de Descargos: "
+                f"{empresa.get('NombreEmpresa') or codigo}."
+            ),
+        )
+
+    if (
+        empresa["TipoMembrete"] == "MI"
+        and not RUTA_LOGO_MANTENER.is_file()
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Falta el logo de Mantener Ingeniería en el backend: "
+                "assets/comunicaciones/LOGO_MANTENER_INGENIERIA.png. "
+                "Copie allí el archivo public/LOGO/"
+                "LOGO_MANTENER_INGENIERIA.png del frontend. "
+                "No se generó el Acta para evitar un logo incorrecto."
+            ),
+        )
+
+    return empresa
+
+
 def _obtener_evidencias_trabajador(
     db: Session,
     id_proceso: int,
@@ -2794,6 +2929,21 @@ def _generar_pdf_carta_descargos(
       asociado al expediente disciplinario para consulta/descarga.
     """
 
+    empresa = _obtener_empresa_contratante_acta(
+        db=db,
+        proceso=proceso,
+    )
+    codigo_empresa = empresa["TipoMembrete"]
+
+    # ReportLab recibe una función para cada página del Acta.
+    # Se conserva la misma empresa en todas las páginas generadas.
+    def dibujar_membrete_empresa(canvas, documento):
+        _dibujar_encabezado_carta_descargos(
+            canvas,
+            documento,
+            codigo_empresa=codigo_empresa,
+        )
+
     buffer = io.BytesIO()
 
     documento_pdf = SimpleDocTemplate(
@@ -2804,7 +2954,7 @@ def _generar_pdf_carta_descargos(
         topMargin=3.55 * cm,
         bottomMargin=1.45 * cm,
         title="Acta de Descargos",
-        author="Aseos La Perfección",
+        author=empresa["NombreEmpresa"],
     )
 
     estilos = _estilos_carta_descargos()
@@ -2897,6 +3047,14 @@ def _generar_pdf_carta_descargos(
         responsable.upper()
     )
 
+    # Para MI se nombra expresamente a la empresa representada.
+    # ALP conserva el texto histórico «LA EMPRESA» sin cambios.
+    empresa_representada_pdf = (
+        _texto_pdf_seguro(empresa["NombreEmpresa"].upper())
+        if codigo_empresa == "MI"
+        else "LA EMPRESA"
+    )
+
     modalidad_pdf = _texto_pdf_seguro(
         modalidad_texto
     )
@@ -2970,7 +3128,7 @@ def _generar_pdf_carta_descargos(
             (
                 "En la presente diligencia participa "
                 f"<b>{responsable_pdf}</b>, quien actúa en representación "
-                "de <b>LA EMPRESA</b>."
+                f"de <b>{empresa_representada_pdf}</b>."
             ),
             estilos["normal"],
         )
@@ -3035,7 +3193,7 @@ def _generar_pdf_carta_descargos(
                 "su versión de los hechos, formular las aclaraciones que "
                 "considere necesarias, aportar pruebas, solicitar la "
                 "práctica de aquellas que estime pertinentes, controvertir "
-                "las allegadas por <b>LA EMPRESA</b> y efectuar las "
+                f"las allegadas por <b>{empresa_representada_pdf}</b> y efectuar las "
                 "manifestaciones que considere necesarias para el ejercicio "
                 "pleno de su derecho de defensa."
             ),
@@ -3480,8 +3638,8 @@ def _generar_pdf_carta_descargos(
 
     documento_pdf.build(
         contenido,
-        onFirstPage=_dibujar_encabezado_carta_descargos,
-        onLaterPages=_dibujar_encabezado_carta_descargos,
+        onFirstPage=dibujar_membrete_empresa,
+        onLaterPages=dibujar_membrete_empresa,
     )
 
     buffer.seek(0)

@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 ASSETS = BASE_DIR / "assets" / "comunicaciones"
 
 LOGO_EMPRESA = ASSETS / "LOGO_EMPRESA_NIT.png"
+LOGO_MANTENER = ASSETS / "LOGO_MANTENER_INGENIERIA.png"
 FIRMA = ASSETS / "FIRMA_EMPLEADORV1.png"
 
 OUTPUT = BASE_DIR.parent / "storage" / "nomina" / "comunicaciones"
@@ -204,9 +205,45 @@ LOGO_EMPRESA_LIMPIO = limpiar_fondo_imagen(
 FIRMA_LIMPIA = FIRMA
 
 
+def seleccionar_logo_empresa(datos):
+    """Selecciona el logo únicamente de la empresa confirmada del retiro."""
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    id_empresa = str(datos.get("IdEmpresaContratante") or "").strip()
+    if not datos.get("IdVinculacionLaboral") or not id_empresa:
+        raise ValueError("El retiro no tiene ciclo laboral y empresa contratante confirmados.")
+    empresas = {"ALP": ("1", LOGO_EMPRESA_LIMPIO), "MI": ("2", LOGO_MANTENER)}
+    if codigo not in empresas or id_empresa != empresas[codigo][0]:
+        raise ValueError("La empresa contratante no coincide con la vinculación laboral del retiro.")
+    logo = empresas[codigo][1]
+    if not logo.is_file():
+        raise FileNotFoundError(f"No se encontró el logotipo autorizado para {codigo}: {logo}")
+    return logo
+
+
+
+def validar_empresa_carta_cesantias(datos):
+    """Protege la papelería ALP frente a retiros de empresa no confirmada.
+
+    La empresa debe corresponder al ciclo laboral del retiro, no al último
+    ciclo del trabajador. Los formatos de MI requieren aprobación propia.
+    """
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    if not datos.get("IdVinculacionLaboral") or not datos.get("IdEmpresaContratante"):
+        raise ValueError(
+            "El retiro no tiene un ciclo laboral y una empresa contratante confirmados. "
+            "No se puede emitir la carta de cesantías."
+        )
+    if codigo not in ("ALP", "MI"):
+        raise ValueError("Empresa contratante no reconocida para este documento.")
+    # Verificar identidad, correspondencia ID/código y disponibilidad del logo.
+    seleccionar_logo_empresa(datos)
+
+
 class CartaCesantiasPDF:
     def __init__(self, datos):
+        validar_empresa_carta_cesantias(datos)
         self.datos = datos
+        self.logo_empresa = seleccionar_logo_empresa(datos)
         self.width, self.height = letter
         self.fecha = datetime.now()
 
@@ -243,9 +280,9 @@ class CartaCesantiasPDF:
         return f"{fecha.day} de {meses[fecha.month - 1]} de {fecha.year}"
 
     def encabezado(self):
-        if LOGO_EMPRESA_LIMPIO.exists():
+        if self.logo_empresa.exists():
             self.pdf.drawImage(
-                ImageReader(str(LOGO_EMPRESA_LIMPIO)),
+                ImageReader(str(self.logo_empresa)),
                 35,
                 self.height - 75,
                 width=155,
@@ -350,37 +387,80 @@ class CartaCesantiasPDF:
         self.pdf.drawString(65, 96, "NMS")
 
     def pie(self):
-        self.pdf.setFont("Helvetica", 5.4)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            58,
-            "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
-        )
-        self.pdf.drawCentredString(
-            self.width / 2,
-            50,
-            "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
-        )
+        codigo = str(self.datos.get("EmpresaCodigo") or "").strip().upper()
 
-        self.pdf.line(55, 44, self.width - 55, 44)
+        if codigo == "ALP":
+            # Pie institucional de Aseos La Perfección.
+            self.pdf.setFont("Helvetica", 5.4)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                58,
+                "TÉCNICOS EN LIMPIEZA DE: EMPRESAS, BANCOS, COLEGIOS, UNIVERSIDADES, CENTROS COMERCIALES, CENTROS DE RECREACIÓN",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                50,
+                "EDIFICIOS OFICINAS Y VIVIENDAS, HOSPITALES, SUPERMERCADOS, LAVADO Y PINTURA DE FACHADAS, LAVADO DE VIDRIOS, TAPETES Y CORTINAS",
+            )
 
-        self.pdf.setFont("Helvetica", 6)
-        self.pdf.drawCentredString(
-            self.width / 2,
-            32,
-            "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
-        )
+            self.pdf.line(55, 44, self.width - 55, 44)
 
-        self.pdf.drawCentredString(
-            self.width / 2,
-            21,
-            "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
-        )
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                32,
+                "Calle 4 Bis No. 53C-50 • Bogotá D.C. • PBX: 4204893",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                21,
+                "documentos@aseoslaperfeccion.com - comercial@aseoslaperfeccion.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                11,
+                "www.aseoslaperfeccion.com",
+            )
+            return
 
-        self.pdf.drawCentredString(
-            self.width / 2,
-            11,
-            "www.aseoslaperfeccion.com",
+        if codigo == "MI":
+            # Pie institucional oficial de Mantener Ingeniería.
+            self.pdf.setFont("Helvetica", 5.2)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                61,
+                "Soluciones integrales para el sector residencial, comercial e institucional, anticipándose a las necesidades de sus clientes con innovación, gestión eficiente y tecnología de vanguardia.",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                53,
+                "Contamos con un equipo calificado y un firme compromiso con la calidad, el medio ambiente y el desarrollo sostenible.",
+            )
+
+            self.pdf.line(55, 46, self.width - 55, 46)
+
+            self.pdf.setFont("Helvetica", 6)
+            self.pdf.drawCentredString(
+                self.width / 2,
+                34,
+                "Calle 25 # 32-22 de Bogotá D.C. - Colombia - +57 318 430 7338",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                23,
+                "comercial@manteneringenieria.com",
+            )
+            self.pdf.drawCentredString(
+                self.width / 2,
+                12,
+                "www.manteneringenieria.com",
+            )
+            return
+
+        # La empresa ya se valida al construir el documento; esta protección
+        # evita generar un pie de página incorrecto si el dato cambia.
+        raise ValueError(
+            f"Empresa contratante no reconocida para el pie de página: {codigo or 'SIN CÓDIGO'}"
         )
 
     def generar(self):

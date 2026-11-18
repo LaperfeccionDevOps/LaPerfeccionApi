@@ -25,6 +25,11 @@ def obtener_datos_trabajador(db: Session, id_retiro_laboral: int):
             rl."IdRetiroLaboral",
             rl."IdRegistroPersonal",
             rl."FechaRetiro",
+            rl."IdVinculacionLaboral",
+            vl."IdEmpresaContratante",
+            ec."Codigo" AS "EmpresaCodigo",
+            ec."Nombre" AS "EmpresaNombre",
+            ec."Logo" AS "EmpresaLogo",
 
             rp."NumeroIdentificacion",
             rp."Nombres",
@@ -48,6 +53,13 @@ def obtener_datos_trabajador(db: Session, id_retiro_laboral: int):
         FROM public."RetiroLaboral" rl
         INNER JOIN public."RegistroPersonal" rp
             ON rp."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" = rl."IdVinculacionLaboral"
+           AND vl."IdRegistroPersonal" = rl."IdRegistroPersonal"
+
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = vl."IdEmpresaContratante"
 
         LEFT JOIN public."TipoIdentificacion" ti
             ON ti."IdTipoIdentificacion" = rp."IdTipoIdentificacion"
@@ -75,6 +87,40 @@ def obtener_datos_trabajador(db: Session, id_retiro_laboral: int):
         raise HTTPException(status_code=404, detail="Retiro laboral no encontrado.")
 
     return dict(row)
+
+
+def validar_empresa_documento(datos: dict):
+    """Evita emitir documentos con una empresa no verificada o sin soporte PDF."""
+    if not datos.get("IdVinculacionLaboral") or not datos.get("IdEmpresaContratante"):
+        raise HTTPException(
+            status_code=409,
+            detail=("Este retiro no tiene una empresa contratante vinculada y verificada. "
+                    "Revise su ciclo laboral antes de generar el documento."),
+        )
+
+    codigo = str(datos.get("EmpresaCodigo") or "").strip().upper()
+    id_empresa = str(datos.get("IdEmpresaContratante") or "").strip()
+    empresas = {"ALP": "1", "MI": "2"}
+    if codigo not in empresas or id_empresa != empresas[codigo]:
+        raise HTTPException(
+            status_code=409,
+            detail="La empresa contratante no coincide con el ciclo laboral del retiro.",
+        )
+    return codigo
+
+
+def nombre_empresa_correo(datos: dict) -> str:
+    codigo = validar_empresa_documento(datos)
+    return "Aseos La Perfección" if codigo == "ALP" else "Mantener Ingeniería"
+
+
+def generar_documento_validado(datos: dict, generador):
+    """Convierte errores de validación del PDF en una respuesta controlada."""
+    validar_empresa_documento(datos)
+    try:
+        return generador(datos)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def guardar_trazabilidad(db: Session, datos: dict, tipo_documento: str, ruta_pdf: str, usuario: str = "nomina"):
@@ -304,7 +350,8 @@ def descargar_certificado_laboral(
     db: Session = Depends(get_db)
 ):
     datos = obtener_datos_trabajador(db, id_retiro_laboral)
-    ruta_pdf = generar_certificado_laboral(datos)
+    validar_empresa_documento(datos)
+    ruta_pdf = generar_documento_validado(datos, generar_certificado_laboral)
     guardar_trazabilidad(db, datos, "CERTIFICADO_LABORAL", ruta_pdf)
     db.commit()
 
@@ -321,6 +368,7 @@ def enviar_certificado_laboral_correo(
 ):
     try:
         datos = obtener_datos_trabajador(db, id_retiro_laboral)
+        validar_empresa_documento(datos)
 
         if not datos.get("Email"):
             raise HTTPException(
@@ -328,16 +376,16 @@ def enviar_certificado_laboral_correo(
                 detail="El trabajador no tiene correo registrado."
             )
 
-        ruta_pdf = generar_certificado_laboral(datos)
+        ruta_pdf = generar_documento_validado(datos, generar_certificado_laboral)
 
         enviar_correo_con_adjunto(
             destinatario=datos["Email"],
-            asunto="Certificación laboral - Aseos La Perfección",
+            asunto=f"Certificación laboral - {nombre_empresa_correo(datos)}",
             cuerpo=(
                 f"Hola {datos.get('Nombres', '')},\n\n"
                 "Adjuntamos tu certificación laboral.\n\n"
                 "Cordialmente,\n"
-                "Aseos La Perfección"
+                f"{nombre_empresa_correo(datos)}"
             ),
             ruta_adjunto=ruta_pdf,
         )
@@ -369,6 +417,7 @@ def enviar_carta_cesantias_correo(
 ):
     try:
         datos = obtener_datos_trabajador(db, id_retiro_laboral)
+        validar_empresa_documento(datos)
 
         if not datos.get("Email"):
             raise HTTPException(
@@ -376,16 +425,16 @@ def enviar_carta_cesantias_correo(
                 detail="El trabajador no tiene correo registrado."
             )
 
-        ruta_pdf = generar_carta_cesantias(datos)
+        ruta_pdf = generar_documento_validado(datos, generar_carta_cesantias)
 
         enviar_correo_con_adjunto(
             destinatario=datos["Email"],
-            asunto="Carta de cesantías - Aseos La Perfección",
+            asunto=f"Carta de cesantías - {nombre_empresa_correo(datos)}",
             cuerpo=(
                 f"Hola {datos.get('Nombres', '')},\n\n"
                 "Adjuntamos tu carta de cesantías.\n\n"
                 "Cordialmente,\n"
-                "Aseos La Perfección"
+                f"{nombre_empresa_correo(datos)}"
             ),
             ruta_adjunto=ruta_pdf,
         )
@@ -417,7 +466,8 @@ def descargar_carta_cesantias(
     db: Session = Depends(get_db)
 ):
     datos = obtener_datos_trabajador(db, id_retiro_laboral)
-    ruta_pdf = generar_carta_cesantias(datos)
+    validar_empresa_documento(datos)
+    ruta_pdf = generar_documento_validado(datos, generar_carta_cesantias)
     guardar_trazabilidad(db, datos, "CARTA_CESANTIAS", ruta_pdf)
     db.commit()
 

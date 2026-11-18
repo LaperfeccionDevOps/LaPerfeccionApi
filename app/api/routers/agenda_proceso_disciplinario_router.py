@@ -1611,6 +1611,13 @@ def consultar_eventos_enriquecidos(
             ag."EstadoAgenda",
             ag."ColorAgenda",
             pd."EstadoProceso",
+            COALESCE(
+                vl."IdEmpresaContratante",
+                rq_empresa."IdEmpresaContratante"
+            ) AS "IdEmpresaContratante",
+            ec."Codigo" AS "CodigoEmpresa",
+            ec."Nombre" AS "NombreEmpresa",
+            ec."Logo" AS "LogoEmpresa",
             ag."UsuarioAgenda",
             ag."FechaCreacion",
             ag."FechaActualizacion",
@@ -1626,6 +1633,28 @@ def consultar_eventos_enriquecidos(
         INNER JOIN public."ProcesoDisciplinario" pd
             ON pd."IdProcesoDisciplinario" =
                ag."IdProcesoDisciplinario"
+        LEFT JOIN public."VinculacionLaboral" vl
+            ON vl."IdVinculacionLaboral" =
+               pd."IdVinculacionLaboral"
+        -- Si el proceso no tiene vinculacion laboral, buscar la empresa
+        -- en las RQ activas del trabajador. Solo usarla si es inequívoca.
+        LEFT JOIN LATERAL (
+            SELECT
+                MIN(rq."IdEmpresaContratante") AS "IdEmpresaContratante"
+            FROM public."RQCandidato" rc
+            INNER JOIN public."RQOperaciones" rq
+                ON rq."IdRQOperaciones" = rc."IdRQOperaciones"
+            WHERE rc."IdRegistroPersonal" = ag."IdRegistroPersonal"
+              AND rc."Activo" = TRUE
+              AND rq."IdEmpresaContratante" IS NOT NULL
+            HAVING COUNT(DISTINCT rq."IdEmpresaContratante") = 1
+        ) rq_empresa
+            ON vl."IdEmpresaContratante" IS NULL
+        LEFT JOIN public."EmpresaContratante" ec
+            ON ec."IdEmpresaContratante" = COALESCE(
+                vl."IdEmpresaContratante",
+                rq_empresa."IdEmpresaContratante"
+            )
         WHERE ag."Activo" = TRUE
         {condicion_sql}
         ORDER BY

@@ -85,6 +85,17 @@ def _validar_vinculacion_trabajador(
         )
 
 
+def _tiene_vinculaciones_previas(db: Session, id_registro_personal: int) -> bool:
+    """Detecta ciclos previos antes de modificar un PDF legacy ambiguo."""
+    return db.execute(
+        text(
+            'SELECT 1 FROM public."VinculacionLaboral" '
+            'WHERE "IdRegistroPersonal" = :id_registro_personal LIMIT 1'
+        ),
+        {"id_registro_personal": id_registro_personal},
+    ).first() is not None
+
+
 @router.post(
     "/upload",
     status_code=status.HTTP_201_CREATED,
@@ -100,9 +111,10 @@ async def subir_documento_seguridad(
     - Si llega idVinculacionLaboral:
       trabaja exclusivamente sobre ese ciclo laboral.
     - Si no llega:
-      conserva el comportamiento legado por IdRegistroPersonal.
+      busca por IdRegistroPersonal únicamente documentos sin vinculación.
+      No sobrescribe PDFs legados ambiguos si existen ciclos previos.
 
-    Esto evita modificar documentos históricos durante un reintegro.
+    Esto protege los documentos de otros ciclos laborales.
     """
 
     try:
@@ -136,15 +148,35 @@ async def subir_documento_seguridad(
                 )
             )
 
-            # Para reintegro/ciclo laboral:
-            # jamás buscar ni actualizar un documento de otro ciclo.
+            # No reutilizar documentos de otro ciclo cuando el ID es opcional.
             if id_vinculacion_laboral is not None:
                 query_relacion = query_relacion.filter(
                     RelacionTipoDocumentacionORM.IdVinculacionLaboral
                     == id_vinculacion_laboral
                 )
+            else:
+                query_relacion = query_relacion.filter(
+                    RelacionTipoDocumentacionORM.IdVinculacionLaboral.is_(None)
+                )
 
             existe_relacion = query_relacion.first()
+
+            # Un PDF legacy sin ciclo podría ser histórico. Si la persona tiene
+            # vinculaciones anteriores, no reemplazarlo sin identificar el ciclo.
+            if (
+                id_vinculacion_laboral is None
+                and doc_data["IdTipoDocumentacion"] in {67, 68, 73}
+                and existe_relacion is not None
+                and _tiene_vinculaciones_previas(db, id_registro_personal)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Existe un documento de Selección sin ciclo identificado "
+                        "y el trabajador tiene vinculaciones anteriores. "
+                        "No se sobrescribió el archivo histórico; revise el ciclo."
+                    ),
+                )
 
             base64_str = doc_data.get("DocumentoCargado")
 
@@ -307,7 +339,8 @@ def eliminar_documento_seguridad_por_tipo(
     elimina únicamente el documento perteneciente a ese ciclo.
 
     Si no recibe id_vinculacion_laboral:
-    conserva el comportamiento legado.
+    solo puede eliminar documentos sin vinculación identificada.
+    Un documento legacy ambiguo se bloquea si hay ciclos previos.
     """
 
     try:
@@ -333,15 +366,33 @@ def eliminar_documento_seguridad_por_tipo(
             )
         )
 
-        # Cuando estamos dentro de un reintegro,
-        # nunca tocar documentos históricos.
+        # Evitar eliminar documentos explícitamente ligados a otro ciclo.
         if id_vinculacion_laboral is not None:
             query_relacion = query_relacion.filter(
                 RelacionTipoDocumentacionORM.IdVinculacionLaboral
                 == id_vinculacion_laboral
             )
+        else:
+            query_relacion = query_relacion.filter(
+                RelacionTipoDocumentacionORM.IdVinculacionLaboral.is_(None)
+            )
 
         relacion = query_relacion.first()
+
+        if (
+            id_vinculacion_laboral is None
+            and id_tipo_documentacion in {67, 68, 73}
+            and relacion is not None
+            and _tiene_vinculaciones_previas(db, id_registro_personal)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No se eliminó el documento sin ciclo identificado porque "
+                    "el trabajador tiene vinculaciones anteriores. "
+                    "Revise su ciclo antes de eliminarlo."
+                ),
+            )
 
         if not relacion:
             raise HTTPException(
