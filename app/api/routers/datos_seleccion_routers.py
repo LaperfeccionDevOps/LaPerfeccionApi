@@ -1,5 +1,5 @@
 # api/routers/datos_seleccion_routers.py
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Annotated, Any
 from pathlib import Path
 
@@ -201,379 +201,219 @@ def obtener_dashboard_indicadores_seleccion(
     # del año y al mismo tiempo entregar el detalle del mes elegido.
     # ============================================================
 
+    # Una fila representa un PROCESO, no necesariamente una persona única.
+    # Los reintegros entran solo después del movimiento 35 -> 18.
     rows = db.execute(
         text("""
-            WITH universo_seleccion AS (
+            WITH reintegros AS (
                 SELECT
-                    rp."IdRegistroPersonal",
-                    rp."IdEstadoProceso",
-                    rp."FechaCreacion",
-                    rp."UsuarioActualizacion",
-
-                    EXISTS (
-                        SELECT 1
-                        FROM public."HistorialEstadoContratacion" hec24
-                        WHERE
-                            hec24."IdRegistroPersonal"
-                                = rp."IdRegistroPersonal"
-                            AND hec24."EstadoNuevo" = 24
-                    ) AS tiene_estado_24,
-
-                    EXISTS (
-                        SELECT 1
-                        FROM public."HistorialEstadoContratacion" hec25
-                        WHERE
-                            hec25."IdRegistroPersonal"
-                                = rp."IdRegistroPersonal"
-                            AND hec25."EstadoNuevo" = 25
-                    ) AS tiene_estado_25,
-
-                    EXISTS (
-                        SELECT 1
-                        FROM public."ContratacionBasica" cb
-                        WHERE
-                            cb."IdRegistroPersonal"
-                                = rp."IdRegistroPersonal"
-                            AND cb."FechaIngreso" IS NOT NULL
-                    ) AS tiene_contratacion_basica,
-
-                    EXISTS (
-                        SELECT 1
-                        FROM public."HistorialEstadoContratacion" hec_rechazo
-                        WHERE
-                            hec_rechazo."IdRegistroPersonal"
-                                = rp."IdRegistroPersonal"
-                            AND hec_rechazo."EstadoNuevo" = 28
-                            AND UPPER(
-                                TRIM(
-                                    COALESCE(
-                                        hec_rechazo."Modulo",
-                                        ''
-                                    )
-                                )
-                            ) = 'CONTRATACION'
-                    ) AS tiene_rechazo_contratacion_historial
-
+                    vl."IdRegistroPersonal",
+                    vl."IdVinculacionLaboral",
+                    vl."NumeroCiclo",
+                    vl."FechaInicioProceso",
+                    vl."FechaIngreso",
+                    vl."EstadoVinculacion",
+                    LEAD(vl."FechaInicioProceso") OVER (
+                        PARTITION BY vl."IdRegistroPersonal"
+                        ORDER BY vl."NumeroCiclo", vl."IdVinculacionLaboral"
+                    ) AS siguiente_inicio
+                FROM public."VinculacionLaboral" vl
+                WHERE vl."TipoVinculacion" = 'REINTEGRO'
+            ),
+            reintegros_seleccion AS (
+                -- Cada ciclo es un proceso independiente. El movimiento
+                -- 35 -> 18 es la evidencia principal de entrada a Selección.
+                -- Para reintegros posteriores, cuyo servicio histórico puede
+                -- omitir esa transición, se admite otro movimiento real del
+                -- módulo SELECCION dentro del intervalo del ciclo.
+                -- No basta con crear VinculacionLaboral ni con cambiar el
+                -- estado actual del trabajador: se exige evidencia fechada.
+                SELECT r.*, entrada."FechaMovimiento" AS fecha_seleccion
+                FROM reintegros r
+                JOIN LATERAL (
+                    SELECT h."FechaMovimiento"
+                    FROM public."HistorialEstadoContratacion" h
+                    WHERE h."IdRegistroPersonal" = r."IdRegistroPersonal"
+                      AND h."FechaMovimiento" >= r."FechaInicioProceso"
+                      AND (r.siguiente_inicio IS NULL
+                           OR h."FechaMovimiento" < r.siguiente_inicio)
+                      AND (
+                          (h."EstadoAnterior" = 35
+                           AND h."EstadoNuevo" = 18
+                           AND UPPER(TRIM(COALESCE(h."OrigenMovimiento", ''))) = 'REINTEGRO'
+                           AND UPPER(TRIM(COALESCE(h."Modulo", ''))) = 'SELECCION')
+                          OR (
+                              r."NumeroCiclo" > 2
+                              AND UPPER(TRIM(COALESCE(h."Modulo", ''))) = 'SELECCION'
+                              AND h."EstadoNuevo" IN (18,19,20,21,22,24,25,26,27,28)
+                          )
+                      )
+                    ORDER BY h."FechaMovimiento" ASC
+                    LIMIT 1
+                ) entrada ON TRUE
+            ),
+            procesos AS (
+                -- Registro inicial: mantener las exclusiones históricas.
+                SELECT rp."IdRegistroPersonal", rp."IdEstadoProceso",
+                       rp."FechaCreacion" AS fecha_registro,
+                       NULL::bigint AS id_ciclo,
+                       NULL::integer AS numero_ciclo,
+                       FALSE AS es_reintegro,
+                       (SELECT MIN(v."FechaInicioProceso")
+                        FROM public."VinculacionLaboral" v
+                        WHERE v."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                          AND v."TipoVinculacion" = 'REINTEGRO') AS fecha_fin,
+                       (SELECT v."FechaIngreso"
+                        FROM public."VinculacionLaboral" v
+                        WHERE v."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                          AND v."NumeroCiclo" = 1
+                        ORDER BY v."IdVinculacionLaboral" DESC LIMIT 1) AS ingreso_ciclo,
+                       EXISTS (
+                           SELECT 1 FROM public."VinculacionLaboral" v
+                           WHERE v."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                             AND v."TipoVinculacion" = 'REINTEGRO'
+                       ) AS tiene_reintegro_posterior
                 FROM public."RegistroPersonal" rp
-
-                WHERE
-                    rp."FechaCreacion"
-                        >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
-
-                    AND (
-                        :anio IS NULL
-                        OR EXTRACT(
-                            YEAR FROM rp."FechaCreacion"
-                        ) = :anio
-                    )
-
-                    -- Excluir activos históricos migrados
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM public."HistorialLaboral" hl
-                        WHERE
-                            hl."IdRegistroPersonal"
-                                = rp."IdRegistroPersonal"
-                            AND UPPER(
-                                TRIM(
-                                    COALESCE(
-                                        hl."TipoVinculacion",
-                                        ''
-                                    )
-                                )
-                            ) = 'ACTIVO MIGRADO'
-                    )
-
-                    -- Excluir etiquetas de migración
-                    AND LOWER(
-                        COALESCE(
-                            rp."UsuarioActualizacion",
-                            ''
+                WHERE rp."FechaCreacion" >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM public."HistorialLaboral" hl
+                      WHERE hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                        AND UPPER(TRIM(COALESCE(hl."TipoVinculacion", ''))) = 'ACTIVO MIGRADO'
+                  )
+                  AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migracion%'
+                  AND LOWER(COALESCE(rp."UsuarioActualizacion", '')) NOT LIKE '%migrado%'
+                  AND COALESCE(rp."UsuarioActualizacion", '') <> 'ajuste_no_activos_maestro_2026_06_22'
+                  AND rp."NumeroIdentificacion"::text NOT IN ('91011506', '0987654', '951357')
+                UNION ALL
+                -- Un nuevo proceso por cada ciclo con entrada real a Selección.
+                SELECT rp."IdRegistroPersonal", rp."IdEstadoProceso",
+                       r.fecha_seleccion AS fecha_registro,
+                       r."IdVinculacionLaboral"::bigint AS id_ciclo,
+                       r."NumeroCiclo" AS numero_ciclo,
+                       TRUE AS es_reintegro,
+                       r.siguiente_inicio AS fecha_fin,
+                       r."FechaIngreso" AS ingreso_ciclo,
+                       FALSE AS tiene_reintegro_posterior
+                FROM reintegros_seleccion r
+                JOIN public."RegistroPersonal" rp
+                  ON rp."IdRegistroPersonal" = r."IdRegistroPersonal"
+                WHERE r.fecha_seleccion >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
+                  AND rp."NumeroIdentificacion"::text NOT IN ('91011506', '0987654', '951357')
+            ),
+            evidencias AS (
+                SELECT p.*,
+                    EXISTS (
+                        SELECT 1 FROM public."HistorialEstadoContratacion" h
+                        WHERE h."IdRegistroPersonal" = p."IdRegistroPersonal"
+                          AND h."EstadoNuevo" = 24
+                          AND h."FechaMovimiento" >= p.fecha_registro
+                          AND (p.fecha_fin IS NULL OR h."FechaMovimiento" < p.fecha_fin)
+                    ) AS tiene_estado_24,
+                    EXISTS (
+                        SELECT 1 FROM public."HistorialEstadoContratacion" h
+                        WHERE h."IdRegistroPersonal" = p."IdRegistroPersonal"
+                          AND h."EstadoNuevo" = 25
+                          AND h."FechaMovimiento" >= p.fecha_registro
+                          AND (p.fecha_fin IS NULL OR h."FechaMovimiento" < p.fecha_fin)
+                    ) AS tiene_estado_25,
+                    (p.ingreso_ciclo IS NOT NULL OR (
+                        NOT p.es_reintegro AND NOT p.tiene_reintegro_posterior AND EXISTS (
+                            SELECT 1 FROM public."ContratacionBasica" cb
+                            WHERE cb."IdRegistroPersonal" = p."IdRegistroPersonal"
+                              AND cb."FechaIngreso" IS NOT NULL
                         )
-                    ) NOT LIKE '%migracion%'
-
-                    AND LOWER(
-                        COALESCE(
-                            rp."UsuarioActualizacion",
-                            ''
-                        )
-                    ) NOT LIKE '%migrado%'
-
-                    -- Excluir ajuste histórico administrativo
-                    AND COALESCE(
-                        rp."UsuarioActualizacion",
-                        ''
-                    ) <> 'ajuste_no_activos_maestro_2026_06_22'
-
-                    -- Registros técnicos conocidos de prueba
-                    AND rp."NumeroIdentificacion"::text NOT IN (
-                        '91011506',
-                        '0987654',
-                        '951357'
-                    )
+                    )) AS tiene_contratacion_basica,
+                    EXISTS (
+                        SELECT 1 FROM public."HistorialEstadoContratacion" h
+                        WHERE h."IdRegistroPersonal" = p."IdRegistroPersonal"
+                          AND h."EstadoNuevo" = 28
+                          AND UPPER(TRIM(COALESCE(h."Modulo", ''))) = 'CONTRATACION'
+                          AND h."FechaMovimiento" >= p.fecha_registro
+                          AND (p.fecha_fin IS NULL OR h."FechaMovimiento" < p.fecha_fin)
+                    ) AS tiene_rechazo_contratacion_historial,
+                    -- El estado de RegistroPersonal pertenece al proceso más reciente.
+                    CASE WHEN p.fecha_fin IS NULL THEN p."IdEstadoProceso"
+                         ELSE NULL END AS estado_vigente
+                FROM procesos p
+                WHERE (:anio IS NULL OR EXTRACT(YEAR FROM p.fecha_registro AT TIME ZONE 'America/Bogota') = :anio)
             )
-
             SELECT
-                us."IdRegistroPersonal",
-                us."IdEstadoProceso",
-                us."FechaCreacion" AS fecha_registro,
-
-                us.tiene_estado_24,
-                us.tiene_estado_25,
+                us."IdRegistroPersonal", us.estado_vigente AS "IdEstadoProceso",
+                us.fecha_registro, us.id_ciclo, us.numero_ciclo, us.es_reintegro,
+                us.tiene_estado_24, us.tiene_estado_25,
                 us.tiene_contratacion_basica,
                 us.tiene_rechazo_contratacion_historial,
-
                 CASE
-                    -- En los indicadores de Selección, una persona que ya
-                    -- avanzó a Contratación conserva ese resultado aunque
-                    -- posteriormente cambie de estado o sea rechazada allá.
-                    WHEN (
-                        us.tiene_estado_24
-                        OR us.tiene_estado_25
-                        OR us.tiene_contratacion_basica
-                        OR us.tiene_rechazo_contratacion_historial
-                        OR UPPER(
-                            TRIM(
-                                COALESCE(
-                                    mcp."MotivoCierre",
-                                    ''
-                                )
-                            )
-                        ) IN (
-                            'NO ASISTE A CONTRATACION',
-                            'NO ASISTE A CONTRATACIÓN'
-                        )
-                        OR us."IdEstadoProceso" IN (
-                            24,
-                            25,
-                            30,
-                            31,
-                            32,
-                            33,
-                            34,
-                            35
-                        )
-                    )
+                    WHEN us.estado_vigente = 24 THEN 'AVANZA A CONTRATACIÓN'
+                    WHEN us.tiene_estado_25 OR us.tiene_contratacion_basica
+                         OR us.estado_vigente IN (25, 30, 31, 32, 33, 34)
+                    THEN 'CONTRATADO'
+                    WHEN us.estado_vigente = 35 AND
+                         (us.tiene_estado_25 OR us.tiene_contratacion_basica)
+                    THEN 'CONTRATADO'
+                    WHEN us.estado_vigente = 28 AND (
+                        us.tiene_estado_24 OR us.tiene_rechazo_contratacion_historial
+                        OR UPPER(TRIM(COALESCE(mcp."MotivoCierre", ''))) IN
+                           ('NO ASISTE A CONTRATACION', 'NO ASISTE A CONTRATACIÓN')
+                    ) THEN 'PENDIENTE DE CONTRATACIÓN'
+                    WHEN us.estado_vigente = 28 THEN 'RECHAZADO'
+                    WHEN us.estado_vigente = 27 THEN 'DESISTE DEL PROCESO'
+                    WHEN us.estado_vigente = 26 THEN 'REFERENCIACIÓN'
+                    WHEN us.estado_vigente = 22 THEN 'SEGURIDAD'
+                    WHEN us.estado_vigente = 21 THEN 'EXÁMENES'
+                    WHEN us.estado_vigente = 20 THEN 'ENTREVISTA JEFE INMEDIATO'
+                    WHEN us.estado_vigente = 19 THEN 'ENTREVISTA'
+                    WHEN us.estado_vigente = 18 THEN 'NUEVO'
+                    -- Proceso histórico: no atribuirle el estado del ciclo posterior.
+                    WHEN us.fecha_fin IS NOT NULL AND
+                         (us.tiene_estado_25 OR us.tiene_contratacion_basica)
+                    THEN 'CONTRATADO'
+                    WHEN us.fecha_fin IS NOT NULL AND us.tiene_estado_24
                     THEN 'AVANZA A CONTRATACIÓN'
-
-                    -- Solo queda como rechazo de Selección cuando nunca
-                    -- existe evidencia de haber avanzado a Contratación.
-                    WHEN us."IdEstadoProceso" = 28
-                    THEN 'RECHAZADO'
-
-                    WHEN us."IdEstadoProceso" = 27
-                    THEN 'DESISTE DEL PROCESO'
-
-                    WHEN us."IdEstadoProceso" = 26
-                    THEN 'REFERENCIACIÓN'
-
-                    WHEN us."IdEstadoProceso" = 22
-                    THEN 'SEGURIDAD'
-
-                    WHEN us."IdEstadoProceso" = 21
-                    THEN 'EXÁMENES'
-
-                    WHEN us."IdEstadoProceso" = 20
-                    THEN 'ENTREVISTA JEFE INMEDIATO'
-
-                    WHEN us."IdEstadoProceso" = 19
-                    THEN 'ENTREVISTA'
-
-                    WHEN us."IdEstadoProceso" = 18
-                    THEN 'NUEVO'
-
-                    ELSE CONCAT(
-                        'ESTADO ',
-                        COALESCE(
-                            us."IdEstadoProceso"::text,
-                            'SIN DEFINIR'
-                        )
-                    )
+                    WHEN us.fecha_fin IS NOT NULL THEN 'NUEVO'
+                    ELSE CONCAT('ESTADO ', COALESCE(us.estado_vigente::text, 'SIN DEFINIR'))
                 END AS estado_seleccion,
-
-                (
-                    us.tiene_estado_24
-                    OR us.tiene_estado_25
-                    OR us.tiene_contratacion_basica
-                    OR us.tiene_rechazo_contratacion_historial
-                    OR UPPER(
-                        TRIM(
-                            COALESCE(
-                                mcp."MotivoCierre",
-                                ''
-                            )
-                        )
-                    ) IN (
-                        'NO ASISTE A CONTRATACION',
-                        'NO ASISTE A CONTRATACIÓN'
-                    )
-                    OR us."IdEstadoProceso" IN (
-                        24,
-                        25,
-                        30,
-                        31,
-                        32,
-                        33,
-                        34,
-                        35
-                    )
+                (us.tiene_estado_24 OR us.tiene_estado_25 OR us.tiene_contratacion_basica
+                 OR us.estado_vigente IN (24,25,30,31,32,33,34)
                 ) AS avanzo_contratacion,
-
                 mcp."MotivoCierre" AS motivo_rechazo,
-
-                COALESCE(
-                    mcp."FechaActualizacion",
-                    mcp."FechaCreacion"
-                ) AS fecha_motivo_rechazo,
-
-                CASE
-                    WHEN us."IdEstadoProceso" <> 28
-                    THEN NULL
-
-                    WHEN (
-                        us.tiene_estado_24
-                        OR us.tiene_estado_25
-                        OR us.tiene_contratacion_basica
-                        OR us.tiene_rechazo_contratacion_historial
-                        OR UPPER(
-                            TRIM(
-                                COALESCE(
-                                    mcp."MotivoCierre",
-                                    ''
-                                )
-                            )
-                        ) IN (
-                            'NO ASISTE A CONTRATACION',
-                            'NO ASISTE A CONTRATACIÓN'
-                        )
-                    )
-                    THEN 'CONTRATACION'
-
-                    ELSE 'SELECCION'
-                END AS origen_rechazo
-
-            FROM universo_seleccion us
-
+                COALESCE(mcp."FechaActualizacion", mcp."FechaCreacion") AS fecha_motivo_rechazo,
+                CASE WHEN us.estado_vigente <> 28 THEN NULL
+                     WHEN us.tiene_estado_24 OR us.tiene_estado_25
+                          OR us.tiene_contratacion_basica
+                          OR us.tiene_rechazo_contratacion_historial
+                          OR UPPER(TRIM(COALESCE(mcp."MotivoCierre", ''))) IN
+                             ('NO ASISTE A CONTRATACION', 'NO ASISTE A CONTRATACIÓN')
+                     THEN 'CONTRATACION' ELSE 'SELECCION' END AS origen_rechazo
+            FROM evidencias us
             LEFT JOIN LATERAL (
-                SELECT
-                    mcp_detalle."MotivoCierre",
-                    mcp_detalle."FechaCreacion",
-                    mcp_detalle."FechaActualizacion"
-
-                FROM public."MotivoCierreProceso" mcp_detalle
-
-                WHERE
-                    mcp_detalle."IdRegistroPersonal"
-                        = us."IdRegistroPersonal"
-
-                ORDER BY
-                    COALESCE(
-                        mcp_detalle."FechaActualizacion",
-                        mcp_detalle."FechaCreacion"
-                    ) DESC,
-                    mcp_detalle."IdMotivoCierre" DESC
-
+                SELECT m."MotivoCierre", m."FechaCreacion", m."FechaActualizacion"
+                FROM public."MotivoCierreProceso" m
+                WHERE m."IdRegistroPersonal" = us."IdRegistroPersonal"
+                  AND COALESCE(m."FechaActualizacion", m."FechaCreacion") >= us.fecha_registro
+                  AND (us.fecha_fin IS NULL OR
+                       COALESCE(m."FechaActualizacion", m."FechaCreacion") < us.fecha_fin)
+                ORDER BY COALESCE(m."FechaActualizacion", m."FechaCreacion") DESC,
+                         m."IdMotivoCierre" DESC
                 LIMIT 1
             ) mcp ON TRUE
-
-            ORDER BY
-                us."FechaCreacion",
-                us."IdRegistroPersonal";
+            -- Los procesos actualmente retirados sin evidencia de contratación
+            -- no pertenecen al universo gerencial de Selección.
+            -- Los ciclos históricos y los contratados posteriormente retirados
+            -- permanecen para conservar sus resultados de Selección.
+            WHERE NOT (
+                us.estado_vigente = 35
+                AND NOT us.tiene_estado_25
+                AND NOT us.tiene_contratacion_basica
+            )
+            ORDER BY us.fecha_registro, us."IdRegistroPersonal", us.numero_ciclo;
         """),
-        {
-            "anio": anio,
-        },
+        {"anio": anio},
     ).mappings().all()
 
     filas_universo = [
         dict(row)
         for row in rows
-    ]
-
-    # ============================================================
-    # AVANCES REALES A CONTRATACIÓN DESDE SELECCIÓN
-    # ============================================================
-    # Regla oficial del indicador:
-    # una persona cuenta como "Avanza a Contratación" únicamente cuando
-    # existe el movimiento real EstadoNuevo = 24 en el período consultado.
-    #
-    # No se infiere el avance por estado 25, ContratacionBasica, estados
-    # actuales posteriores ni por motivos propios de Contratación.
-    # ============================================================
-
-    movimientos_estado_24 = db.execute(
-        text("""
-            SELECT DISTINCT
-                hec."IdRegistroPersonal",
-                hec."FechaMovimiento" AS fecha_avance
-            FROM public."HistorialEstadoContratacion" hec
-            INNER JOIN public."RegistroPersonal" rp
-                ON rp."IdRegistroPersonal" = hec."IdRegistroPersonal"
-            WHERE
-                hec."EstadoNuevo" = 24
-                AND hec."FechaMovimiento"
-                    >= TIMESTAMPTZ '2026-03-01 00:00:00-05'
-                AND (
-                    :anio IS NULL
-                    OR EXTRACT(YEAR FROM hec."FechaMovimiento") = :anio
-                )
-
-                -- Excluir activos históricos migrados
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM public."HistorialLaboral" hl
-                    WHERE
-                        hl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                        AND UPPER(
-                            TRIM(
-                                COALESCE(
-                                    hl."TipoVinculacion",
-                                    ''
-                                )
-                            )
-                        ) = 'ACTIVO MIGRADO'
-                )
-
-                -- Excluir etiquetas de migración
-                AND LOWER(
-                    COALESCE(
-                        rp."UsuarioActualizacion",
-                        ''
-                    )
-                ) NOT LIKE '%migracion%'
-
-                AND LOWER(
-                    COALESCE(
-                        rp."UsuarioActualizacion",
-                        ''
-                    )
-                ) NOT LIKE '%migrado%'
-
-                -- Excluir ajuste histórico administrativo
-                AND COALESCE(
-                    rp."UsuarioActualizacion",
-                    ''
-                ) <> 'ajuste_no_activos_maestro_2026_06_22'
-
-                -- Registros técnicos conocidos de prueba
-                AND rp."NumeroIdentificacion"::text NOT IN (
-                    '91011506',
-                    '0987654',
-                    '951357'
-                )
-
-            ORDER BY
-                hec."FechaMovimiento",
-                hec."IdRegistroPersonal";
-        """),
-        {
-            "anio": anio,
-        },
-    ).mappings().all()
-
-    filas_avances_estado_24 = [
-        dict(row)
-        for row in movimientos_estado_24
     ]
 
     # ============================================================
@@ -697,69 +537,32 @@ def obtener_dashboard_indicadores_seleccion(
 
         return not es_rechazo_contratacion
 
-    def calcular_estados(
-        filas_periodo: list[dict],
-        total_avanzan_periodo: int | None = None,
-    ) -> list[dict]:
+    def calcular_estados(filas_periodo: list[dict]) -> list[dict]:
         total_periodo = len(filas_periodo)
-
-        conteo = {
-            estado: 0
-            for estado in estados_base
-        }
-
+        conteo = {estado: 0 for estado in estados_base}
         for fila in filas_periodo:
-            estado = _normalizar_estado_dashboard(
-                fila.get("estado_seleccion")
-            )
+            estado = _normalizar_estado_dashboard(fila.get("estado_seleccion"))
+            conteo[estado] = conteo.get(estado, 0) + 1
 
-            if estado not in conteo:
-                conteo[estado] = 0
-
-            conteo[estado] += 1
-
-        # La fila "AVANZA A CONTRATACIÓN" debe usar exactamente la misma
-        # regla oficial que la tarjeta principal y la serie mensual:
-        # movimientos reales EstadoNuevo = 24 ocurridos dentro del período.
-        #
-        # No se infiere este valor por estado actual, estado 25,
-        # ContratacionBasica ni motivos propios de Contratación.
-        if total_avanzan_periodo is not None:
-            conteo["AVANZA A CONTRATACIÓN"] = int(
-                total_avanzan_periodo
-            )
-
-        orden = estados_base + [
-            estado
-            for estado in conteo
-            if estado not in estados_base
-        ]
-
-        return [
-            {
-                "estado": estado,
-                "cantidad": conteo.get(
-                    estado,
-                    0,
-                ),
-                "porcentaje": (
-                    round(
-                        (
-                            conteo.get(
-                                estado,
-                                0,
-                            )
-                            / total_periodo
-                        )
-                        * 100,
-                        2,
-                    )
-                    if total_periodo
-                    else 0
-                ),
-            }
-            for estado in orden
-        ]
+        # No sobrescribir estados con movimientos históricos: cada persona
+        # debe contarse exactamente una vez en su estado clasificado.
+        orden = estados_base + [e for e in conteo if e not in estados_base]
+        resultado = []
+        acumulado = 0.0
+        estados_activos = [e for e in orden if conteo[e] > 0]
+        for estado in orden:
+            cantidad = conteo[estado]
+            porcentaje = round(100 * cantidad / total_periodo, 2) if total_periodo else 0.0
+            resultado.append({"estado": estado, "cantidad": cantidad, "porcentaje": porcentaje})
+            acumulado += porcentaje
+        # Ajuste exclusivo de visualización para que los porcentajes
+        # redondeados sumen 100, sin alterar las cantidades reales.
+        if estados_activos:
+            ultimo = estados_activos[-1]
+            item = next(x for x in resultado if x["estado"] == ultimo)
+            item["porcentaje"] = round(item["porcentaje"] + (100.0 - round(acumulado, 2)), 2)
+        assert sum(x["cantidad"] for x in resultado) == total_periodo
+        return resultado
 
     def calcular_motivos_rechazo(
         filas_periodo: list[dict],
@@ -846,19 +649,16 @@ def obtener_dashboard_indicadores_seleccion(
 
     def construir_resumen(
         filas_periodo: list[dict],
-        total_avanzan_periodo: int | None = None,
     ) -> dict:
         total_periodo = len(
             filas_periodo
         )
 
-        # La tarjeta de avance NO se deduce del estado actual del trabajador.
-        # Se alimenta exclusivamente con movimientos reales EstadoNuevo = 24
-        # ocurridos dentro del período que se está construyendo.
-        total_avanzan = (
-            int(total_avanzan_periodo)
-            if total_avanzan_periodo is not None
-            else 0
+        # Estado exclusivo, no movimiento histórico.
+        total_avanzan = sum(
+            _normalizar_estado_dashboard(fila.get("estado_seleccion"))
+            == "AVANZA A CONTRATACIÓN"
+            for fila in filas_periodo
         )
 
         (
@@ -869,10 +669,7 @@ def obtener_dashboard_indicadores_seleccion(
             filas_periodo
         )
 
-        estados = calcular_estados(
-            filas_periodo,
-            total_avanzan_periodo=total_avanzan,
-        )
+        estados = calcular_estados(filas_periodo)
 
         conteo_estados = {
             item["estado"]:
@@ -909,10 +706,7 @@ def obtener_dashboard_indicadores_seleccion(
         )
 
         en_proceso = max(
-            total_periodo
-            - contratados
-            - desistidos
-            - rechazados_estado_actual,
+            total_periodo - contratados - desistidos - rechazados_estado_actual,
             0,
         )
 
@@ -958,6 +752,10 @@ def obtener_dashboard_indicadores_seleccion(
                     "porcentaje":
                         porcentaje_avanzan,
                 },
+                "contratados": {
+                    "cantidad": contratados,
+                    "porcentaje": round(100 * contratados / total_periodo, 2) if total_periodo else 0,
+                },
                 "rechazados_seleccion": {
                     "cantidad":
                         total_rechazados,
@@ -1002,6 +800,8 @@ def obtener_dashboard_indicadores_seleccion(
             "contratados":
                 contratados,
 
+            "porcentaje_contratados": round(100 * contratados / total_periodo, 2) if total_periodo else 0,
+
             "pendiente_contratacion":
                 pendientes_contratacion,
 
@@ -1044,7 +844,7 @@ def obtener_dashboard_indicadores_seleccion(
         ):
             continue
 
-        clave = fecha.strftime(
+        clave = fecha.astimezone(timezone(timedelta(hours=-5))).strftime(
             "%Y-%m"
         )
 
@@ -1055,37 +855,10 @@ def obtener_dashboard_indicadores_seleccion(
             fila
         )
 
-    avances_por_mes: dict[str, set[int]] = {}
-
-    for fila in filas_avances_estado_24:
-        fecha_avance = fila.get(
-            "fecha_avance"
-        )
-
-        if not isinstance(
-            fecha_avance,
-            datetime,
-        ):
-            continue
-
-        clave_avance = fecha_avance.strftime(
-            "%Y-%m"
-        )
-
-        if clave_avance not in avances_por_mes:
-            avances_por_mes[clave_avance] = set()
-
-        avances_por_mes[clave_avance].add(
-            int(fila["IdRegistroPersonal"])
-        )
-
     serie_mensual = []
     detalle_mensual = []
 
-    claves_serie = sorted(
-        set(filas_por_mes.keys())
-        | set(avances_por_mes.keys())
-    )
+    claves_serie = sorted(filas_por_mes.keys())
 
     for clave in claves_serie:
         filas_mes = filas_por_mes.get(
@@ -1098,17 +871,7 @@ def obtener_dashboard_indicadores_seleccion(
             for valor in clave.split("-")
         )
 
-        total_avanzan_mes = len(
-            avances_por_mes.get(
-                clave,
-                set(),
-            )
-        )
-
-        resumen_mes = construir_resumen(
-            filas_mes,
-            total_avanzan_periodo=total_avanzan_mes,
-        )
+        resumen_mes = construir_resumen(filas_mes)
 
         tarjetas_mes = resumen_mes[
             "tarjetas"
@@ -1212,30 +975,14 @@ def obtener_dashboard_indicadores_seleccion(
             )
             and fila[
                 "fecha_registro"
-            ].month == mes
+            ].astimezone(timezone(timedelta(hours=-5))).month == mes
         ]
     else:
         filas_periodo = list(
             filas_universo
         )
 
-    ids_avanzan_periodo = {
-        int(fila["IdRegistroPersonal"])
-        for fila in filas_avances_estado_24
-        if isinstance(
-            fila.get("fecha_avance"),
-            datetime,
-        )
-        and (
-            mes is None
-            or fila["fecha_avance"].month == mes
-        )
-    }
-
-    resumen_periodo = construir_resumen(
-        filas_periodo,
-        total_avanzan_periodo=len(ids_avanzan_periodo),
-    )
+    resumen_periodo = construir_resumen(filas_periodo)
 
     # ============================================================
     # 6. RESPUESTA FINAL
@@ -1357,6 +1104,7 @@ def obtener_dashboard_indicadores_seleccion(
             ],
 
         "porcentajes": {
+            "contratados": resumen_periodo["porcentaje_contratados"],
             "registrados":
                 (
                     100.0
@@ -1407,12 +1155,12 @@ def obtener_dashboard_indicadores_seleccion(
 
         "auditoria": {
             "universo": (
-                "RegistroPersonal.FechaCreacion "
+                "Registros originales y reintegros con transición 35 a 18 "
                 "desde 2026-03-01"
             ),
 
             "filtro_periodo":
-                "RegistroPersonal.FechaCreacion",
+                "FechaCreacion original o FechaMovimiento 35 a 18 del reintegro",
 
             "estado_actual": (
                 "Resultado vigente del proceso "
@@ -1420,8 +1168,8 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "avance_contratacion": (
-                "Movimiento real EstadoNuevo = 24 en "
-                "HistorialEstadoContratacion dentro del período"
+                "Estado exclusivo AVANZA A CONTRATACIÓN; "
+                "los ya contratados cuentan solo como CONTRATADO"
             ),
 
             "rechazo_seleccion": (
@@ -1438,8 +1186,8 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "porcentaje_tarjetas": (
-                "Avanzan usa movimientos EstadoNuevo = 24 del período; "
-                "rechazados usa el total registrado del período como base"
+                "Cada tarjeta usa su estado exclusivo; "
+                "porcentajes sobre registrados de la cohorte"
             ),
 
             "porcentaje_estados": (
@@ -1454,13 +1202,12 @@ def obtener_dashboard_indicadores_seleccion(
             ),
 
             "serie_mensual": (
-                "Registrados y rechazados por RegistroPersonal.FechaCreacion; "
-                "avances por HistorialEstadoContratacion.FechaMovimiento "
-                "con EstadoNuevo = 24"
+                "Los indicadores mensuales usan la fecha de ingreso a Selección "
+                "del proceso original o del reintegro"
             ),
 
             "excluye_migrados":
-                True,
+                "Excluye procesos originales migrados; permite reintegros confirmados",
 
             "solo_consulta":
                 True,
@@ -1533,6 +1280,11 @@ def obtener_dashboard_rotacion_nuevo_personal(
         text("""
             SELECT
                 rp."IdRegistroPersonal" AS id_registro_personal,
+                rp."NumeroIdentificacion" AS numero_identificacion,
+                rp."Nombres" AS nombres,
+                rp."Apellidos" AS apellidos,
+                ciclo_vigente."NumeroCiclo" AS numero_ciclo,
+                ciclo_vigente."TipoVinculacion" AS tipo_vinculacion,
                 cb."FechaIngreso" AS fecha_ingreso,
                 pso."FechaUltimoDiaLaborado" AS ultimo_dia_laborado,
 
@@ -1550,58 +1302,92 @@ def obtener_dashboard_rotacion_nuevo_personal(
             INNER JOIN public."ContratacionBasica" cb
                 ON cb."IdRegistroPersonal" = rp."IdRegistroPersonal"
 
-            -- Ciclo laboral vigente.
-            --
-            -- Se usa únicamente para evitar que un retiro de un ciclo
-            -- histórico se mezcle con la FechaIngreso del reintegro actual.
-            -- No modifica información y no altera trabajadores que todavía
-            -- no tengan ciclos en VinculacionLaboral.
+            -- Ciclo correspondiente al ingreso de la cohorte. Se conserva
+            -- el criterio del KPI anterior, pero el retiro exige cierre de Nomina.
             LEFT JOIN LATERAL (
-                SELECT
-                    vl."IdVinculacionLaboral",
-                    vl."NumeroCiclo",
-                    vl."TipoVinculacion",
-                    vl."EstadoVinculacion",
-                    vl."FechaIngreso"
+                SELECT vl."IdVinculacionLaboral", vl."NumeroCiclo",
+                       vl."TipoVinculacion", vl."EstadoVinculacion",
+                       vl."FechaIngreso", vl."FechaInicioProceso",
+                       (SELECT MIN(v2."FechaInicioProceso")
+                        FROM public."VinculacionLaboral" v2
+                        WHERE v2."IdRegistroPersonal" = vl."IdRegistroPersonal"
+                          AND v2."NumeroCiclo" > vl."NumeroCiclo") AS siguiente_inicio
                 FROM public."VinculacionLaboral" vl
-                WHERE
-                    vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
-                    AND vl."EstadoVinculacion" IN (
-                        'EN_PROCESO',
-                        'ACTIVO'
-                    )
-                ORDER BY
-                    vl."NumeroCiclo" DESC,
-                    vl."IdVinculacionLaboral" DESC
+                WHERE vl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND vl."FechaIngreso" = cb."FechaIngreso"
+                ORDER BY vl."NumeroCiclo" DESC, vl."IdVinculacionLaboral" DESC
                 LIMIT 1
             ) ciclo_vigente ON TRUE
 
+            -- Se verifica la finalizacion de Nomina por ciclo.
+            -- El historial 35 es evidencia, pero los casos antiguos pueden
+            -- carecer de ese movimiento. En ellos se exige liquidacion pagada,
+            -- retiro legalizado y envio a Nomina; no basta cerrar RRLL.
             LEFT JOIN LATERAL (
-                SELECT
-                    p."FechaUltimoDiaLaborado"
-                FROM public."PazYSalvoOperaciones" p
-                WHERE
-                    p."IdRegistroPersonal" = rp."IdRegistroPersonal"
-
-                    -- Si no existe ciclo vigente, se conserva exactamente
-                    -- el comportamiento anterior del KPI y se toma el último
-                    -- Paz y Salvo del trabajador.
-                    --
-                    -- Si sí existe ciclo vigente con FechaIngreso, solo se
-                    -- acepta un retiro del mismo periodo laboral. Un retiro
-                    -- anterior pertenece a un ciclo histórico y no debe
-                    -- marcar el reintegro actual como fecha inconsistente.
-                    AND (
-                        ciclo_vigente."IdVinculacionLaboral" IS NULL
-                        OR ciclo_vigente."FechaIngreso" IS NULL
-                        OR p."FechaUltimoDiaLaborado"
-                            >= ciclo_vigente."FechaIngreso"
-                    )
-
-                ORDER BY
-                    p."FechaCarga" DESC NULLS LAST,
-                    p."IdPazYSalvo" DESC
+                SELECT rl."IdRetiroLaboral", rl."FechaRetiro",
+                       rl."FechaProceso", rl."IdVinculacionLaboral"
+                FROM public."RetiroLaboral" rl
+                WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND rl."FechaRetiro" >= cb."FechaIngreso"
+                  AND rl."FechaRetiro" <= CURRENT_DATE
+                  AND (
+                      (ciclo_vigente."IdVinculacionLaboral" IS NOT NULL
+                       AND (rl."IdVinculacionLaboral" = ciclo_vigente."IdVinculacionLaboral"
+                            OR (rl."IdVinculacionLaboral" IS NULL
+                                AND (ciclo_vigente.siguiente_inicio IS NULL
+                                     OR rl."FechaRetiro" <= ciclo_vigente.siguiente_inicio::date))))
+                      OR (ciclo_vigente."IdVinculacionLaboral" IS NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM public."VinculacionLaboral" v
+                              WHERE v."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                                AND v."FechaIngreso" IS NOT NULL
+                          ))
+                  )
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM public."HistorialEstadoContratacion" h
+                          WHERE h."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                            AND h."EstadoNuevo" = 35
+                            AND h."FechaMovimiento"::date >= rl."FechaRetiro"
+                            AND (ciclo_vigente.siguiente_inicio IS NULL
+                                 OR h."FechaMovimiento" < ciclo_vigente.siguiente_inicio)
+                      )
+                      OR (
+                          rl."FechaEnvioNomina" IS NOT NULL
+                          AND rl."FechaPagoLiquidacion" IS NOT NULL
+                          AND UPPER(TRIM(COALESCE(rl."RetiroLegalizado"::text, ''))) IN ('SI', 'SÍ', 'TRUE', '1')
+                          AND (
+                              (ciclo_vigente."IdVinculacionLaboral" IS NOT NULL
+                               AND UPPER(TRIM(COALESCE(ciclo_vigente."EstadoVinculacion", ''))) = 'RETIRADO')
+                              OR (ciclo_vigente."IdVinculacionLaboral" IS NULL
+                                  AND rp."IdEstadoProceso" = 35)
+                          )
+                      )
+                  )
+                ORDER BY rl."FechaRetiro" DESC, rl."IdRetiroLaboral" DESC
                 LIMIT 1
+            ) retiro_nomina ON TRUE
+
+            -- Prioridad: ultimo dia laborado del Paz y Salvo.
+            -- Respaldo historico: FechaRetiro del caso finalizado si no
+            -- existe Paz y Salvo; nunca usar un caso sin cierre de Nomina.
+            LEFT JOIN LATERAL (
+                SELECT p."FechaUltimoDiaLaborado"
+                FROM public."PazYSalvoOperaciones" p
+                WHERE retiro_nomina."IdRetiroLaboral" IS NOT NULL
+                  AND p."IdRegistroPersonal" = rp."IdRegistroPersonal"
+                  AND p."FechaUltimoDiaLaborado" >= cb."FechaIngreso"
+                  AND p."FechaUltimoDiaLaborado" <= retiro_nomina."FechaRetiro"
+                  AND p."FechaUltimoDiaLaborado" <= CURRENT_DATE
+                ORDER BY p."FechaUltimoDiaLaborado" DESC,
+                         p."FechaCarga" DESC NULLS LAST,
+                         p."IdPazYSalvo" DESC
+                LIMIT 1
+            ) paz_y_salvo ON TRUE
+
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(paz_y_salvo."FechaUltimoDiaLaborado",
+                                retiro_nomina."FechaRetiro") AS "FechaUltimoDiaLaborado"
             ) pso ON TRUE
 
             WHERE
@@ -1965,6 +1751,45 @@ def obtener_dashboard_rotacion_nuevo_personal(
         filas_periodo
     )
 
+    # Detalle nominal de los mismos registros que alimentan los rangos.
+    # No modifica cálculos, filtros, ni tablas; conserva la cohorte por ingreso.
+    detalles_rangos = {clave: [] for clave in (
+        "retiro_0_7", "retiro_8_15", "retiro_16_30", "retiro_31_60",
+        "retiro_mas_60", "sin_retiro_registrado", "fechas_inconsistentes",
+    )}
+    for fila in filas_periodo:
+        dias = fila.get("dias_permanencia")
+        ingreso = fila.get("fecha_ingreso")
+        retiro = fila.get("ultimo_dia_laborado")
+        if ingreso is not None and retiro is not None and retiro < ingreso:
+            clave_rango = "fechas_inconsistentes"
+        elif retiro is None:
+            clave_rango = "sin_retiro_registrado"
+        elif dias is None:
+            continue
+        elif 0 <= dias <= 7:
+            clave_rango = "retiro_0_7"
+        elif 8 <= dias <= 15:
+            clave_rango = "retiro_8_15"
+        elif 16 <= dias <= 30:
+            clave_rango = "retiro_16_30"
+        elif 31 <= dias <= 60:
+            clave_rango = "retiro_31_60"
+        elif dias > 60:
+            clave_rango = "retiro_mas_60"
+        else:
+            continue
+        detalles_rangos[clave_rango].append({
+            "id_registro_personal": fila.get("id_registro_personal"),
+            "numero_identificacion": str(fila.get("numero_identificacion") or ""),
+            "nombre_completo": " ".join(str(fila.get(c) or "").strip() for c in ("nombres", "apellidos")).strip(),
+            "fecha_ingreso": ingreso.isoformat() if ingreso else None,
+            "fecha_retiro": retiro.isoformat() if retiro else None,
+            "dias_permanencia": dias,
+            "numero_ciclo": fila.get("numero_ciclo"),
+            "tipo_vinculacion": fila.get("tipo_vinculacion"),
+        })
+
     return {
         "filtros": {
             "anio": anio,
@@ -2002,6 +1827,8 @@ def obtener_dashboard_rotacion_nuevo_personal(
         "rangos_exclusivos":
             resumen_periodo["rangos_exclusivos"],
 
+        "detalles_rangos": detalles_rangos,
+
         "cortes":
             resumen_periodo["cortes"],
 
@@ -2026,11 +1853,9 @@ def obtener_dashboard_rotacion_nuevo_personal(
             "fecha_retiro_real":
                 "PazYSalvoOperaciones.FechaUltimoDiaLaborado",
             "regla_ciclo_laboral": (
-                "Si existe un ciclo ACTIVO o EN_PROCESO, el KPI solo "
-                "considera retiros con FechaUltimoDiaLaborado igual o "
-                "posterior a la FechaIngreso de ese ciclo. Los retiros "
-                "anteriores se consideran históricos y no se cruzan con "
-                "el reintegro vigente."
+                "Solo retiros con movimiento a estado 35 (Nomina), "
+                "en el intervalo del ciclo de ingreso, y fecha real "
+                "de Paz y Salvo. Los retiros abiertos no cuentan."
             ),
             "cohorte": (
                 "El mes corresponde al mes de ingreso, "
