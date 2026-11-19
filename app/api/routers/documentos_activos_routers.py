@@ -16,8 +16,11 @@ router = APIRouter(
 
 TIPOS_ACTIVOS = [
     77, 78, 79, 80, 81, 82, 83, 84,
-    85, 86, 87, 90, 91, 92, 93, 60
+    85, 86, 87, 90, 91, 92, 93, 60, 64, 36
 ]
+
+# Dotación (36) se consulta desde Activos, pero se administra en Contratación.
+TIPOS_ACTIVOS_SOLO_LECTURA = {36}
 
 
 class DocumentoActivoUpload(BaseModel):
@@ -55,7 +58,8 @@ def listar_documentos_activos(
                 td."Descripcion" AS tipo_documento,
                 d."IdDocumento",
                 d."Nombre",
-                d."Formato"
+                d."Formato",
+                d."FechaCreacion"
             FROM public."TipoDocumentacion" td
             LEFT JOIN public."RelacionTipoDocumentacion" rtd
                 ON rtd."IdRegistroPersonal" = :id_registro_personal
@@ -115,6 +119,8 @@ def listar_documentos_activos(
                     ELSE 9999
                 END ASC,
 
+                CASE WHEN td."IdTipoDocumentacion" IN (36, 64)
+                     THEN d."FechaCreacion" END DESC NULLS LAST,
                 d."IdDocumento" DESC
         """),
         {
@@ -144,6 +150,7 @@ def listar_documentos_activos(
                 "IdDocumento": row["IdDocumento"],
                 "Nombre": row["Nombre"],
                 "Formato": row["Formato"],
+                "FechaCreacion": row["FechaCreacion"].isoformat() if row["FechaCreacion"] else None,
             })
 
     return list(agrupado.values())
@@ -158,6 +165,11 @@ def subir_documentos_activos(
         resultado = []
 
         for doc in payload.documentos:
+            if doc.IdTipoDocumentacion in TIPOS_ACTIVOS_SOLO_LECTURA:
+                raise HTTPException(
+                    status_code=403,
+                    detail="La dotación se adjunta únicamente desde Contratación.",
+                )
             if doc.IdTipoDocumentacion not in TIPOS_ACTIVOS:
                 raise HTTPException(
                     status_code=400,
@@ -297,7 +309,7 @@ def eliminar_documento_activo(
     try:
         row = db.execute(
             text("""
-                SELECT "IdDocumento"
+                SELECT "IdDocumento", "IdTipoDocumentacion"
                 FROM public."Documentos"
                 WHERE "IdDocumento" = :id_documento
                   AND "IdTipoDocumentacion" = ANY(:tipos_activos)
@@ -312,6 +324,12 @@ def eliminar_documento_activo(
             raise HTTPException(
                 status_code=404,
                 detail="Documento activo no encontrado.",
+            )
+
+        if row["IdTipoDocumentacion"] in TIPOS_ACTIVOS_SOLO_LECTURA:
+            raise HTTPException(
+                status_code=403,
+                detail="La dotación no se elimina desde Documentos Activos.",
             )
 
         db.execute(
