@@ -40,18 +40,14 @@ router = APIRouter(prefix="/api", tags=["Contratación - Contratado"])
 
 ESTADO_CONTRATADO = 25
 
-# Únicamente estos documentos bloquean la transición al estado 25.
-# 62 (Acuerdos de confidencialidad) y 64 (Otro sí) son opcionales.
+# Únicamente estos cinco documentos bloquean la transición al estado 25.
+# Los demás documentos de contratación son opcionales.
 DOCUMENTOS_OBLIGATORIOS_CONTRATACION = {
     37: "Constancia de inducción",
-    26: "Afiliación ARL",
-    27: "Afiliación EPS",
-    31: "Afiliación caja de compensación",
     36: "Entrega de dotación",
     65: "Carnet Aseos la Perfección",
     57: "Paquete contratación",
     20: "Descripción del cargo y manual de funciones",
-    74: "Contrato de trabajo",
 }
 
 
@@ -99,7 +95,7 @@ def validar_documentos_para_contratar(db: Session, id_registro_personal: int) ->
             WHERE r."IdRegistroPersonal" = :id
               {filtro}
               AND t."IdCategoria" = 7
-              AND d."IdTipoDocumentacion" IN (37, 26, 27, 31, 36, 65, 57, 20, 74)
+              AND d."IdTipoDocumentacion" IN (37, 36, 65, 57, 20)
               AND d."DocumentoCargado" IS NOT NULL
               AND OCTET_LENGTH(d."DocumentoCargado") > 0
         '''),
