@@ -472,3 +472,65 @@ def obtener_kpi3_procesos_disciplinarios(
                 )
             },
         ) from error
+
+@router.get("/agenda-semanal")
+def obtener_agenda_semanal(
+    fecha_inicio: date = Query(..., description="Fecha inicial inclusiva"),
+    fecha_fin: date = Query(..., description="Fecha final inclusiva"),
+    db: Session = Depends(get_db),
+):
+    """Citas activas por rango de fechas, no procesos únicos.
+
+    No se deduce inasistencia por falta de descargo. Las horas son las
+    reservadas en la agenda; no representan duración efectiva de atención.
+    """
+    if fecha_fin < fecha_inicio:
+        raise HTTPException(status_code=400, detail="La fecha final no puede ser anterior a la inicial.")
+    if (fecha_fin - fecha_inicio).days > 365:
+        raise HTTPException(status_code=400, detail="El período no puede superar 366 días.")
+    consulta = text("""
+        SELECT
+            ag."IdAgendaProcesoDisciplinario" AS "idAgenda",
+            ag."IdProcesoDisciplinario" AS "idProceso",
+            ag."FechaEvento" AS "fecha",
+            ag."HoraInicio" AS "horaInicio",
+            ag."HoraFin" AS "horaFin",
+            UPPER(TRIM(COALESCE(ag."EstadoAgenda", 'SIN_ESTADO'))) AS "estado",
+            rp."NumeroIdentificacion" AS "identificacion",
+            TRIM(CONCAT(COALESCE(rp."Nombres", ''), ' ', COALESCE(rp."Apellidos", ''))) AS "trabajador"
+        FROM public."AgendaProcesoDisciplinario" ag
+        JOIN public."ProcesoDisciplinario" pd
+            ON pd."IdProcesoDisciplinario" = ag."IdProcesoDisciplinario"
+        LEFT JOIN public."RegistroPersonal" rp
+            ON rp."IdRegistroPersonal" = pd."IdRegistroPersonal"
+        WHERE COALESCE(ag."Activo", TRUE) = TRUE
+          AND UPPER(TRIM(COALESCE(pd."OrigenProceso", ''))) = 'OPERACIONES'
+          AND ag."FechaEvento" >= :inicio
+          AND ag."FechaEvento" < :fin_exclusivo
+        ORDER BY ag."FechaEvento", ag."HoraInicio", ag."IdProcesoDisciplinario"
+    """)
+    try:
+        filas = db.execute(consulta, {
+            "inicio": fecha_inicio,
+            "fin_exclusivo": fecha_fin + timedelta(days=1),
+        }).mappings().all()
+        citas = []
+        for fila in filas:
+            item = dict(fila)
+            inicio, fin = item.get("horaInicio"), item.get("horaFin")
+            minutos = 0
+            if inicio is not None and fin is not None:
+                inicio_min = inicio.hour * 60 + inicio.minute
+                fin_min = fin.hour * 60 + fin.minute
+                minutos = max(0, fin_min - inicio_min)
+            item["minutosReservados"] = minutos
+            citas.append(item)
+        return {
+            "ok": True,
+            "fechaInicio": fecha_inicio,
+            "fechaFin": fecha_fin,
+            "citas": citas,
+            "nota": "Los minutos corresponden a horario reservado, no a atención efectiva."
+        }
+    except SQLAlchemyError as error:
+        raise HTTPException(status_code=500, detail="No fue posible consultar la agenda semanal.") from error

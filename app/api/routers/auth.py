@@ -718,14 +718,25 @@ def actualizar_usuario(
     if not usuario:
         raise HTTPException(status_code=404, detail="El usuario no existe")
 
-    nombre_completo = (payload.nombre_completo or "").strip().upper()
-    login_usuario = (payload.usuario or "").strip().upper()
+    # En ediciones de cuentas historicas no se debe reinterpretar un nombre
+    # sin cambios como un intento de crear una cuenta duplicada.
+    nombre_recibido = (payload.nombre_completo or "").strip()
+    login_recibido = (payload.usuario or "").strip()
+    nombre_actual = (usuario.NombreUsuario or "").strip()
+    login_actual = (usuario.Usuario or "").strip()
+
+    nombre_cambiado = nombre_recibido.casefold() != nombre_actual.casefold()
+    login_cambiado = login_recibido.casefold() != login_actual.casefold()
+
+    # Conservar exactamente el valor historico cuando no se ha cambiado.
+    nombre_completo = nombre_recibido.upper() if nombre_cambiado else usuario.NombreUsuario
+    login_usuario = login_recibido.upper() if login_cambiado else usuario.Usuario
     correo_corporativo = ((payload.correo_corporativo or "").strip().lower() or None)
     estado_usuario = (payload.estado or "").strip().upper()
 
-    if not nombre_completo:
+    if not nombre_recibido:
         raise HTTPException(status_code=400, detail="El nombre completo es obligatorio")
-    if not login_usuario:
+    if not login_recibido:
         raise HTTPException(status_code=400, detail="El nombre de usuario es obligatorio")
     if estado_usuario not in {"ACTIVO", "INACTIVO"}:
         raise HTTPException(status_code=400, detail="El estado debe ser ACTIVO o INACTIVO")
@@ -734,19 +745,23 @@ def actualizar_usuario(
     if not rol:
         raise HTTPException(status_code=400, detail="El rol especificado no existe")
 
-    if db.query(Usuario).filter(
-        Usuario.IdUsuario != usuario.IdUsuario,
-        func.upper(Usuario.Usuario) == login_usuario,
-    ).first():
-        raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
+    # Validar unicidad solo cuando el campo realmente se modifica.
+    # Se preservan las cuentas historicas ya duplicadas, sin permitir
+    # introducir nuevos valores duplicados al editar.
+    if login_cambiado:
+        if db.query(Usuario).filter(
+            Usuario.IdUsuario != usuario.IdUsuario,
+            func.upper(Usuario.Usuario) == login_usuario,
+        ).first():
+            raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
 
-    if db.query(Usuario).filter(
-        Usuario.IdUsuario != usuario.IdUsuario,
-        func.upper(Usuario.NombreUsuario) == login_usuario,
-    ).first():
-        raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
+        if db.query(Usuario).filter(
+            Usuario.IdUsuario != usuario.IdUsuario,
+            func.upper(Usuario.NombreUsuario) == login_usuario,
+        ).first():
+            raise HTTPException(status_code=400, detail="El nombre de usuario ya existe")
 
-    if db.query(Usuario).filter(
+    if nombre_cambiado and db.query(Usuario).filter(
         Usuario.IdUsuario != usuario.IdUsuario,
         func.upper(Usuario.NombreUsuario) == nombre_completo,
     ).first():
