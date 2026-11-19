@@ -1325,17 +1325,18 @@ def obtener_dashboard_rotacion_nuevo_personal(
             -- retiro legalizado y envio a Nomina; no basta cerrar RRLL.
             LEFT JOIN LATERAL (
                 SELECT rl."IdRetiroLaboral", rl."FechaRetiro",
-                       rl."FechaProceso", rl."IdVinculacionLaboral"
+                       rl."FechaProceso"
                 FROM public."RetiroLaboral" rl
                 WHERE rl."IdRegistroPersonal" = rp."IdRegistroPersonal"
                   AND rl."FechaRetiro" >= cb."FechaIngreso"
                   AND rl."FechaRetiro" <= CURRENT_DATE
+                  -- RetiroLaboral no dispone de IdVinculacionLaboral en produccion.
+                  -- Se asocia el retiro al intervalo temporal del ingreso.
+                  -- El inicio del ciclo siguiente es un limite exclusivo.
                   AND (
                       (ciclo_vigente."IdVinculacionLaboral" IS NOT NULL
-                       AND (rl."IdVinculacionLaboral" = ciclo_vigente."IdVinculacionLaboral"
-                            OR (rl."IdVinculacionLaboral" IS NULL
-                                AND (ciclo_vigente.siguiente_inicio IS NULL
-                                     OR rl."FechaRetiro" <= ciclo_vigente.siguiente_inicio::date))))
+                       AND (ciclo_vigente.siguiente_inicio IS NULL
+                            OR rl."FechaRetiro" < ciclo_vigente.siguiente_inicio::date))
                       OR (ciclo_vigente."IdVinculacionLaboral" IS NULL
                           AND NOT EXISTS (
                               SELECT 1 FROM public."VinculacionLaboral" v
