@@ -591,6 +591,79 @@ def actualizar_estado_aspirante(
                     ),
                 )
 
+        # QA: confirmación de referencias laborales obligatoria (documento 68).
+        # Se verifica el archivo persistido, no solo el formulario diligenciado.
+        # Para reintegros, nunca se acepta un documento de otro ciclo laboral.
+        if nuevo_estado == 24:
+            parametros_referencia = {"id": id_registro, "tipo": 68}
+            filtro_vinculacion = ""
+            if vinculacion_actual and (vinculacion_actual.get("NumeroCiclo") or 1) > 1:
+                filtro_vinculacion = ' AND rtd."IdVinculacionLaboral" = :vinculacion'
+                parametros_referencia["vinculacion"] = vinculacion_actual["IdVinculacionLaboral"]
+
+            existe_referencia = db.execute(text(f"""
+                SELECT 1
+                FROM public."RelacionTipoDocumentacion" rtd
+                INNER JOIN public."Documentos" d
+                    ON d."IdDocumento" = rtd."IdDocumento"
+                WHERE rtd."IdRegistroPersonal" = :id
+                  AND d."IdTipoDocumentacion" = :tipo
+                  AND d."DocumentoCargado" IS NOT NULL
+                  AND octet_length(d."DocumentoCargado") > 0
+                  {filtro_vinculacion}
+                LIMIT 1
+            """), parametros_referencia).scalar()
+
+            if not existe_referencia:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "No es posible avanzar a Contratación. "
+                        "Debe guardar y adjuntar la confirmación de referencias laborales "
+                        "(documento 68) correspondiente al proceso actual."
+                    ),
+                )
+
+        # QA: todos los documentos de Seguridad obligatorios salvo 58, 61, 60 y 15.
+        # Entrevista 67 y referencias 68 ya tienen validaciones específicas anteriores.
+        if nuevo_estado == 24:
+            tipos_obligatorios = {
+                6: 'Antecedentes de policía',
+                7: 'Antecedentes disciplinarios procuraduría',
+                8: 'Antecedentes disciplinarios contraloría',
+                9: 'Antecedentes disciplinarios rama judicial',
+                17: 'Examen médico ingreso',
+                21: 'Pruebas de conocimiento',
+                73: 'Tratamiento de datos',
+            }
+            params_docs = {'id': id_registro, 'tipos': tuple(tipos_obligatorios)}
+            filtro_docs = ''
+            if vinculacion_actual and (vinculacion_actual.get('NumeroCiclo') or 1) > 1:
+                filtro_docs = ' AND rtd."IdVinculacionLaboral" = :vinculacion'
+                params_docs['vinculacion'] = vinculacion_actual['IdVinculacionLaboral']
+
+            filas_docs = db.execute(text(f"""
+                SELECT DISTINCT d."IdTipoDocumentacion"
+                FROM public."RelacionTipoDocumentacion" rtd
+                JOIN public."Documentos" d ON d."IdDocumento" = rtd."IdDocumento"
+                WHERE rtd."IdRegistroPersonal" = :id
+                  AND d."IdTipoDocumentacion" IN (6, 7, 8, 9, 17, 21, 73, 42)
+                  AND d."DocumentoCargado" IS NOT NULL
+                  AND octet_length(d."DocumentoCargado") > 0
+                  {filtro_docs}
+            """), {k: v for k, v in params_docs.items() if k != 'tipos'}).scalars().all()
+            existentes = {int(tipo) for tipo in filas_docs}
+            # Equivalencia visual ya existente: firma digital 42 cubre tratamiento 73.
+            if 42 in existentes:
+                existentes.add(73)
+            faltantes = [nombre for tipo, nombre in tipos_obligatorios.items() if tipo not in existentes]
+            if faltantes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=('No es posible avanzar a Contratación: faltan documentos obligatorios de Seguridad. '
+                            'Documentos pendientes: ' + '; '.join(faltantes)),
+                )
+
         # Protección exclusiva para usuarios que operan únicamente con rol de Selección.
         # No interfiere con los cambios realizados por Contratación o Talento Humano.
         roles_ids = {
