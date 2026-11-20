@@ -40,87 +40,7 @@ router = APIRouter(prefix="/api", tags=["Contratación - Contratado"])
 
 ESTADO_CONTRATADO = 25
 
-# Únicamente estos cinco documentos bloquean la transición al estado 25.
-# Los demás documentos de contratación son opcionales.
-DOCUMENTOS_OBLIGATORIOS_CONTRATACION = {
-    37: "Constancia de inducción",
-    36: "Entrega de dotación",
-    65: "Carnet Aseos la Perfección",
-    57: "Paquete contratación",
-    20: "Descripción del cargo y manual de funciones",
-}
-
-
-def validar_documentos_para_contratar(db: Session, id_registro_personal: int) -> None:
-    """Valida documentos con contenido real, exclusivamente del ciclo vigente.
-
-    Sin vinculaciones laborales, mantiene compatibilidad con documentos legacy.
-    Si existen vinculaciones, nunca usa archivos sin vinculación ni de ciclos previos.
-    """
-    vinculacion = db.execute(
-        text('''
-            SELECT "IdVinculacionLaboral", "EstadoVinculacion"
-            FROM public."VinculacionLaboral"
-            WHERE "IdRegistroPersonal" = :id
-            ORDER BY
-                CASE WHEN UPPER(COALESCE("EstadoVinculacion", '')) = 'EN_PROCESO' THEN 0
-                     WHEN UPPER(COALESCE("EstadoVinculacion", '')) = 'ACTIVO' THEN 1
-                     ELSE 2 END,
-                "NumeroCiclo" DESC,
-                "IdVinculacionLaboral" DESC
-            LIMIT 1
-        '''),
-        {"id": id_registro_personal},
-    ).mappings().first()
-
-    # Un ciclo histórico cerrado no puede utilizarse para una nueva contratación.
-    if vinculacion and str(vinculacion["EstadoVinculacion"] or "").strip().upper() not in {"EN_PROCESO", "ACTIVO"}:
-        raise HTTPException(
-            status_code=409,
-            detail="No existe una vinculación laboral vigente para validar los documentos de contratación.",
-        )
-
-    filtro = (
-        'AND r."IdVinculacionLaboral" = :id_vinculacion'
-        if vinculacion else 'AND r."IdVinculacionLaboral" IS NULL'
-    )
-    documentos = db.execute(
-        text(f'''
-            SELECT DISTINCT d."IdTipoDocumentacion" AS id_tipo
-            FROM public."Documentos" d
-            INNER JOIN public."RelacionTipoDocumentacion" r
-                ON r."IdDocumento" = d."IdDocumento"
-            INNER JOIN public."TipoDocumentacion" t
-                ON t."IdTipoDocumentacion" = d."IdTipoDocumentacion"
-            WHERE r."IdRegistroPersonal" = :id
-              {filtro}
-              AND t."IdCategoria" = 7
-              AND d."IdTipoDocumentacion" IN (37, 36, 65, 57, 20)
-              AND d."DocumentoCargado" IS NOT NULL
-              AND OCTET_LENGTH(d."DocumentoCargado") > 0
-        '''),
-        {
-            "id": id_registro_personal,
-            "id_vinculacion": vinculacion["IdVinculacionLaboral"] if vinculacion else None,
-        },
-    ).scalars().all()
-
-    presentes = {int(tipo) for tipo in documentos}
-    faltantes = [
-        {"id": tipo, "nombre": nombre}
-        for tipo, nombre in DOCUMENTOS_OBLIGATORIOS_CONTRATACION.items()
-        if tipo not in presentes
-    ]
-    if faltantes:
-        logger.info("Contratación bloqueada por documentos faltantes: %s", faltantes)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "mensaje": "No se puede marcar como contratado: faltan documentos obligatorios.",
-                "documentosFaltantes": faltantes,
-            },
-        )
-
+# Los documentos de Contratación son opcionales y no bloquean el estado 25.
 
 
 class ContratadoUpdate(BaseModel):
@@ -160,10 +80,8 @@ def marcar_contratado(payload: ContratadoUpdate, db: Session = Depends(get_db)):
         logger.info(f"Estado anterior: {estado_anterior}")
         logger.info(f"Estado nuevo: {ESTADO_CONTRATADO}")
 
-        # No repetir validación para registros ya contratados: preserva la
-        # idempotencia y el comportamiento histórico del botón C.
-        if estado_anterior != ESTADO_CONTRATADO:
-            validar_documentos_para_contratar(db, payload.IdRegistroPersonal)
+        # Los documentos de Contratación son opcionales.
+        # Se conservan las validaciones restantes y la trazabilidad del botón C.
 
         # ------------------------------------------------------------
         # 2. Actualizar el estado a CONTRATADO.
