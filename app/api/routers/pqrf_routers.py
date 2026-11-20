@@ -929,7 +929,7 @@ async def responder_pqrf(
         tipo = pqrf["tipo"]
         reclamo = tipo == "RECLAMO"
         felicitacion = tipo in ("FELICITACIÓN", "FELICITACION")
-        if not felicitacion and (not analisis_gestion.strip() or not respuesta_pqrf.strip()):
+        if not analisis_gestion.strip() or not respuesta_pqrf.strip():
             raise HTTPException(status_code=422, detail="El análisis y la respuesta son obligatorios.")
         costo = None
         if reclamo:
@@ -953,8 +953,8 @@ async def responder_pqrf(
             if not contenido or len(contenido) > 10 * 1024 * 1024:
                 raise HTTPException(status_code=422, detail="La evidencia debe tener entre 1 byte y 10 MB.")
             tipo_archivo = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "doc": "application/msword", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[extension]
-        analisis_final = "No aplica para felicitación" if felicitacion else analisis_gestion.strip()
-        respuesta_final = "Felicitación gestionada con evidencia adjunta" if felicitacion else respuesta_pqrf.strip()
+        analisis_final = analisis_gestion.strip()
+        respuesta_final = respuesta_pqrf.strip()
 
         id_gestion = db.execute(text('''
             INSERT INTO public."GestionPQRF" (
