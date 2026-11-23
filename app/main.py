@@ -138,6 +138,7 @@ from api.routers.pqrf_routers import router as pqrf_router
 from api.routers.contabilidad_centros_costo_routers import (
     router as contabilidad_centros_costo_router,
 )
+from services import contabilidad_sheets_service
 from api.routers.contabilidad_asignacion_routers import (
     router as contabilidad_asignacion_router,
 )
@@ -266,6 +267,9 @@ app.include_router(salidas_no_conformes_router)
 app.include_router(pqrf_router)
 app.include_router(contabilidad_centros_costo_router)
 app.include_router(contabilidad_asignacion_router)
+# Contabilidad: refresco diario del espejo en Google Sheets (solo si está configurado).
+app.add_event_handler("startup", contabilidad_sheets_service.iniciar_refresco_diario)
+app.add_event_handler("shutdown", contabilidad_sheets_service.detener_refresco_diario)
 
 
 # ─────────────────────────────────────────────

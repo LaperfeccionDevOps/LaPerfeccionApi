@@ -1,8 +1,10 @@
 # ruff: noqa: B008
 
+import re
 from datetime import date, datetime, time, timedelta
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -10,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from api.routers.contabilidad_centros_costo_routers import _nombre_usuario, require_contabilidad
 from infrastructure.db.deps import get_db
-from services.contabilidad_horas_service import Horario, calcular_horas_semana
+from services import contabilidad_sheets_service
+from services.contabilidad_horas_service import NOMBRES_DIA, calcular_horas_turno, resumen_salidas
 
 # Ruta propia (no bajo /centros-costo) para no chocar con "/{id_centro}" del
 # router de centros de costo.
@@ -19,42 +22,39 @@ router = APIRouter(
     tags=["Contabilidad - Asignación de operarios"],
 )
 
-SABADO = 6
 DOMINGO = 7
+TipoTurno = Literal["DIURNO", "TARDE", "NOCHE"]
+# "19:00" a "24:00" (la medianoche del final del día se escribe 24:00).
+PATRON_HORA_FIN = r"^([01][0-9]|2[0-4]):[0-5][0-9]$"
 
 
 # ─────────────────────────────────────────────
 # Modelos
 # ─────────────────────────────────────────────
-class HorarioIn(BaseModel):
-    hora_inicio: time
-    hora_fin: time
-    minutos_desayuno: int = Field(0, ge=0, le=120)
-    minutos_almuerzo: int = Field(0, ge=0, le=120)
-    minutos_cena: int = Field(0, ge=0, le=120)
-    # Hora de inicio de cada descanso (obligatoria si tiene minutos).
-    hora_desayuno: time | None = None
-    hora_almuerzo: time | None = None
-    hora_cena: time | None = None
-
-
-class LineaIn(BaseModel):
-    id_cargo: int
-    cantidad_operarios: int = Field(..., ge=1, le=9999)
+class TurnoIn(BaseModel):
     codigo_modalidad: str = Field(..., min_length=1, max_length=10)
-    horario_general: HorarioIn
-    # Solo para modalidades que incluyen sábado (p. ej. medio día).
-    horario_sabado: HorarioIn | None = None
+    tipo_turno: TipoTurno
+    # Solo en la tarde: hora en que termina el turno ("19:00" a "24:00").
+    hora_fin_turno: str | None = Field(None, pattern=PATRON_HORA_FIN)
     # Solo con domingo a domingo: cada operario descansa un día entre semana.
     descansa_dia_entre_semana: bool = False
+    # Tarde o noche con domingo: hora a la que termina el domingo si es distinta.
+    hora_fin_domingo: str | None = Field(None, pattern=PATRON_HORA_FIN)
+    # Solo en la tarde: salida de cada día que labora si cambia según el día
+    # ({"1": "20:20", ..., "6": "19:00"}; 1 = lunes ... 7 = domingo).
+    salidas_por_dia: dict[int, str] | None = None
+
+
+class LineaIn(TurnoIn):
+    id_cargo: int
+    cantidad_operarios: int = Field(..., ge=1, le=9999)
+    # Parte del tiempo que cada operario dedica al centro, en decimal
+    # (0.3 = 30 %; 1 = tiempo completo; base 24 días hábiles al mes).
+    dedicacion: float = Field(1, gt=0, le=1)
     observacion: str | None = Field(None, max_length=500)
 
 
-class CalculoIn(BaseModel):
-    codigo_modalidad: str = Field(..., min_length=1, max_length=10)
-    horario_general: HorarioIn
-    horario_sabado: HorarioIn | None = None
-    descansa_dia_entre_semana: bool = False
+class CalculoIn(TurnoIn):
     # Fecha para elegir los parámetros legales vigentes (por defecto, hoy).
     fecha: date | None = None
 
@@ -70,6 +70,14 @@ class FinalizarIn(BaseModel):
     fecha: date
 
 
+class SalidaDiaOut(BaseModel):
+    dia: int
+    nombre: str
+    hora_inicio: str
+    hora_fin: str
+    horas_nocturnas: float
+
+
 class HorasOut(BaseModel):
     horas_semana: float
     horas_nocturnas_semana: float
@@ -77,6 +85,14 @@ class HorasOut(BaseModel):
     horas_nocturnas_dominicales_semana: float
     horas_maximas_semana: float
     supera_maximo: bool
+    # Horas por día trabajado y, en la tarde, la entrada que resulta ("HH:MM").
+    horas_dia: float
+    hora_inicio_turno: str | None = None
+    hora_fin_turno: str | None = None
+    hora_inicio_domingo: str | None = None
+    hora_fin_domingo: str | None = None
+    # Tarde con salida distinta según el día: el detalle de cada día.
+    salidas_por_dia: list[SalidaDiaOut] | None = None
 
 
 class ModalidadOut(BaseModel):
@@ -106,8 +122,16 @@ class CatalogosOut(BaseModel):
     parametro: ParametroOut
 
 
-class HorarioOut(HorarioIn):
-    pass
+class HorarioOut(BaseModel):
+    # Horario de las asignaciones registradas antes de los tipos de turno.
+    hora_inicio: time
+    hora_fin: time
+    minutos_desayuno: int = 0
+    minutos_almuerzo: int = 0
+    minutos_cena: int = 0
+    hora_desayuno: time | None = None
+    hora_almuerzo: time | None = None
+    hora_cena: time | None = None
 
 
 class LineaOut(BaseModel):
@@ -115,10 +139,23 @@ class LineaOut(BaseModel):
     id_cargo: int
     cargo: str
     cantidad_operarios: int
+    dedicacion: float = 1
+    # Operarios × dedicación: lo que se le carga al centro.
+    operarios_equivalentes: float
     codigo_modalidad: str
     modalidad: str
     descansa_dia_entre_semana: bool
-    horario_general: HorarioOut
+    # Vacío en las líneas registradas antes de los tipos de turno.
+    tipo_turno: str | None = None
+    hora_fin_turno: str | None = None
+    hora_inicio_turno: str | None = None
+    hora_fin_domingo: str | None = None
+    hora_inicio_domingo: str | None = None
+    # Tarde con salida distinta según el día: {día: "HH:MM"} y su resumen.
+    salidas_por_dia: dict[int, str] | None = None
+    resumen_salidas: str | None = None
+    horas_dia: float | None = None
+    horario_general: HorarioOut | None = None
     horario_sabado: HorarioOut | None = None
     horas_semana: float
     horas_nocturnas_semana: float
@@ -136,7 +173,9 @@ class AsignacionOut(BaseModel):
     creado_por: str | None = None
     fecha_creacion: datetime
     actualizado_por: str | None = None
-    total_operarios: int
+    # Operarios equivalentes (personas × dedicación) y número de personas.
+    total_operarios: float
+    total_personas: int
     lineas: list[LineaOut] = []
 
 
@@ -146,6 +185,15 @@ class CentroResumenOut(BaseModel):
     cliente: str
     sede: str
     estado: str
+    fecha_inicio_proyecto: date | None = None
+    # Línea de negocio y servicio: dan los cargos sugeridos.
+    cen4: str | None = None
+    cen5: str | None = None
+
+
+class CargosSugeridosOut(BaseModel):
+    # Cargos activos de la combinación CEN4 + CEN5 (vacía: se muestran todos).
+    ids: list[int]
 
 
 class AsignacionCentroOut(BaseModel):
@@ -206,48 +254,58 @@ def _modalidades(db: Session) -> dict[str, dict]:
     return {f["codigo"]: dict(f) for f in filas}
 
 
-def _horario(entrada: HorarioIn) -> Horario:
-    return Horario(
-        hora_inicio=entrada.hora_inicio,
-        hora_fin=entrada.hora_fin,
-        minutos_desayuno=entrada.minutos_desayuno,
-        minutos_almuerzo=entrada.minutos_almuerzo,
-        minutos_cena=entrada.minutos_cena,
-        # Sin minutos, la hora no aplica.
-        hora_desayuno=entrada.hora_desayuno if entrada.minutos_desayuno else None,
-        hora_almuerzo=entrada.hora_almuerzo if entrada.minutos_almuerzo else None,
-        hora_cena=entrada.hora_cena if entrada.minutos_cena else None,
-    )
+def _texto_hora(minutos: int | None) -> str | None:
+    """1290 -> "21:30"; 1440 -> "24:00"."""
+    if minutos is None:
+        return None
+    return f"{minutos // 60:02d}:{minutos % 60:02d}"
 
 
-def _calcular(
-    modalidad: dict,
-    general: HorarioIn,
-    sabado: HorarioIn | None,
-    descansa_dia_entre_semana: bool,
-    parametro,
-    etiqueta: str,
-):
-    if sabado and SABADO not in modalidad["dias_semana"]:
-        raise _error(
-            status.HTTP_400_BAD_REQUEST,
-            f"{etiqueta}: {modalidad['nombre']} no incluye sábado; quita el horario de sábado.",
-        )
+def _minuto_fin(hora_fin_turno: str | None) -> int | None:
+    if not hora_fin_turno:
+        return None
+    horas, minutos = (int(x) for x in hora_fin_turno.split(":"))
+    return horas * 60 + minutos
 
-    if descansa_dia_entre_semana and DOMINGO not in modalidad["dias_semana"]:
+
+def _minutos_por_dia(turno: TurnoIn, etiqueta: str) -> dict[int, int] | None:
+    """{"1": "20:20"} -> {1: 1220}; valida el día y el formato de la hora."""
+    if turno.salidas_por_dia is None:
+        return None
+    minutos = {}
+    for dia, hora in turno.salidas_por_dia.items():
+        if dia not in NOMBRES_DIA or not re.fullmatch(PATRON_HORA_FIN, hora or ""):
+            raise _error(status.HTTP_400_BAD_REQUEST, f"{etiqueta}: salida por día no válida ({dia}: {hora}).")
+        minutos[dia] = _minuto_fin(hora)
+    return minutos
+
+
+def _arreglo_por_dia(minutos: dict[int, int] | None) -> list[int | None] | None:
+    """{1: 1220, 6: 1140} -> [1220, None, None, None, None, 1140, None] (lunes a domingo)."""
+    if minutos is None:
+        return None
+    return [minutos.get(dia) for dia in range(1, 8)]
+
+
+def _calcular(modalidad: dict, turno: TurnoIn, parametro, etiqueta: str):
+    if turno.descansa_dia_entre_semana and DOMINGO not in modalidad["dias_semana"]:
         raise _error(
             status.HTTP_400_BAD_REQUEST,
             f"{etiqueta}: el descanso entre semana solo aplica cuando se trabaja de domingo a domingo.",
         )
+    minutos_dia = _minutos_por_dia(turno, etiqueta)
 
     try:
-        return calcular_horas_semana(
+        return calcular_horas_turno(
+            turno.tipo_turno,
             modalidad["dias_semana"],
-            _horario(general),
-            _horario(sabado) if sabado else None,
+            float(parametro["horas_maximas_semana"]),
             parametro["hora_inicio_nocturna"],
+            _minuto_fin(turno.hora_fin_turno),
+            turno.descansa_dia_entre_semana,
+            _minuto_fin(turno.hora_fin_domingo),
             parametro["hora_fin_nocturna"],
-            descansa_dia_entre_semana,
+            minutos_dia,
         )
     except ValueError as error:
         raise _error(status.HTTP_400_BAD_REQUEST, f"{etiqueta}: {error}") from error
@@ -262,7 +320,10 @@ def _centro(db: Session, id_centro: int):
                    C."RazonSocial"         AS cliente,
                    S."Descripcion"         AS sede,
                    CC."Estado"             AS estado,
-                   CC."FechaApertura"      AS fecha_apertura
+                   CC."FechaApertura"      AS fecha_apertura,
+                   CC."FechaInicioProyecto" AS fecha_inicio_proyecto,
+                   L."Codigo"              AS cen4,
+                   SA."Codigo"             AS cen5
             FROM public."CentroCostoContable" CC
             JOIN public."SedeContable" S ON S."IdSedeContable" = CC."IdSedeContable"
             JOIN public."ProyectoContable" P ON P."IdProyectoContable" = S."IdProyectoContable"
@@ -288,9 +349,16 @@ def _lineas(db: Session, id_asignacion: int) -> list[dict]:
                    D."IdCargo"                AS id_cargo,
                    C."NombreCargo"            AS cargo,
                    D."CantidadOperarios"      AS cantidad_operarios,
+                   D."Dedicacion"             AS dedicacion,
+                   ROUND(D."CantidadOperarios" * D."Dedicacion", 2) AS operarios_equivalentes,
                    M."Codigo"                 AS codigo_modalidad,
                    M."Nombre"                 AS modalidad,
                    D."DescansaDiaEntreSemana" AS descansa_dia_entre_semana,
+                   D."TipoTurno"              AS tipo_turno,
+                   D."MinutoFinTurno"         AS minuto_fin_turno,
+                   D."MinutoFinDomingo"       AS minuto_fin_domingo,
+                   D."MinutosFinPorDia"       AS minutos_por_dia,
+                   M."DiasSemana"             AS dias_semana,
                    D."HorasSemana"            AS horas_semana,
                    D."HorasNocturnasSemana"   AS horas_nocturnas_semana,
                    D."HorasDominicalesSemana" AS horas_dominicales_semana,
@@ -330,9 +398,33 @@ def _lineas(db: Session, id_asignacion: int) -> list[dict]:
         datos = {k: v for k, v in h.items() if k not in ("id_detalle", "tipo_dia")}
         por_linea.setdefault(h["id_detalle"], {})[h["tipo_dia"]] = datos
 
+    def turno(f) -> dict:
+        # Horas por día y entrada de la tarde, a partir de lo guardado.
+        if not f["tipo_turno"]:
+            return {}
+        dias = len(f["dias_semana"]) - (1 if f["descansa_dia_entre_semana"] else 0)
+        minutos_dia = float(f["horas_semana"]) * 60 / dias
+        fin = f["minuto_fin_turno"]
+        domingo = f["minuto_fin_domingo"]
+        por_dia = (
+            {dia: minutos for dia, minutos in enumerate(f["minutos_por_dia"], start=1) if minutos is not None}
+            if f["minutos_por_dia"]
+            else None
+        )
+        return {
+            "salidas_por_dia": {d: _texto_hora(m) for d, m in por_dia.items()} if por_dia else None,
+            "resumen_salidas": resumen_salidas(por_dia, minutos_dia) if por_dia else None,
+            "horas_dia": round(minutos_dia / 60, 2),
+            "hora_fin_turno": _texto_hora(fin),
+            "hora_inicio_turno": _texto_hora(round(fin - minutos_dia)) if fin is not None else None,
+            "hora_fin_domingo": _texto_hora(domingo),
+            "hora_inicio_domingo": _texto_hora(round(domingo - minutos_dia)) if domingo is not None else None,
+        }
+
     return [
         {
-            **dict(f),
+            **{k: v for k, v in f.items() if k not in ("minuto_fin_turno", "minuto_fin_domingo", "minutos_por_dia", "dias_semana")},
+            **turno(f),
             "horario_general": por_linea.get(f["id_detalle"], {}).get("GENERAL"),
             "horario_sabado": por_linea.get(f["id_detalle"], {}).get("SABADO"),
         }
@@ -352,10 +444,15 @@ def _asignaciones(db: Session, id_centro: int) -> list[dict]:
                    A."FechaCreacion"  AS fecha_creacion,
                    A."ActualizadoPor" AS actualizado_por,
                    COALESCE((
+                       SELECT ROUND(SUM(D."CantidadOperarios" * D."Dedicacion"), 2)
+                       FROM public."AsignacionCentroCostoDetalle" D
+                       WHERE D."IdAsignacionCentroCosto" = A."IdAsignacionCentroCosto"
+                   ), 0) AS total_operarios,
+                   COALESCE((
                        SELECT SUM(D."CantidadOperarios")
                        FROM public."AsignacionCentroCostoDetalle" D
                        WHERE D."IdAsignacionCentroCosto" = A."IdAsignacionCentroCosto"
-                   ), 0) AS total_operarios
+                   ), 0) AS total_personas
             FROM public."AsignacionCentroCosto" A
             WHERE A."IdCentroCostoContable" = :id
             ORDER BY A."Estado" = 'VIGENTE' DESC, A."FechaDesde" DESC, A."IdAsignacionCentroCosto" DESC
@@ -409,27 +506,67 @@ def obtener_catalogos(
     }
 
 
+@router.get("/cargos-sugeridos", response_model=CargosSugeridosOut)
+def obtener_cargos_sugeridos(
+    cen4: str = Query(..., min_length=1, max_length=20),
+    cen5: str = Query(..., min_length=1, max_length=20),
+    db: Session = Depends(get_db),
+    _current=Depends(require_contabilidad),
+):
+    """Cargos activos que se sugieren para la combinación CEN4 + CEN5: los de la
+    lista inicial de Contabilidad siempre, y los aprendidos de las asignaciones
+    solo mientras algún centro ABIERTO de la combinación los tenga en su
+    asignación vigente (así un cargo puesto por error deja de sugerirse al
+    corregir o finalizar la asignación; la fila queda como historial).
+    Una combinación nueva o sin registros devuelve la lista vacía."""
+    ids = db.execute(
+        text("""
+            SELECT S."IdCargo"
+            FROM public."CargoSugeridoLineaServicio" S
+            JOIN public."LineaNegocio" L ON L."IdLineaNegocio" = S."IdLineaNegocio"
+            JOIN public."ServicioAsociado" SA ON SA."IdServicioAsociado" = S."IdServicioAsociado"
+            JOIN public."Cargo" C ON C."IdCargo" = S."IdCargo"
+            WHERE upper(L."Codigo") = upper(:cen4)
+              AND upper(SA."Codigo") = upper(:cen5)
+              AND C."Activo"
+              AND (
+                  S."Origen" = 'LISTA_INICIAL'
+                  OR EXISTS (
+                      SELECT 1
+                      FROM public."AsignacionCentroCosto" A
+                      JOIN public."AsignacionCentroCostoDetalle" D
+                        ON D."IdAsignacionCentroCosto" = A."IdAsignacionCentroCosto"
+                      JOIN public."CentroCostoContable" CC
+                        ON CC."IdCentroCostoContable" = A."IdCentroCostoContable"
+                      WHERE A."Estado" = 'VIGENTE'
+                        AND CC."Estado" = 'ABIERTO'
+                        AND CC."IdLineaNegocio" = S."IdLineaNegocio"
+                        AND CC."IdServicioAsociado" = S."IdServicioAsociado"
+                        AND D."IdCargo" = S."IdCargo"
+                  )
+              )
+            ORDER BY btrim(C."NombreCargo")
+        """),
+        {"cen4": cen4.strip(), "cen5": cen5.strip()},
+    ).scalars().all()
+
+    return {"ids": list(ids)}
+
+
 @router.post("/calcular", response_model=HorasOut)
 def calcular_horas(
     payload: CalculoIn,
     db: Session = Depends(get_db),
     _current=Depends(require_contabilidad),
 ):
-    """Horas semanales de un horario sin guardar nada (para ver el cálculo en
+    """Horas semanales de un turno sin guardar nada (para ver el cálculo en
     pantalla mientras se diligencia)."""
     modalidad = _modalidades(db).get(payload.codigo_modalidad.strip().upper())
     if not modalidad:
         raise _error(status.HTTP_400_BAD_REQUEST, "Modalidad de días no válida.")
 
     parametro = _parametro(db, payload.fecha or _hoy(db))
-    horas = _calcular(
-        modalidad,
-        payload.horario_general,
-        payload.horario_sabado,
-        payload.descansa_dia_entre_semana,
-        parametro,
-        "Horario",
-    )
+    horas = _calcular(modalidad, payload, parametro, "Turno")
     maximo = float(parametro["horas_maximas_semana"])
 
     return {
@@ -439,6 +576,25 @@ def calcular_horas(
         "horas_nocturnas_dominicales_semana": horas.nocturnas_dominicales,
         "horas_maximas_semana": maximo,
         "supera_maximo": horas.horas > maximo,
+        "horas_dia": horas.horas_dia,
+        "hora_inicio_turno": _texto_hora(horas.minuto_entrada),
+        "hora_fin_turno": payload.hora_fin_turno if payload.tipo_turno == "TARDE" else None,
+        "hora_inicio_domingo": _texto_hora(horas.minuto_entrada_domingo),
+        "hora_fin_domingo": payload.hora_fin_domingo,
+        "salidas_por_dia": (
+            [
+                {
+                    "dia": dia,
+                    "nombre": NOMBRES_DIA[dia],
+                    "hora_inicio": _texto_hora(round(_minuto_fin(payload.salidas_por_dia[dia]) - horas.horas_dia * 60)),
+                    "hora_fin": payload.salidas_por_dia[dia],
+                    "horas_nocturnas": round(nocturnos / 60, 2),
+                }
+                for dia, nocturnos in sorted(horas.minutos_nocturnos_dia.items())
+            ]
+            if horas.minutos_nocturnos_dia is not None
+            else None
+        ),
     }
 
 
@@ -476,8 +632,15 @@ def guardar_asignacion(
         )
 
     hoy = _hoy(db)
-    if payload.fecha_desde > hoy:
-        raise _error(status.HTTP_400_BAD_REQUEST, "La fecha desde no puede ser futura.")
+    # Un centro por iniciar se puede asignar desde la fecha de inicio del proyecto.
+    fecha_maxima = max(hoy, centro["fecha_inicio_proyecto"] or hoy)
+    if payload.fecha_desde > fecha_maxima:
+        raise _error(
+            status.HTTP_400_BAD_REQUEST,
+            "La fecha desde no puede ser futura."
+            if fecha_maxima == hoy
+            else f"La fecha desde no puede ser posterior al inicio del proyecto ({fecha_maxima:%d/%m/%Y}).",
+        )
 
     if centro["fecha_apertura"] and payload.fecha_desde < centro["fecha_apertura"]:
         raise _error(
@@ -502,14 +665,7 @@ def guardar_asignacion(
         if linea.id_cargo not in cargos_activos:
             raise _error(status.HTTP_400_BAD_REQUEST, f"{etiqueta}: el cargo no existe o está inactivo.")
 
-        horas = _calcular(
-            modalidad,
-            linea.horario_general,
-            linea.horario_sabado,
-            linea.descansa_dia_entre_semana,
-            parametro,
-            etiqueta,
-        )
+        horas = _calcular(modalidad, linea, parametro, etiqueta)
 
         if horas.horas > maximo:
             raise _error(
@@ -559,59 +715,57 @@ def guardar_asignacion(
         ).scalar()
 
         for linea, modalidad, horas in lineas:
-            id_detalle = db.execute(
+            db.execute(
                 text("""
                     INSERT INTO public."AsignacionCentroCostoDetalle" (
-                        "IdAsignacionCentroCosto", "IdCargo", "CantidadOperarios", "IdModalidadDias",
-                        "DescansaDiaEntreSemana", "HorasSemana", "HorasNocturnasSemana",
+                        "IdAsignacionCentroCosto", "IdCargo", "CantidadOperarios", "Dedicacion", "IdModalidadDias",
+                        "DescansaDiaEntreSemana", "TipoTurno", "MinutoFinTurno", "MinutoFinDomingo", "MinutosFinPorDia",
+                        "HorasSemana", "HorasNocturnasSemana",
                         "HorasDominicalesSemana", "HorasNocturnasDominicalesSemana", "Observacion"
                     ) VALUES (
-                        :asignacion, :cargo, :cantidad, :modalidad,
-                        :descansa, :horas, :nocturnas, :dominicales, :nocturnas_dominicales, :observacion
+                        :asignacion, :cargo, :cantidad, :dedicacion, :modalidad,
+                        :descansa, :tipo_turno, :minuto_fin, :minuto_fin_domingo, :minutos_por_dia,
+                        :horas, :nocturnas, :dominicales, :nocturnas_dominicales, :observacion
                     )
-                    RETURNING "IdAsignacionCentroCostoDetalle"
                 """),
                 {
                     "asignacion": id_asignacion,
                     "cargo": linea.id_cargo,
                     "cantidad": linea.cantidad_operarios,
+                    "dedicacion": round(linea.dedicacion, 4),
                     "modalidad": modalidad["id"],
                     "descansa": linea.descansa_dia_entre_semana,
+                    "tipo_turno": linea.tipo_turno,
+                    "minuto_fin": _minuto_fin(linea.hora_fin_turno) if linea.tipo_turno == "TARDE" else None,
+                    "minuto_fin_domingo": _minuto_fin(linea.hora_fin_domingo),
+                    "minutos_por_dia": _arreglo_por_dia(_minutos_por_dia(linea, "")),
                     "horas": horas.horas,
                     "nocturnas": horas.nocturnas,
                     "dominicales": horas.dominicales,
                     "nocturnas_dominicales": horas.nocturnas_dominicales,
                     "observacion": (linea.observacion or "").strip() or None,
                 },
-            ).scalar()
+            )
 
-            for tipo_dia, horario in (("GENERAL", linea.horario_general), ("SABADO", linea.horario_sabado)):
-                if horario is None:
-                    continue
-                db.execute(
-                    text("""
-                        INSERT INTO public."AsignacionCentroCostoHorario" (
-                            "IdAsignacionCentroCostoDetalle", "TipoDia", "HoraInicio", "HoraFin",
-                            "MinutosDesayuno", "MinutosAlmuerzo", "MinutosCena",
-                            "HoraDesayuno", "HoraAlmuerzo", "HoraCena"
-                        ) VALUES (
-                            :detalle, :tipo_dia, :inicio, :fin, :desayuno, :almuerzo, :cena,
-                            :hora_desayuno, :hora_almuerzo, :hora_cena
-                        )
-                    """),
-                    {
-                        "detalle": id_detalle,
-                        "tipo_dia": tipo_dia,
-                        "inicio": horario.hora_inicio,
-                        "fin": horario.hora_fin,
-                        "desayuno": horario.minutos_desayuno,
-                        "almuerzo": horario.minutos_almuerzo,
-                        "cena": horario.minutos_cena,
-                        "hora_desayuno": horario.hora_desayuno if horario.minutos_desayuno else None,
-                        "hora_almuerzo": horario.hora_almuerzo if horario.minutos_almuerzo else None,
-                        "hora_cena": horario.hora_cena if horario.minutos_cena else None,
-                    },
-                )
+        # Cada cargo usado queda como sugerido de la combinación CEN4 + CEN5
+        # del centro (si es nuevo se agrega; si ya estaba, suma un uso).
+        for id_cargo in sorted({linea.id_cargo for linea, _, _ in lineas}):
+            db.execute(
+                text("""
+                    INSERT INTO public."CargoSugeridoLineaServicio" AS S (
+                        "IdLineaNegocio", "IdServicioAsociado", "IdCargo",
+                        "Origen", "VecesAsignado", "FechaUltimaAsignacion", "CreadoPor"
+                    )
+                    SELECT CC."IdLineaNegocio", CC."IdServicioAsociado", :cargo,
+                           'ASIGNACION', 1, now(), :usuario
+                    FROM public."CentroCostoContable" CC
+                    WHERE CC."IdCentroCostoContable" = :centro
+                    ON CONFLICT ("IdLineaNegocio", "IdServicioAsociado", "IdCargo") DO UPDATE
+                    SET "VecesAsignado" = S."VecesAsignado" + 1,
+                        "FechaUltimaAsignacion" = now()
+                """),
+                {"cargo": id_cargo, "usuario": usuario, "centro": id_centro},
+            )
 
         db.commit()
     except IntegrityError as error:
@@ -624,7 +778,9 @@ def guardar_asignacion(
         db.rollback()
         raise
 
-    return _respuesta(db, id_centro)
+    respuesta = _respuesta(db, id_centro)
+    contabilidad_sheets_service.programar_sincronizacion(usuario, f"Asignación del centro {id_centro}")
+    return respuesta
 
 
 @router.post("/centros/{id_centro}/finalizar", response_model=AsignacionCentroOut)
@@ -670,4 +826,6 @@ def finalizar_asignacion(
     if not actualizados:
         raise _error(status.HTTP_409_CONFLICT, "La asignación cambió. Actualiza la consulta.")
 
-    return _respuesta(db, id_centro)
+    respuesta = _respuesta(db, id_centro)
+    contabilidad_sheets_service.programar_sincronizacion(usuario, f"Fin de la asignación del centro {id_centro}")
+    return respuesta
