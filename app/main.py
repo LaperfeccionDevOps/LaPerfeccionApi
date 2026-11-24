@@ -112,6 +112,12 @@ from api.routers.panel_gerencial_rrll_routers import (
     router as panel_gerencial_rrll_router,
 )
 from api.routers.perfil_aspirante_routers import router as perfil_aspirante_router
+from api.routers.permisos_trabajo_alturas_routers import (
+    router as permisos_trabajo_alturas_router,
+)
+from api.routers.analisis_trabajo_seguro_routers import (
+    router as analisis_trabajo_seguro_router,
+)
 from api.routers.proceso_disciplinario_router import (
     router as proceso_disciplinario_router,
 )
@@ -270,6 +276,8 @@ app.include_router(contabilidad_asignacion_router)
 # Contabilidad: refresco diario del espejo en Google Sheets (solo si está configurado).
 app.add_event_handler("startup", contabilidad_sheets_service.iniciar_refresco_diario)
 app.add_event_handler("shutdown", contabilidad_sheets_service.detener_refresco_diario)
+app.include_router(permisos_trabajo_alturas_router)
+app.include_router(analisis_trabajo_seguro_router)
 
 
 # ─────────────────────────────────────────────

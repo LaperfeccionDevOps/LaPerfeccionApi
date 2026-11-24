@@ -259,3 +259,5 @@ app/credentials/token.pickle
 app/logs/
 *.log
 logs/
+# Alturas: PDF de ejemplo con datos personales (la plantilla .docx si se versiona)
+app/templates/alturas/*.pdf
