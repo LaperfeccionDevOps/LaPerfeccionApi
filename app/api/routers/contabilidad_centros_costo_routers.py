@@ -825,11 +825,7 @@ SQL_EXPORTAR_CENTROS = """
            CC."FechaInicioProyecto" AS inicio_proyecto, CC."FechaFinProyecto" AS fin_proyecto,
            CC."FechaApertura" AS apertura, CC."FechaCierre" AS cierre,
            CC."PendienteRevision" AS pendiente, CC."ObservacionRevision" AS observacion_revision,
-           -- Motivo del último cierre o reapertura, y la observación de la creación.
-           (SELECT H."Motivo" FROM public."HistorialCentroCosto" H
-             WHERE H."IdCentroCostoContable" = CC."IdCentroCostoContable"
-               AND H."Accion" IN ('CERRADO', 'REABIERTO')
-             ORDER BY H."FechaRegistro" DESC, H."IdHistorialCentroCosto" DESC LIMIT 1) AS motivo_estado,
+           -- Observación que se escribió al crear el centro (hoja CC).
            (SELECT H."Motivo" FROM public."HistorialCentroCosto" H
              WHERE H."IdCentroCostoContable" = CC."IdCentroCostoContable" AND H."Accion" = 'CREADO'
              ORDER BY H."IdHistorialCentroCosto" LIMIT 1) AS observacion_creacion
@@ -849,6 +845,7 @@ SQL_EXPORTAR_CENTROS = """
 # para las líneas registradas antes de los tipos de turno).
 SQL_EXPORTAR_LINEAS = """
     SELECT A."IdCentroCostoContable" AS id_centro, A."FechaDesde" AS fecha_desde,
+           A."Observacion" AS observacion_asignacion,
            btrim(C."NombreCargo") AS cargo, D."CantidadOperarios" AS personas,
            D."Dedicacion" AS dedicacion,
            D."CantidadOperarios" * D."Dedicacion" AS operarios,
@@ -859,6 +856,10 @@ SQL_EXPORTAR_LINEAS = """
            D."HorasSemana" AS horas, D."HorasNocturnasSemana" AS nocturnas,
            D."HorasDominicalesSemana" AS dominicales,
            D."HorasNocturnasDominicalesSemana" AS nocturnas_dominicales,
+           D."HorasExtraDiurnasSemana" AS extra_diurnas,
+           D."HorasExtraNocturnasSemana" AS extra_nocturnas,
+           D."HorasExtraDiurnasFestivasSemana" AS extra_diurnas_festivas,
+           D."HorasExtraNocturnasFestivasSemana" AS extra_nocturnas_festivas,
            H."HoraInicio" AS inicio_anterior, H."HoraFin" AS fin_anterior
     FROM public."AsignacionCentroCosto" A
     JOIN public."AsignacionCentroCostoDetalle" D ON D."IdAsignacionCentroCosto" = A."IdAsignacionCentroCosto"
@@ -896,16 +897,37 @@ def _recargos_linea(linea: dict) -> dict:
     }
 
 
-def _recargos_texto(recargos: dict) -> str:
+# Horas extras: clave, abreviatura y nombre (en el orden de las columnas).
+TIPOS_HORA_EXTRA = [
+    ("extra_diurnas", "HED", "extra diurnas"),
+    ("extra_nocturnas", "HEN", "extra nocturnas"),
+    ("extra_diurnas_festivas", "HEDF", "extra diurnas dominicales / festivas"),
+    ("extra_nocturnas_festivas", "HENF", "extra nocturnas dominicales / festivas"),
+]
+
+
+def _extras_linea(linea: dict) -> dict:
+    """Horas extras por operario y semana, a tiempo completo (sin la dedicación)."""
+    return {clave: round(float(linea[clave] or 0), 2) for clave, _, _ in TIPOS_HORA_EXTRA}
+
+
+def _horas_texto(valor: float) -> str:
+    return f"{valor:g}".replace(".", ",")
+
+
+def _recargos_texto(recargos: dict, extras: dict | None = None) -> str:
     """Horas de recargo por operario y semana, abreviadas en una celda:
     "RN 9,67 h · RD 0 h · RND 3 h" (nocturnas, dominicales diurnas y
-    nocturnas dominicales)."""
-    def horas(valor: float) -> str:
-        return f"{valor:g}".replace(".", ",")
-    return (
-        f"RN {horas(recargos['nocturnas'])} h · RD {horas(recargos['dominicales_diurnas'])} h"
-        f" · RND {horas(recargos['nocturnas_dominicales'])} h"
+    nocturnas dominicales) y, si tiene, las horas extras de cada tipo:
+    "· HED 2 h · HENF 1 h"."""
+    texto = (
+        f"RN {_horas_texto(recargos['nocturnas'])} h · RD {_horas_texto(recargos['dominicales_diurnas'])} h"
+        f" · RND {_horas_texto(recargos['nocturnas_dominicales'])} h"
     )
+    for clave, abreviatura, _ in TIPOS_HORA_EXTRA:
+        if extras and extras.get(clave):
+            texto += f" · {abreviatura} {_horas_texto(extras[clave])} h"
+    return texto
 
 
 def _horario_linea(linea: dict) -> tuple[str, str, str]:
@@ -989,6 +1011,11 @@ COLUMNAS_CENTROS = [
     ("Total h nocturnas / semana", "decimal", 14, lambda c, l, o, r: round(r["nocturnas"], 2)),
     ("Total h dominicales diurnas / semana", "decimal", 16, lambda c, l, o, r: round(r["dominicales_diurnas"], 2)),
     ("Total h nocturnas dominicales / semana", "decimal", 16, lambda c, l, o, r: round(r["nocturnas_dominicales"], 2)),
+    # Horas extras de la asignación vigente (por operarios equivalentes).
+    *[
+        (f"Total h {nombre} / semana", "decimal", 16, lambda c, l, o, r, clave=clave: round(r[clave], 2))
+        for clave, _, nombre in TIPOS_HORA_EXTRA
+    ],
     ("Pendiente de revisión", "texto", 11, lambda c, l, o, r: "Sí" if c["pendiente"] else "No"),
     ("Observación de revisión", "texto", 40, lambda c, l, o, r: c["observacion_revision"] or ""),
 ]
@@ -1026,14 +1053,22 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
 
     # Hoja 1: un centro por fila, con el total de su asignación vigente.
     filas_centros = []
-    totales = {"operarios": 0.0, "personas": 0, "nocturnas": 0.0, "dominicales_diurnas": 0.0, "nocturnas_dominicales": 0.0}
+    claves_extra = [clave for clave, _, _ in TIPOS_HORA_EXTRA]
+    totales = {
+        "operarios": 0.0, "personas": 0, "nocturnas": 0.0, "dominicales_diurnas": 0.0, "nocturnas_dominicales": 0.0,
+        **{clave: 0.0 for clave in claves_extra},
+    }
     sin_asignacion = 0
     for c in centros:
         suyas = por_centro.get(c["id"], [])
         operarios = sum(float(l["operarios"]) for l in suyas)
-        suma = {"nocturnas": 0.0, "dominicales_diurnas": 0.0, "nocturnas_dominicales": 0.0}
+        suma = {
+            "nocturnas": 0.0, "dominicales_diurnas": 0.0, "nocturnas_dominicales": 0.0,
+            **{clave: 0.0 for clave in claves_extra},
+        }
         for linea in suyas:
-            for clave, horas in _recargos_linea(linea).items():
+            # Recargos y horas extras por operario × operarios equivalentes.
+            for clave, horas in {**_recargos_linea(linea), **_extras_linea(linea)}.items():
                 suma[clave] += horas * float(linea["operarios"])
         if not suyas:
             sin_asignacion += 1
@@ -1058,6 +1093,7 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
     for linea in lineas:
         centro = nombres[linea["id_centro"]]
         recargos = _recargos_linea(linea)
+        extras = _extras_linea(linea)
         turno, horario, domingo = _horario_linea(linea)
         equivalentes = float(linea["operarios"])
         filas_lineas.append([
@@ -1069,6 +1105,9 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
             round(recargos["nocturnas"] * equivalentes, 2),
             round(recargos["dominicales_diurnas"] * equivalentes, 2),
             round(recargos["nocturnas_dominicales"] * equivalentes, 2),
+            # Horas extras: por operario (tiempo completo) y total de la línea.
+            *[extras[clave] for clave in claves_extra],
+            *[round(extras[clave] * equivalentes, 2) for clave in claves_extra],
         ])
 
     hoja_lineas = {
@@ -1080,28 +1119,39 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
             "H / semana por operario", "H nocturnas por operario", "H dominicales diurnas por operario",
             "H nocturnas dominicales por operario", "Total h nocturnas", "Total h dominicales diurnas",
             "Total h nocturnas dominicales",
+            *[f"H {nombre} por operario" for _, _, nombre in TIPOS_HORA_EXTRA],
+            *[f"Total h {nombre}" for _, _, nombre in TIPOS_HORA_EXTRA],
         ],
-        "tipos": ["texto", "texto", "texto", "fecha", "texto", "entero", "decimal", "decimal"] + ["texto"] * 5 + ["decimal"] * 7,
-        "anchos": [38, 32, 30, 12, 28, 10, 11, 12, 18, 13, 16, 34, 14, 12, 13, 15, 15, 13, 15, 15],
+        "tipos": ["texto", "texto", "texto", "fecha", "texto", "entero", "decimal", "decimal"] + ["texto"] * 5 + ["decimal"] * 15,
+        "anchos": [38, 32, 30, 12, 28, 10, 11, 12, 18, 13, 16, 34, 14, 12, 13, 15, 15, 13, 15, 15] + [15] * 8,
         "filas": filas_lineas,
     }
 
     # Hoja 3 ("CC"): centros y turnos. El centro se repite una vez por cada línea de
     # su asignación vigente; sin asignación aparece una vez, con el turno en
-    # blanco. Los valores del turno son por operario (no por el total).
+    # blanco. PAX son los operarios equivalentes (personas × dedicación) y el
+    # detalle del turno son las horas de recargo de una persona en este centro:
+    # las del turno por su dedicación (0,4 → 40 % de las horas).
     filas_turnos = []
     for c in centros:
         base = [
             c["socio"] or "", c["nit"], c["cen1"], c["cliente"], c["cen2"], c["departamento"],
             c["cen3"], c["sede"], c["cen4"], c["linea"], c["cen5"], c["servicio"],
             c["inicio_proyecto"], "Activo" if c["estado"] == "ABIERTO" else "Cerrado", c["fin_proyecto"],
-            c["motivo_estado"] or "",
         ]
         for linea in por_centro.get(c["id"]) or [None]:
             if linea is None:
-                turno = ["", None, "", ""]
+                turno = ["", "", None, "", ""]
             else:
-                turno = [linea["cargo"], linea["personas"], linea["dias"], _recargos_texto(_recargos_linea(linea))]
+                dedicacion = float(linea["dedicacion"])
+                recargos = {k: round(v * dedicacion, 2) for k, v in _recargos_linea(linea).items()}
+                extras = {k: round(v * dedicacion, 2) for k, v in _extras_linea(linea).items()}
+                turno = [
+                    # "PAX - Cerrado": observación de la asignación vigente.
+                    linea["observacion_asignacion"] or "",
+                    linea["cargo"], round(float(linea["operarios"]), 2), linea["dias"],
+                    _recargos_texto(recargos, extras),
+                ]
             filas_turnos.append(base + turno + [c["observacion_creacion"] or ""])
 
     hoja_turnos = {
@@ -1112,11 +1162,13 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
             "CODIGO", "LINEA DE NEGOCIO", "CODIGO", "SERVICIO ASOCIADO - AREAS",
             "Fecha Inicio", "Estado Proyecto", "Fecha Final",
             "PAX - Cerrado", "PERFIL", "PAX", "TURNO",
-            # Detalle: RN nocturnas · RD dominicales diurnas · RND nocturnas dominicales (por operario y semana).
+            # Detalle: RN nocturnas · RD dominicales diurnas · RND nocturnas dominicales
+            # y, si tiene, HED / HEN / HEDF / HENF horas extras (por persona y
+            # semana, ya por la dedicación).
             "Detalle Turno",
             "Observación creación",
         ],
-        "tipos": ["texto"] * 12 + ["fecha", "texto", "fecha", "texto", "texto", "entero", "texto", "texto", "texto"],
+        "tipos": ["texto"] * 12 + ["fecha", "texto", "fecha", "texto", "texto", "decimal", "texto", "texto", "texto"],
         "anchos": [16, 14, 10, 32, 10, 16, 12, 30, 10, 24, 12, 26, 13, 10, 13, 40, 28, 10, 18, 34, 40],
         "filas": filas_turnos,
     }
@@ -1148,6 +1200,12 @@ def armar_exportacion(db: Session, estado: str | None, proyectos: list[int] | No
         ["Nocturnas (lunes a sábado)", round(totales["nocturnas"], 2)],
         ["Dominicales diurnas", round(totales["dominicales_diurnas"], 2)],
         ["Nocturnas dominicales", round(totales["nocturnas_dominicales"], 2)],
+        [],
+        ["Total horas extras por semana (operarios equivalentes)"],
+        *[
+            [f"{abreviatura} · {nombre[0].upper()}{nombre[1:]}", round(totales[clave], 2)]
+            for clave, abreviatura, nombre in TIPOS_HORA_EXTRA
+        ],
     ]
     if parametro:
         resumen += [

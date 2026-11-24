@@ -20,7 +20,7 @@ su salida, que va de 19:00 a 24:00 como la general (un día que termina antes se
 registra a las 19:00: no suma nocturnas). Con domingo a domingo
 y descanso entre semana, el descanso rota de lunes a viernes: las nocturnas de
 esos días se promedian (suma × 4/5) y se suman las del sábado y el domingo.
-Las salidas van cada 10 minutos.
+Las salidas van cada 5 minutos (p. ej. 19:15).
 """
 
 from dataclasses import dataclass
@@ -33,8 +33,8 @@ TIPOS_TURNO = ("DIURNO", "TARDE", "NOCHE")
 # Hora de salida del turno de la tarde: entre las 19:00 y las 24:00.
 SALIDA_TARDE_MINIMA = 19 * 60
 SALIDA_TARDE_MAXIMA = 24 * 60
-# Las salidas se eligen cada 10 minutos.
-INTERVALO_SALIDA = 10
+# Las salidas se eligen cada 5 minutos (p. ej. 19:15).
+INTERVALO_SALIDA = 5
 NOMBRES_DIA = {1: "Lun", 2: "Mar", 3: "Mié", 4: "Jue", 5: "Vie", 6: "Sáb", 7: "Dom"}
 
 
@@ -133,7 +133,7 @@ def calcular_horas_turno(
 
     for salida in (minuto_salida, minuto_salida_domingo, *(minutos_salida_dia or {}).values()):
         if salida is not None and salida % INTERVALO_SALIDA:
-            raise ValueError("Las horas de salida van cada 10 minutos.")
+            raise ValueError(f"Las horas de salida van cada {INTERVALO_SALIDA} minutos.")
 
     if minutos_salida_dia is not None:
         if tipo_turno != "TARDE":

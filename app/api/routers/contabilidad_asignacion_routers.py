@@ -26,6 +26,16 @@ DOMINGO = 7
 TipoTurno = Literal["DIURNO", "TARDE", "NOCHE"]
 # "19:00" a "24:00" (la medianoche del final del día se escribe 24:00).
 PATRON_HORA_FIN = r"^([01][0-9]|2[0-4]):[0-5][0-9]$"
+# Tope legal de horas extras por operario y semana (Ley 2101 de 2021), sumando
+# diurnas, nocturnas y dominicales o festivas.
+HORAS_EXTRA_MAXIMAS_SEMANA = 12
+# Tipos de hora extra: campo de la API -> columna de la tabla.
+HORAS_EXTRA = {
+    "horas_extra_diurnas": "HorasExtraDiurnasSemana",
+    "horas_extra_nocturnas": "HorasExtraNocturnasSemana",
+    "horas_extra_diurnas_festivas": "HorasExtraDiurnasFestivasSemana",
+    "horas_extra_nocturnas_festivas": "HorasExtraNocturnasFestivasSemana",
+}
 
 
 # ─────────────────────────────────────────────
@@ -52,6 +62,12 @@ class LineaIn(TurnoIn):
     # (0.3 = 30 %; 1 = tiempo completo; base 24 días hábiles al mes).
     dedicacion: float = Field(1, gt=0, le=1)
     observacion: str | None = Field(None, max_length=500)
+    # Horas extras por operario y semana, a tiempo completo (se ajustan con la
+    # dedicación). 0 = no tiene de ese tipo. Entre todas, máximo 12 por semana.
+    horas_extra_diurnas: float = Field(0, ge=0, le=HORAS_EXTRA_MAXIMAS_SEMANA)
+    horas_extra_nocturnas: float = Field(0, ge=0, le=HORAS_EXTRA_MAXIMAS_SEMANA)
+    horas_extra_diurnas_festivas: float = Field(0, ge=0, le=HORAS_EXTRA_MAXIMAS_SEMANA)
+    horas_extra_nocturnas_festivas: float = Field(0, ge=0, le=HORAS_EXTRA_MAXIMAS_SEMANA)
 
 
 class CalculoIn(TurnoIn):
@@ -161,6 +177,11 @@ class LineaOut(BaseModel):
     horas_nocturnas_semana: float
     horas_dominicales_semana: float
     horas_nocturnas_dominicales_semana: float
+    # Horas extras por operario y semana, a tiempo completo.
+    horas_extra_diurnas: float = 0
+    horas_extra_nocturnas: float = 0
+    horas_extra_diurnas_festivas: float = 0
+    horas_extra_nocturnas_festivas: float = 0
     observacion: str | None = None
 
 
@@ -363,6 +384,10 @@ def _lineas(db: Session, id_asignacion: int) -> list[dict]:
                    D."HorasNocturnasSemana"   AS horas_nocturnas_semana,
                    D."HorasDominicalesSemana" AS horas_dominicales_semana,
                    D."HorasNocturnasDominicalesSemana" AS horas_nocturnas_dominicales_semana,
+                   D."HorasExtraDiurnasSemana"           AS horas_extra_diurnas,
+                   D."HorasExtraNocturnasSemana"         AS horas_extra_nocturnas,
+                   D."HorasExtraDiurnasFestivasSemana"   AS horas_extra_diurnas_festivas,
+                   D."HorasExtraNocturnasFestivasSemana" AS horas_extra_nocturnas_festivas,
                    D."Observacion"            AS observacion
             FROM public."AsignacionCentroCostoDetalle" D
             JOIN public."Cargo" C ON C."IdCargo" = D."IdCargo"
@@ -673,6 +698,14 @@ def guardar_asignacion(
                 f"{etiqueta}: {horas.horas:g} horas semanales superan el máximo de {maximo:g}.",
             )
 
+        extras = sum(getattr(linea, campo) for campo in HORAS_EXTRA)
+        if round(extras, 2) > HORAS_EXTRA_MAXIMAS_SEMANA:
+            raise _error(
+                status.HTTP_400_BAD_REQUEST,
+                f"{etiqueta}: {extras:g} horas extras por semana superan el máximo legal de "
+                f"{HORAS_EXTRA_MAXIMAS_SEMANA} por operario.",
+            )
+
         lineas.append((linea, modalidad, horas))
 
     vigente = next((a for a in _asignaciones(db, id_centro) if a["estado"] == "VIGENTE"), None)
@@ -721,11 +754,15 @@ def guardar_asignacion(
                         "IdAsignacionCentroCosto", "IdCargo", "CantidadOperarios", "Dedicacion", "IdModalidadDias",
                         "DescansaDiaEntreSemana", "TipoTurno", "MinutoFinTurno", "MinutoFinDomingo", "MinutosFinPorDia",
                         "HorasSemana", "HorasNocturnasSemana",
-                        "HorasDominicalesSemana", "HorasNocturnasDominicalesSemana", "Observacion"
+                        "HorasDominicalesSemana", "HorasNocturnasDominicalesSemana",
+                        "HorasExtraDiurnasSemana", "HorasExtraNocturnasSemana",
+                        "HorasExtraDiurnasFestivasSemana", "HorasExtraNocturnasFestivasSemana", "Observacion"
                     ) VALUES (
                         :asignacion, :cargo, :cantidad, :dedicacion, :modalidad,
                         :descansa, :tipo_turno, :minuto_fin, :minuto_fin_domingo, :minutos_por_dia,
-                        :horas, :nocturnas, :dominicales, :nocturnas_dominicales, :observacion
+                        :horas, :nocturnas, :dominicales, :nocturnas_dominicales,
+                        :horas_extra_diurnas, :horas_extra_nocturnas,
+                        :horas_extra_diurnas_festivas, :horas_extra_nocturnas_festivas, :observacion
                     )
                 """),
                 {
@@ -743,6 +780,7 @@ def guardar_asignacion(
                     "nocturnas": horas.nocturnas,
                     "dominicales": horas.dominicales,
                     "nocturnas_dominicales": horas.nocturnas_dominicales,
+                    **{campo: round(getattr(linea, campo), 2) for campo in HORAS_EXTRA},
                     "observacion": (linea.observacion or "").strip() or None,
                 },
             )
