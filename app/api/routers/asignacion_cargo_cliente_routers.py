@@ -6,6 +6,7 @@ from sqlalchemy import text
 import datetime
 
 from infrastructure.db.deps import get_db
+from infrastructure.security.auth_dependencies import get_current_user
 
 router = APIRouter(
     prefix="/api/asignacion-cargo-cliente",
@@ -13,7 +14,7 @@ router = APIRouter(
 )
 
 #  Cambia esta versión cada vez que modifiques el archivo, para validar en Postman
-ROUTER_VERSION = "V6-POST-RETORNA-ASIGNACION-ACTUALIZADA"
+ROUTER_VERSION = "V7-CATALOGO-DINAMICO-CLIENTES"
 
 # ----------------------------
 # Schemas
@@ -159,6 +160,53 @@ def _resolver_cargo_nombre(db: Session, id_cargo: Optional[int]) -> Optional[str
 @router.get("/__version")
 def version():
     return {"router": "asignacion-cargo-cliente", "version": ROUTER_VERSION}
+
+
+# ----------------------------
+# Catálogo dinámico de clientes - integración contable QA
+# ----------------------------
+@router.get("/catalogo/clientes")
+def listar_catalogo_clientes(
+    db: Session = Depends(get_db),
+    current: dict = Depends(get_current_user),
+):
+    usuario = current.get("usuario")
+    if usuario is None:
+        raise HTTPException(status_code=401, detail="Sesión sin usuario válido.")
+    if (getattr(usuario, "HashEstado", None) or "").strip().upper() != "ACTIVO":
+        raise HTTPException(status_code=403, detail="Usuario inactivo.")
+
+    # Roles iniciales para pruebas de Selección y administración en QA.
+    if not set(current.get("roles_ids", [])).intersection({1, 2, 5, 15}):
+        raise HTTPException(status_code=403, detail="Sin permiso para consultar el catálogo de Selección.")
+
+    # Compatibilidad histórica: NULL se conserva y no se modifica.
+    # Una fila por cliente, incluso cuando tenga varios centros relacionados.
+    filas = db.execute(text("""
+        SELECT c."IdCliente", c."Nombre", c."Activo",
+               COALESCE(r.centros, '[]'::jsonb) AS "CentrosContables"
+        FROM public."Cliente" c
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(jsonb_build_object(
+                'IdCentroCostoContable', cc."IdCentroCostoContable",
+                'Estado', cc."Estado",
+                'CEN1', p."Codigo", 'CEN2', d."Codigo",
+                'CEN3', s."Codigo", 'CEN4', l."Codigo",
+                'CEN5', sa."Codigo"
+            ) ORDER BY cc."IdCentroCostoContable") AS centros
+            FROM public."RelacionClienteCentroCostoContable" rc
+            JOIN public."CentroCostoContable" cc ON cc."IdCentroCostoContable" = rc."IdCentroCostoContable"
+            JOIN public."SedeContable" s ON s."IdSedeContable" = cc."IdSedeContable"
+            JOIN public."ProyectoContable" p ON p."IdProyectoContable" = s."IdProyectoContable"
+            JOIN public."DepartamentoContable" d ON d."IdDepartamentoContable" = cc."IdDepartamentoContable"
+            JOIN public."LineaNegocio" l ON l."IdLineaNegocio" = cc."IdLineaNegocio"
+            JOIN public."ServicioAsociado" sa ON sa."IdServicioAsociado" = cc."IdServicioAsociado"
+            WHERE rc."IdCliente" = c."IdCliente" AND rc."Activo" = TRUE
+        ) r ON TRUE
+        WHERE c."Activo" IS NOT FALSE
+        ORDER BY c."Nombre", c."IdCliente"
+    """)).mappings().all()
+    return [dict(fila) for fila in filas]
 
 
 # ----------------------------
