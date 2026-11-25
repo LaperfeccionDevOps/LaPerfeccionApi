@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from api.routers.contabilidad_centros_costo_routers import _nombre_usuario, require_contabilidad
+from api.routers.contabilidad_centros_costo_routers import _nombre_usuario, require_contabilidad, require_contabilidad_gestion
 from infrastructure.db.deps import get_db
 from services import contabilidad_sheets_service
 from services.contabilidad_horas_service import NOMBRES_DIA, calcular_horas_turno, resumen_salidas
@@ -642,7 +642,7 @@ def guardar_asignacion(
     id_centro: int,
     payload: AsignacionIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     """Registra la asignación de operarios del centro desde `fecha_desde`. Si ya
     hay una vigente, se finaliza el día anterior (o el mismo día si empieza
@@ -826,7 +826,7 @@ def finalizar_asignacion(
     id_centro: int,
     payload: FinalizarIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     """Finaliza la asignación vigente sin registrar otra (p. ej. el cliente ya
     no requiere operarios aunque el centro siga abierto)."""

@@ -34,7 +34,11 @@ ROLES_PERMITIDOS = {ROL_ADMIN, ROL_SUPER_ADMIN, ROL_CONTABILIDAD, ROL_DESARROLLA
 TAMANO_PAGINA_MAXIMO = 200
 
 
+PERMISO_GESTION_CONTABILIDAD = "CONTABILIDAD_CENTROS_COSTO_GESTIONAR"
+
+
 def require_contabilidad(current=Depends(get_current_user)):
+    _validar_usuario_vinculacion(current)
     roles_ids = {
         int(id_rol)
         for id_rol in (current.get("roles_ids") or [])
@@ -46,8 +50,51 @@ def require_contabilidad(current=Depends(get_current_user)):
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="No tienes permiso para gestionar los centros de costo.",
+        detail="No tienes permiso para consultar Contabilidad.",
     )
+
+
+def _puede_gestionar_contabilidad(current: dict, db: Session) -> bool:
+    usuario = current["usuario"]
+    return bool(db.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM public."UsuarioPermiso" up
+                JOIN public."Permiso" p ON p."IdPermiso" = up."IdPermiso"
+                JOIN public."Usuario" u ON u."IdUsuario" = up."IdUsuario"
+                WHERE up."IdUsuario" = :id_usuario
+                  AND p."Codigo" = :codigo
+                  AND p."Activo" = TRUE
+                  AND up."Activo" = TRUE
+                  AND u."HashEstado" = 'ACTIVO'
+            )
+        """),
+        {"id_usuario": usuario.IdUsuario, "codigo": PERMISO_GESTION_CONTABILIDAD},
+    ).scalar())
+
+
+def require_contabilidad_gestion(
+    current=Depends(require_contabilidad),
+    db: Session = Depends(get_db),
+):
+    if not _puede_gestionar_contabilidad(current, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para gestionar centros de costo.",
+        )
+    return current
+
+
+@router.get("/permisos")
+def obtener_permisos_contabilidad(
+    current=Depends(require_contabilidad),
+    db: Session = Depends(get_db),
+):
+    return {
+        "puede_consultar": True,
+        "puede_gestionar": _puede_gestionar_contabilidad(current, db),
+    }
 
 
 # ─────────────────────────────────────────────
@@ -1292,7 +1339,7 @@ def exportar_centros_costo(
 
 
 @router.post("/sincronizar-sheets")
-def sincronizar_google_sheets(current=Depends(require_contabilidad)):
+def sincronizar_google_sheets(current=Depends(require_contabilidad_gestion)):
     """Envía ya mismo la foto completa a la hoja de Google (además del envío
     automático después de cada cambio y del refresco diario)."""
     if not contabilidad_sheets_service.configurado():
@@ -1517,7 +1564,7 @@ def cerrar_centro_costo(
     id_centro: int,
     payload: CambioEstadoIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     return _cambiar_estado(db, current, id_centro, payload, "ABIERTO", "CERRADO")
 
@@ -1527,7 +1574,7 @@ def reabrir_centro_costo(
     id_centro: int,
     payload: CambioEstadoIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     return _cambiar_estado(db, current, id_centro, payload, "CERRADO", "ABIERTO")
 
@@ -1545,7 +1592,7 @@ def ajustar_fechas_proyecto(
     id_centro: int,
     payload: FechasProyectoIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     """Ajusta la proyección de inicio y la fecha de fin del proyecto. El cambio
     queda en el historial con el motivo. No cambia el estado del centro."""
@@ -1914,7 +1961,7 @@ def _vincular_cliente_operativo(db: Session, entrada: VinculacionClienteIn, id_c
 def crear_centro_costo(
     payload: CrearCentroCostoIn,
     db: Session = Depends(get_db),
-    current=Depends(require_contabilidad),
+    current=Depends(require_contabilidad_gestion),
 ):
     """Crea un centro de costo ABIERTO con fecha de apertura de hoy (Bogotá).
     En la misma transacción crea lo que venga como nuevo: cliente y proyecto,
