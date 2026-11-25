@@ -71,7 +71,35 @@ def _clave() -> str:
 
 
 def configurado() -> bool:
-    return bool(_url() and _clave())
+    return bool(_url() and _clave() and _ambiente() in {"QA", "PRODUCCION"}
+                and _destino() and _base_esperada() and _servidor_esperado())
+
+
+def _ambiente():
+    return os.getenv("CONTABILIDAD_SHEETS_AMBIENTE", "").strip().upper()
+
+
+def _destino():
+    return os.getenv("CONTABILIDAD_SHEETS_DESTINO_ID", "").strip()
+
+
+def _base_esperada():
+    return os.getenv("CONTABILIDAD_SHEETS_BASE", "").strip()
+
+
+def _servidor_esperado():
+    return os.getenv("CONTABILIDAD_SHEETS_SERVIDOR", "").strip()
+
+
+def _validar_base(db):
+    base, servidor = db.execute(text(
+        "SELECT current_database(), inet_server_addr()::text || ':' || inet_server_port()::text"
+    )).one()
+    if base != _base_esperada() or servidor != _servidor_esperado():
+        raise ErrorSheets("Base o servidor no autorizado para sincronizar.")
+    if (_ambiente() == "QA") != (base == "LA_PERFECCION_QA"):
+        raise ErrorSheets("Ambiente y base incompatibles.")
+    return base
 
 
 # ─── Paquete ───
@@ -93,6 +121,7 @@ def _paquete(db, origen: str, usuario: str, evento: str) -> dict:
     # Import diferido: el router importa este servicio.
     from api.routers.contabilidad_centros_costo_routers import armar_exportacion
 
+    base = _validar_base(db)
     datos = armar_exportacion(db, None, None, usuario)
 
     hojas = [
@@ -114,7 +143,7 @@ def _paquete(db, origen: str, usuario: str, evento: str) -> dict:
             "filas": [[_valor(v) for v in fila] for fila in h["filas"]],
         })
 
-    return {"origen": origen, "usuario": usuario, "evento": evento[:300], "hojas": hojas}
+    return {"ambiente": _ambiente(), "destino_id": _destino(), "base": base, "origen": origen, "usuario": usuario, "evento": evento[:300], "hojas": hojas}
 
 
 def _enviar(paquete: dict) -> list[dict]:
@@ -147,6 +176,8 @@ def _enviar(paquete: dict) -> list[dict]:
 
     if not resultado.get("ok"):
         raise ErrorSheets(f"El Apps Script rechazó el envío: {resultado.get('error') or 'sin detalle'}")
+    if resultado.get("ambiente") != paquete["ambiente"] or resultado.get("destino_id") != paquete["destino_id"]:
+        raise ErrorSheets("El receptor no confirmó el ambiente y destino autorizados.")
     return resultado.get("hojas") or []
 
 
@@ -213,7 +244,7 @@ def programar_sincronizacion(usuario: str, evento: str) -> None:
     """Llamar después del commit de un cambio. No bloquea ni falla."""
     global _temporizador
     if not configurado():
-        logger.warning("Cambio sin enviar a Google Sheets (falta CONTABILIDAD_APPSCRIPT_URL/_CLAVE en el entorno): %s", evento)
+        logger.warning("Cambio sin enviar a Google Sheets (configuración de destino o ambiente incompleta): %s", evento)
         return
     logger.info("Envío programado en %s s: %s (%s)", ESPERA_SEGUNDOS, evento, usuario)
     with _candado:

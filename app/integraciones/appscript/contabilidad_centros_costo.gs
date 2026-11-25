@@ -12,7 +12,9 @@
  *        - Zona horaria: (GMT-05:00) Bogotá.
  *        - Propiedades de la secuencia de comandos: agregar CLAVE con una clave
  *          larga (la misma de CONTABILIDAD_APPSCRIPT_CLAVE en el .env de la API).
- *   3. (Opcional) Ejecutar probarEscritura() para ver una pestaña de ejemplo.
+ *   3. Habilitar el servicio avanzado Sheets API. Configurar AMBIENTE, BASE,
+ *      DESTINO_ID y ESPEJO_DEDICADO=SI. Solo un espejo dedicado, nunca el Excel oficial.
+ *      probarEscritura() solo se permite en QA y en una pestaña Prueba separada.
  *   4. Implementar > Nueva implementación > Aplicación web:
  *        Ejecutar como: Yo · Quién tiene acceso: Cualquier usuario.
  *      La URL que termina en /exec va en CONTABILIDAD_APPSCRIPT_URL.
@@ -22,6 +24,9 @@
  * Contrato del POST (JSON):
  *   {
  *     "clave": "...",
+ *     "ambiente": "QA" | "PRODUCCION",
+ *     "base": "...",
+ *     "destino_id": "...",
  *     "origen": "cambio" | "programado" | "manual",
  *     "usuario": "NOMBRE.USUARIO",
  *     "evento": "Cierre del centro ...",
@@ -40,7 +45,8 @@
 
 const PROPIEDAD_CLAVE = 'CLAVE';
 const HOJA_REGISTRO = 'Registro de envíos';
-const MAX_REGISTRO = 500;
+// El registro conserva todos los envíos; no se recorta.
+const HOJAS_AUTORIZADAS = ['Resumen', 'Centros de costo', 'Asignaciones vigentes', 'CC'];
 const MAX_HOJAS = 10;
 
 const FORMATOS = {
@@ -57,7 +63,7 @@ const COLOR_ENCABEZADO = '#065f46';
 
 function doGet() {
   // Solo confirma que la URL responde; no expone datos.
-  return responder({ ok: true, servicio: 'contabilidad-centros-costo', version: 1 });
+  return responder({ ok: true, servicio: 'contabilidad-centros-costo', version: 2 });
 }
 
 function doPost(e) {
@@ -80,7 +86,7 @@ function doPost(e) {
   }
 
   try {
-    return responder({ ok: true, hojas: procesar(datos) });
+    return responder({ ok: true, hojas: procesar(datos), ambiente: datos.ambiente, destino_id: datos.destino_id });
   } catch (error) {
     return responder({ ok: false, error: String((error && error.message) || error) });
   } finally {
@@ -90,7 +96,13 @@ function doPost(e) {
 
 // Ejecutar a mano desde el editor para ver cómo queda una pestaña.
 function probarEscritura() {
+  const p = PropertiesService.getScriptProperties();
+  if (p.getProperty('AMBIENTE') !== 'QA') throw new Error('Prueba permitida solo en QA.');
+  const candado = LockService.getScriptLock();
+  if (!candado.tryLock(30000)) throw new Error('Actualización en curso.');
+  try {
   procesar({
+    ambiente: 'QA', base: p.getProperty('BASE'), destino_id: p.getProperty('DESTINO_ID'),
     origen: 'manual',
     usuario: Session.getActiveUser().getEmail() || 'editor',
     evento: 'Prueba desde el editor',
@@ -105,34 +117,45 @@ function probarEscritura() {
         ],
       },
     ],
-  });
+  }, true);
+  } finally { candado.releaseLock(); }
 }
 
 // ─── Proceso ───
 
-function procesar(datos) {
+function procesar(datos, prueba = false) {
   validarPaquete(datos);
-
-  const libro = obtenerLibro();
-  const resumen = datos.hojas.map((h, i) => {
-    const hoja = escribirHoja(libro, h);
-    libro.setActiveSheet(hoja);
-    libro.moveActiveSheet(i + 1);
+  const libro = obtenerLibro(datos);
+  const permitidas = prueba ? ['Prueba'] : HOJAS_AUTORIZADAS;
+  if (datos.hojas.length !== permitidas.length || !permitidas.every(n => datos.hojas.some(h => h.nombre === n))) {
+    throw new Error('Conjunto de pestañas no autorizado.');
+  }
+  if (!prueba && datos.hojas.some(h => ['CC', 'Centros de costo'].includes(h.nombre) && !h.filas.length)) {
+    throw new Error('Exportación de centros vacía; no se escribe.');
+  }
+  const solicitudes = [];
+  const resumen = datos.hojas.map(h => {
+    escribirHoja(libro, h, solicitudes);
     return { nombre: h.nombre, filas: h.filas.length };
   });
-
-  quitarHojaInicialVacia(libro, datos.hojas.map((h) => h.nombre));
-  registrar(libro, datos, resumen);
-  SpreadsheetApp.flush();
+  registrar(libro, datos, resumen, solicitudes);
+  // Todas las validaciones preceden a la única escritura atómica.
+  Sheets.Spreadsheets.batchUpdate({ requests: solicitudes }, libro.getId());
   return resumen;
 }
 
-function obtenerLibro() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  if (!libro) {
-    throw new Error('El script debe crearse desde la hoja (Extensiones > Apps Script).');
+function obtenerLibro(datos) {
+  const p = PropertiesService.getScriptProperties();
+  const ambiente = p.getProperty('AMBIENTE');
+  const base = p.getProperty('BASE');
+  const destino = p.getProperty('DESTINO_ID');
+  if (!['QA', 'PRODUCCION'].includes(ambiente) || !base || !destino ||
+      p.getProperty('ESPEJO_DEDICADO') !== 'SI' || datos.ambiente !== ambiente ||
+      datos.base !== base || datos.destino_id !== destino ||
+      ((ambiente === 'QA') !== (base === 'LA_PERFECCION_QA'))) {
+    throw new Error('Ambiente, base o destino no autorizado.');
   }
-  return libro;
+  return SpreadsheetApp.openById(destino);
 }
 
 function validarClave(clave) {
@@ -201,62 +224,69 @@ function validarPaquete(datos) {
   });
 }
 
-function escribirHoja(libro, h) {
-  const hoja = libro.getSheetByName(h.nombre) || libro.insertSheet(h.nombre);
+function escribirHoja(libro, h, solicitudes) {
+  const hoja = libro.getSheetByName(h.nombre);
+  if (!hoja) throw new Error('Falta pestaña autorizada: ' + h.nombre);
   const columnas = h.encabezados.length;
   const tipos = h.tipos || h.encabezados.map(() => 'texto');
   const total = h.filas.length + 1;
-
-  const filtro = hoja.getFilter();
-  if (filtro) {
-    filtro.remove();
+  const anterior = hoja.getLastRow();
+  const alto = Math.max(total, anterior);
+  if (hoja.getLastColumn() > columnas) throw new Error('Columnas adicionales: ' + h.nombre);
+  if (anterior) {
+    if (hoja.getMaxColumns() < columnas) throw new Error('Esquema insuficiente: ' + h.nombre);
+    const actual = hoja.getRange(1, 1, 1, columnas).getDisplayValues()[0];
+    if (actual.some((v, i) => v !== String(h.encabezados[i]))) throw new Error('Encabezados diferentes: ' + h.nombre);
+    const rango = hoja.getRange(1, 1, anterior, columnas);
+    if (rango.getFormulas().some(r => r.some(Boolean)) || rango.getNotes().some(r => r.some(Boolean))) {
+      throw new Error('Fórmulas o notas existentes: ' + h.nombre);
+    }
   }
-  hoja.clear();
-  ajustarTamano(hoja, total, columnas);
-
-  // El formato va antes de los valores: así "01" o un NIT no se vuelven número.
-  tipos.forEach((t, i) => hoja.getRange(2, i + 1, Math.max(total - 1, 1), 1).setNumberFormat(FORMATOS[t]));
-  hoja.getRange(1, 1, 1, columnas).setNumberFormat('@');
-
-  const valores = [h.encabezados.map(String)].concat(
-    h.filas.map((fila) => fila.map((valor, i) => convertir(valor, tipos[i])))
+  ajustarTamano(hoja, alto, columnas, solicitudes);
+  const id = hoja.getSheetId();
+  const valores = [h.encabezados.map(v => celda(v, 'texto'))].concat(
+    h.filas.map(fila => fila.map((valor, i) => celda(valor, tipos[i])))
   );
-  hoja.getRange(1, 1, total, columnas).setValues(valores);
-
-  hoja
-    .getRange(1, 1, 1, columnas)
-    .setFontWeight('bold')
-    .setFontColor('#ffffff')
-    .setBackground(COLOR_ENCABEZADO)
-    .setWrap(true)
-    .setVerticalAlignment('middle');
-  hoja.setFrozenRows(1);
-  hoja.getRange(1, 1, total, columnas).createFilter();
-  hoja.autoResizeColumns(1, columnas);
-
-  proteger(hoja);
+  // Solo valores del espejo: conserva formatos, pestañas y dimensiones.
+  // Las filas sobrantes del snapshot se vacían dentro del rango automático.
+  solicitudes.push({ updateCells: {
+    range: { sheetId: id, startRowIndex: 0, endRowIndex: alto, startColumnIndex: 0, endColumnIndex: columnas },
+    rows: valores.map(values => ({ values })), fields: 'userEnteredValue'
+  }});
+  // Formatos originales para columnas automáticas; no se toca el resto.
+  tipos.forEach((t, i) => {
+    if (total > 1) solicitudes.push({ repeatCell: {
+      range: { sheetId: id, startRowIndex: 1, endRowIndex: total, startColumnIndex: i, endColumnIndex: i + 1 },
+      cell: { userEnteredFormat: { numberFormat: { type: t === 'texto' ? 'TEXT' : t === 'fecha' ? 'DATE' : t === 'fecha_hora' ? 'DATE_TIME' : 'NUMBER', pattern: FORMATOS[t] } } },
+      fields: 'userEnteredFormat.numberFormat'
+    }});
+  });
+  // No modificar filtros existentes ni sus criterios.
   return hoja;
 }
 
-// Deja exactamente las filas y columnas necesarias (al menos una fila libre,
-// porque Sheets no permite borrar todas las filas no inmovilizadas).
-function ajustarTamano(hoja, filas, columnas) {
-  hoja.setFrozenRows(0);
-  const filasDeseadas = filas + 1;
+// Solo ampliar dimensiones; nunca eliminar filas ni columnas.
+function ajustarTamano(hoja, filas, columnas, solicitudes) {
+  const id = hoja.getSheetId();
+  if (hoja.getMaxRows() < filas) solicitudes.push({ appendDimension: { sheetId: id, dimension: 'ROWS', length: filas - hoja.getMaxRows() } });
+  if (hoja.getMaxColumns() < columnas) solicitudes.push({ appendDimension: { sheetId: id, dimension: 'COLUMNS', length: columnas - hoja.getMaxColumns() } });
+}
 
-  const maxFilas = hoja.getMaxRows();
-  if (maxFilas < filasDeseadas) {
-    hoja.insertRowsAfter(maxFilas, filasDeseadas - maxFilas);
-  } else if (maxFilas > filasDeseadas) {
-    hoja.deleteRows(filasDeseadas + 1, maxFilas - filasDeseadas);
+// Valores tipados para Sheets API: el texto nunca se interpreta como fórmula.
+function celda(valor, tipo) {
+  if (valor === null || valor === undefined || valor === '') return {};
+  if (tipo === 'entero' || tipo === 'decimal') {
+    const n = Number(valor);
+    if (!Number.isFinite(n)) throw new Error('Número inválido.');
+    return { userEnteredValue: { numberValue: n } };
   }
-
-  const maxColumnas = hoja.getMaxColumns();
-  if (maxColumnas < columnas) {
-    hoja.insertColumnsAfter(maxColumnas, columnas - maxColumnas);
-  } else if (maxColumnas > columnas) {
-    hoja.deleteColumns(columnas + 1, maxColumnas - columnas);
+  if (tipo === 'fecha' || tipo === 'fecha_hora') {
+    const fecha = aFecha(String(valor));
+    if (!fecha) throw new Error('Fecha inválida.');
+    const serial = Date.UTC(fecha.getFullYear(), fecha.getMonth(), fecha.getDate(), fecha.getHours(), fecha.getMinutes(), fecha.getSeconds()) / 86400000 + 25569;
+    return { userEnteredValue: { numberValue: serial } };
   }
+  return { userEnteredValue: { stringValue: String(valor) } };
 }
 
 function convertir(valor, tipo) {
@@ -309,52 +339,29 @@ function proteger(hoja) {
   }
 }
 
-// La hoja nueva trae "Hoja 1"; se quita si quedó vacía y no se usa.
+// No eliminar hojas iniciales: pueden contener formatos o conexiones.
 function quitarHojaInicialVacia(libro, usadas) {
-  ['Hoja 1', 'Hoja1', 'Sheet1'].forEach((nombre) => {
-    const hoja = libro.getSheetByName(nombre);
-    if (hoja && usadas.indexOf(nombre) === -1 && hoja.getLastRow() === 0 && libro.getSheets().length > 1) {
-      libro.deleteSheet(hoja);
-    }
-  });
+  return;
 }
 
-function registrar(libro, datos, resumen) {
-  let hoja = libro.getSheetByName(HOJA_REGISTRO);
-  if (!hoja) {
-    hoja = libro.insertSheet(HOJA_REGISTRO);
-    hoja.appendRow(['Fecha', 'Origen', 'Usuario', 'Evento', 'Hojas', 'Filas']);
-    hoja.getRange(1, 1, 1, 6).setFontWeight('bold').setFontColor('#ffffff').setBackground(COLOR_ENCABEZADO);
-    hoja.setFrozenRows(1);
-    hoja.getRange('A:A').setNumberFormat('dd/mm/yyyy hh:mm:ss');
-    proteger(hoja);
+function registrar(libro, datos, resumen, solicitudes) {
+  const hoja = libro.getSheetByName(HOJA_REGISTRO);
+  if (!hoja) throw new Error('Falta Registro de envíos.');
+  const encabezados = ['Fecha', 'Origen', 'Usuario', 'Evento', 'Hojas', 'Filas'];
+  if (hoja.getRange(1, 1, 1, 6).getDisplayValues()[0].some((v, i) => v !== encabezados[i])) {
+    throw new Error('Encabezados del registro diferentes.');
   }
-
-  hoja.insertRowAfter(1);
-  hoja
-    .getRange(2, 1, 1, 6)
-    .setValues([
-      [
-        new Date(),
-        convertir(datos.origen || '', 'texto'),
-        convertir(datos.usuario || '', 'texto'),
-        convertir(datos.evento || '', 'texto'),
-        resumen.map((r) => r.nombre).join(', '),
-        resumen.reduce((suma, r) => suma + r.filas, 0),
-      ],
-    ])
-    // La fila insertada hereda el estilo del encabezado; se limpia.
-    .setFontWeight('normal')
-    .setFontColor('#000000')
-    .setBackground(null);
-
-  // El más reciente arriba; se conservan los últimos MAX_REGISTRO.
-  const sobrantes = hoja.getLastRow() - 1 - MAX_REGISTRO;
-  if (sobrantes > 0) {
-    hoja.deleteRows(MAX_REGISTRO + 2, sobrantes);
-  }
-  libro.setActiveSheet(hoja);
-  libro.moveActiveSheet(libro.getSheets().length);
+  // Mantener el orden original: más reciente arriba, sin recortar el historial.
+  const id = hoja.getSheetId();
+  solicitudes.push({ insertDimension: { range: { sheetId: id, dimension: 'ROWS', startIndex: 1, endIndex: 2 }, inheritFromBefore: false } });
+  const fecha = Utilities.formatDate(new Date(), 'America/Bogota', "yyyy-MM-dd'T'HH:mm:ss");
+  const valores = [fecha, datos.origen || '', datos.usuario || '', datos.evento || '',
+    resumen.map(r => r.nombre).join(', '), resumen.reduce((suma, r) => suma + r.filas, 0)];
+  solicitudes.push({ updateCells: { start: { sheetId: id, rowIndex: 1, columnIndex: 0 },
+    rows: [{ values: valores.map((v, i) => celda(v, i === 0 ? 'fecha_hora' : i === 5 ? 'entero' : 'texto')) }], fields: 'userEnteredValue' } });
+  solicitudes.push({ repeatCell: { range: { sheetId: id, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 6 },
+    cell: { userEnteredFormat: { textFormat: { bold: false }, backgroundColor: { red: 1, green: 1, blue: 1 } } },
+    fields: 'userEnteredFormat.textFormat.bold,userEnteredFormat.backgroundColor' } });
 }
 
 function responder(objeto) {
