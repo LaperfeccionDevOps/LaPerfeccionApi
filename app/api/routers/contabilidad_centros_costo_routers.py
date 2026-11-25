@@ -277,6 +277,12 @@ class SedeIn(BaseModel):
     nuevo: bool = False
 
 
+class VinculacionClienteIn(BaseModel):
+    modo: Literal["existente", "nuevo"]
+    id_cliente: int | None = Field(None, gt=0)
+    nombre: str | None = Field(None, max_length=300)
+
+
 class CrearCentroCostoIn(BaseModel):
     # Proyecto existente (código CEN 1) o cliente y proyecto nuevos; uno de los dos.
     proyecto_codigo: str | None = Field(None, max_length=20)
@@ -290,6 +296,7 @@ class CrearCentroCostoIn(BaseModel):
     fecha_fin_proyecto: date | None = None
     # Opcional; queda como motivo del registro CREADO en el historial.
     observacion: str | None = Field(None, max_length=500)
+    vinculacion_cliente: VinculacionClienteIn | None = None
 
 
 class FechasProyectoIn(BaseModel):
@@ -308,6 +315,21 @@ class CambioEstadoIn(BaseModel):
 # ─────────────────────────────────────────────
 # Filtros
 # ─────────────────────────────────────────────
+@router.get("/clientes-operativos")
+def listar_clientes_operativos(
+    db: Session = Depends(get_db),
+    current=Depends(require_contabilidad),
+):
+    _validar_usuario_vinculacion(current)
+    filas = db.execute(text("""
+        SELECT "IdCliente" AS id, "Nombre" AS nombre
+        FROM public."Cliente"
+        WHERE "Activo" IS NOT FALSE
+        ORDER BY "Nombre", "IdCliente"
+    """)).mappings().all()
+    return [dict(f) for f in filas]
+
+
 @router.get("/filtros", response_model=FiltrosCentrosCostoOut)
 def obtener_filtros(
     db: Session = Depends(get_db),
@@ -1845,6 +1867,49 @@ def _resolver_sede(db: Session, entrada: SedeIn, id_proyecto: int, codigo_proyec
     ).scalar()
 
 
+def _validar_usuario_vinculacion(current: dict):
+    usuario = current.get("usuario")
+    if usuario is None or getattr(usuario, "HashEstado", None) != "ACTIVO":
+        raise _error(status.HTTP_403_FORBIDDEN, "Usuario no activo.")
+
+
+def _vincular_cliente_operativo(db: Session, entrada: VinculacionClienteIn, id_centro: int, usuario: str):
+    if entrada.modo == "existente":
+        if entrada.id_cliente is None or entrada.nombre is not None:
+            raise _error(status.HTTP_400_BAD_REQUEST, "Seleccione únicamente un cliente existente.")
+        id_cliente = db.execute(text("""
+            SELECT "IdCliente" FROM public."Cliente"
+            WHERE "IdCliente" = :id AND "Activo" IS NOT FALSE
+            FOR SHARE
+        """), {"id": entrada.id_cliente}).scalar()
+        if id_cliente is None:
+            raise _error(status.HTTP_400_BAD_REQUEST, "El cliente no existe o está inactivo.")
+    else:
+        nombre = " ".join((entrada.nombre or "").split())
+        if not nombre or entrada.id_cliente is not None:
+            raise _error(status.HTTP_400_BAD_REQUEST, "Indique únicamente el nombre del nuevo cliente.")
+        # Serializa altas incluso frente a INSERT de otros procesos durante esta transacción.
+        db.execute(text("SET LOCAL lock_timeout = '5s'"))
+        db.execute(text('LOCK TABLE public."Cliente" IN SHARE ROW EXCLUSIVE MODE'))
+        duplicado = db.execute(text("""
+            SELECT 1 FROM public."Cliente"
+            WHERE lower(btrim(regexp_replace("Nombre", '[[:space:]]+', ' ', 'g'))) = lower(:nombre)
+            LIMIT 1
+        """), {"nombre": nombre}).first()
+        if duplicado:
+            raise _error(status.HTTP_409_CONFLICT, "Ya existe un cliente con ese nombre. Revise el catálogo.")
+        id_cliente = db.execute(text("""
+            INSERT INTO public."Cliente" ("Nombre", "Activo", "FechaCreacion", "CreadoPor")
+            VALUES (:nombre, true, now(), :usuario)
+            RETURNING "IdCliente"
+        """), {"nombre": nombre, "usuario": usuario}).scalar_one()
+    db.execute(text("""
+        INSERT INTO public."RelacionClienteCentroCostoContable"
+            ("IdCliente", "IdCentroCostoContable", "Origen", "CreadoPor")
+        VALUES (:cliente, :centro, 'CREACION_CONTABILIDAD', :usuario)
+    """), {"cliente": id_cliente, "centro": id_centro, "usuario": usuario})
+
+
 @router.post("", response_model=CentroCostoDetalleOut, status_code=status.HTTP_201_CREATED)
 def crear_centro_costo(
     payload: CrearCentroCostoIn,
@@ -1944,6 +2009,10 @@ def crear_centro_costo(
                 "usuario": usuario,
             },
         ).scalar()
+
+        if payload.vinculacion_cliente is not None:
+            _validar_usuario_vinculacion(current)
+            _vincular_cliente_operativo(db, payload.vinculacion_cliente, id_centro, usuario)
 
         db.commit()
     except HTTPException:
