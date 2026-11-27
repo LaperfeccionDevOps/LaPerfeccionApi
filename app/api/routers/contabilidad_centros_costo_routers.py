@@ -35,9 +35,10 @@ TAMANO_PAGINA_MAXIMO = 200
 
 
 PERMISO_GESTION_CONTABILIDAD = "CONTABILIDAD_CENTROS_COSTO_GESTIONAR"
+PERMISO_CONSULTA_CONTABILIDAD = "CONTABILIDAD_CENTROS_COSTO_CONSULTAR"
 
 
-def require_contabilidad(current=Depends(get_current_user)):
+def _puede_consultar_contabilidad(current: dict, db: Session) -> bool:
     _validar_usuario_vinculacion(current)
     roles_ids = {
         int(id_rol)
@@ -45,7 +46,13 @@ def require_contabilidad(current=Depends(get_current_user)):
         if str(id_rol).strip()
     }
 
-    if roles_ids & ROLES_PERMITIDOS:
+    return bool(roles_ids & ROLES_PERMITIDOS) or _tiene_permiso_contabilidad(
+        current, db, PERMISO_CONSULTA_CONTABILIDAD
+    ) or _puede_gestionar_contabilidad(current, db)
+
+
+def require_contabilidad(current=Depends(get_current_user), db: Session = Depends(get_db)):
+    if _puede_consultar_contabilidad(current, db):
         return current
 
     raise HTTPException(
@@ -54,7 +61,7 @@ def require_contabilidad(current=Depends(get_current_user)):
     )
 
 
-def _puede_gestionar_contabilidad(current: dict, db: Session) -> bool:
+def _tiene_permiso_contabilidad(current: dict, db: Session, codigo: str) -> bool:
     usuario = current["usuario"]
     return bool(db.execute(
         text("""
@@ -70,8 +77,12 @@ def _puede_gestionar_contabilidad(current: dict, db: Session) -> bool:
                   AND u."HashEstado" = 'ACTIVO'
             )
         """),
-        {"id_usuario": usuario.IdUsuario, "codigo": PERMISO_GESTION_CONTABILIDAD},
+        {"id_usuario": usuario.IdUsuario, "codigo": codigo},
     ).scalar())
+
+
+def _puede_gestionar_contabilidad(current: dict, db: Session) -> bool:
+    return _tiene_permiso_contabilidad(current, db, PERMISO_GESTION_CONTABILIDAD)
 
 
 def require_contabilidad_gestion(
@@ -88,12 +99,13 @@ def require_contabilidad_gestion(
 
 @router.get("/permisos")
 def obtener_permisos_contabilidad(
-    current=Depends(require_contabilidad),
+    current=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    puede_consultar = _puede_consultar_contabilidad(current, db)
     return {
-        "puede_consultar": True,
-        "puede_gestionar": _puede_gestionar_contabilidad(current, db),
+        "puede_consultar": puede_consultar,
+        "puede_gestionar": puede_consultar and _puede_gestionar_contabilidad(current, db),
     }
 
 

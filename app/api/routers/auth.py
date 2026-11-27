@@ -506,6 +506,15 @@ def listar_areas_trabajo_snc(
 
 # ------------------ Users / roles management ------------------
 
+@router.get("/auth/roles")
+def listar_roles(
+    db: Session = Depends(get_db),
+    current=Depends(require_roles_ids(ROL_SUPER_ADMIN)),
+):
+    filas = db.query(Rol.IdRol, Rol.NombreRol).order_by(Rol.IdRol).all()
+    return [{"id_rol": int(f[0]), "nombre_rol": f[1]} for f in filas]
+
+
 @router.post(
     "/auth/registro-usuario",
     status_code=status.HTTP_201_CREATED,
