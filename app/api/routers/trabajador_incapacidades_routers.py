@@ -23,6 +23,7 @@ from domain.models.trabajador_incapacidades import (
     IncapacidadTrabajador,
 )
 from infrastructure.db.deps import get_db
+from utilidades.cola_incapacidades_service import encolar_incapacidad
 from infrastructure.security.auth_dependencies import (
     get_current_trabajador,
 )
@@ -1495,6 +1496,12 @@ async def reenviar_incapacidad_corregida(
                 id_correccion,
         )
 
+        db.flush()
+        encolar_incapacidad(
+            db,
+            int(incapacidad.IdIncapacidadTrabajador),
+        )
+
         db.commit()
 
         db.refresh(
@@ -2454,6 +2461,12 @@ async def registrar_incapacidad_trabajador(
                     timezone.utc
                 )
             )
+
+        db.flush()
+        encolar_incapacidad(
+            db,
+            int(incapacidad.IdIncapacidadTrabajador),
+        )
 
         db.commit()
 

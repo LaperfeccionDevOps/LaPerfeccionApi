@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from infrastructure.db.deps import get_db
 from infrastructure.security.auth_dependencies import get_current_user
 from services.email_service import enviar_correo_sin_adjunto
+from utilidades.cola_incapacidades_service import encolar_incapacidad
 
 
 router = APIRouter(
@@ -78,6 +79,7 @@ class NegarIncapacidadRequest(BaseModel):
 
 
 class PagarIncapacidadRequest(BaseModel):
+    fecha_pago: date
     valor_pagado: Decimal = Field(..., gt=0, max_digits=14, decimal_places=2)
 
 
@@ -312,6 +314,7 @@ def _incapacidad_a_dict(fila):
         "fecha_radicacion": fila["FechaRadicacion"],
         "causal_negacion": fila["CausalNegacion"],
         "valor_pagado": fila["ValorPagado"],
+        "fecha_pago": fila["FechaPago"],
         "fecha_creacion": fila["FechaCreacion"],
         "fecha_actualizacion": fila["FechaActualizacion"],
         "total_documentos": int(fila["TotalDocumentos"] or 0),
@@ -1788,6 +1791,7 @@ def listar_incapacidades_nomina(
             i."FechaRadicacion",
             i."CausalNegacion",
             i."ValorPagado",
+            i."FechaPago",
             i."FechaCreacion",
             i."FechaActualizacion",
             COUNT(d."IdDocumentoIncapacidadTrabajador") AS "TotalDocumentos",
@@ -1884,6 +1888,7 @@ def listar_incapacidades_nomina(
             i."FechaRadicacion",
             i."CausalNegacion",
             i."ValorPagado",
+            i."FechaPago",
             i."FechaCreacion",
             i."FechaActualizacion",
             corr."FueCorregida",
@@ -1948,6 +1953,7 @@ def obtener_detalle_incapacidad_nomina(
             i."FechaRadicacion",
             i."CausalNegacion",
             i."ValorPagado",
+            i."FechaPago",
             i."FechaCreacion",
             i."FechaActualizacion",
             (
@@ -2158,6 +2164,7 @@ def actualizar_tipo_incapacidad_nomina(
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     return {
@@ -2337,6 +2344,7 @@ def actualizar_datos_incapacidad_nomina(
             id_incapacidad,
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     return {
@@ -2403,6 +2411,7 @@ def aprobar_incapacidad_nomina(
         db.rollback()
         _resolver_incapacidad_no_actualizada(db, id_incapacidad)
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     correo_enviado, detalle_correo = _enviar_notificacion_gestion(
@@ -2498,6 +2507,7 @@ def rechazar_incapacidad_nomina(
             token_plano=token_plano,
         )
 
+        encolar_incapacidad(db, id_incapacidad)
         db.commit()
 
     except HTTPException:
@@ -2555,17 +2565,30 @@ def marcar_pendiente_radicacion_nomina(
     usuario_actual=Depends(get_current_user),
 ):
     _validar_acceso_nomina(usuario_actual)
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Registre el número y la fecha de radicación mediante la opción Radicar incapacidad.",
+    )
+
+
+@router.put("/{id_incapacidad}/sin-recobro")
+def marcar_sin_recobro_nomina(
+    id_incapacidad: int,
+    db: Session = Depends(get_db),
+    usuario_actual=Depends(get_current_user),
+):
+    _validar_acceso_nomina(usuario_actual)
 
     consulta = text(
         """
         UPDATE public."IncapacidadTrabajador"
         SET
-            "Estado" = 'PENDIENTE RADICACION',
+            "Estado" = 'SIN RECOBRO',
             "FechaActualizacion" = CURRENT_TIMESTAMP
         WHERE
             "IdIncapacidadTrabajador" = :id_incapacidad
             AND "Activo" = TRUE
-            AND UPPER(COALESCE("Estado", '')) = 'APROBADA'
+            AND UPPER(COALESCE("Estado", '')) IN ('APROBADA', 'PENDIENTE RADICACION')
         RETURNING
             "IdIncapacidadTrabajador",
             "Estado",
@@ -2610,18 +2633,19 @@ def marcar_pendiente_radicacion_nomina(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Solo una incapacidad en estado APROBADA puede pasar "
-                "a PENDIENTE RADICACION. "
+                "Solo una incapacidad APROBADA o PENDIENTE RADICACION puede pasar "
+                "a SIN RECOBRO. "
                 f"Estado actual: {estado}."
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     return {
         "success": True,
         "message": (
-            "Incapacidad marcada como pendiente de radicación correctamente."
+            "Incapacidad enviada a SIN RECOBRO correctamente."
         ),
         "data": {
             "id_incapacidad": fila["IdIncapacidadTrabajador"],
@@ -2655,19 +2679,14 @@ def radicar_incapacidad_nomina(
         """
         UPDATE public."IncapacidadTrabajador"
         SET
-            "Estado" = CASE
-                WHEN COALESCE("DiasIncapacidad", 0) IN (1, 2)
-                     AND COALESCE("EsProrroga", FALSE) = FALSE
-                    THEN 'SIN RECOBRO'
-                ELSE 'RADICADO'
-            END,
+            "Estado" = 'RADICADO',
             "NumeroRadicado" = :numero_radicado,
             "FechaRadicacion" = :fecha_radicacion,
             "FechaActualizacion" = CURRENT_TIMESTAMP
         WHERE
             "IdIncapacidadTrabajador" = :id_incapacidad
             AND "Activo" = TRUE
-            AND UPPER(COALESCE("Estado", '')) = 'PENDIENTE RADICACION'
+            AND UPPER(COALESCE("Estado", '')) IN ('APROBADA', 'SIN RECOBRO', 'SIN_RECOBRO', 'PENDIENTE RADICACION')
         RETURNING
             "IdIncapacidadTrabajador",
             "Estado",
@@ -2716,21 +2735,18 @@ def radicar_incapacidad_nomina(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Solo una incapacidad en estado PENDIENTE RADICACION "
+                "Solo una incapacidad APROBADA, SIN RECOBRO o PENDIENTE RADICACION "
                 "puede pasar a RADICADO. "
                 f"Estado actual: {estado}."
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     return {
         "success": True,
-        "message": (
-            "Incapacidad enviada a SIN RECOBRO correctamente."
-            if str(fila["Estado"] or "").strip().upper() == "SIN RECOBRO"
-            else "Incapacidad radicada correctamente."
-        ),
+        "message": "Incapacidad radicada correctamente.",
         "data": {
             "id_incapacidad": fila["IdIncapacidadTrabajador"],
             "estado": fila["Estado"],
@@ -2826,6 +2842,7 @@ def negar_incapacidad_nomina(
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     correo_enviado, detalle_correo = _enviar_notificacion_gestion(
@@ -2926,6 +2943,7 @@ def marcar_en_proceso_pago_nomina(
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     correo_enviado, detalle_correo = _enviar_notificacion_gestion(
@@ -2974,11 +2992,12 @@ def pagar_incapacidad_nomina(
         SET
             "Estado" = 'PAGADO',
             "ValorPagado" = :valor_pagado,
+            "FechaPago" = :fecha_pago,
             "FechaActualizacion" = CURRENT_TIMESTAMP
         WHERE
             "IdIncapacidadTrabajador" = :id_incapacidad
             AND "Activo" = TRUE
-            AND UPPER(COALESCE("Estado", '')) = 'EN PROCESO DE PAGO'
+            AND UPPER(COALESCE("Estado", '')) IN ('RADICADO', 'EN PROCESO DE PAGO')
         RETURNING
             "IdIncapacidadTrabajador",
             "Estado",
@@ -2989,6 +3008,7 @@ def pagar_incapacidad_nomina(
             "FechaRadicacion",
             "CausalNegacion",
             "ValorPagado",
+            "FechaPago",
             "FechaActualizacion"
         """
     )
@@ -2998,6 +3018,7 @@ def pagar_incapacidad_nomina(
         {
             "id_incapacidad": id_incapacidad,
             "valor_pagado": valor_pagado,
+            "fecha_pago": payload.fecha_pago,
         },
     ).mappings().first()
 
@@ -3028,12 +3049,13 @@ def pagar_incapacidad_nomina(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Solo una incapacidad en estado EN PROCESO DE PAGO "
+                "Solo una incapacidad en estado RADICADO o EN PROCESO DE PAGO "
                 "puede pasar a PAGADO. "
                 f"Estado actual: {estado}."
             ),
         )
 
+    encolar_incapacidad(db, id_incapacidad)
     db.commit()
 
     correo_enviado, detalle_correo = _enviar_notificacion_gestion(
@@ -3057,6 +3079,7 @@ def pagar_incapacidad_nomina(
             "fecha_radicacion": fila["FechaRadicacion"],
             "causal_negacion": fila["CausalNegacion"],
             "valor_pagado": fila["ValorPagado"],
+        "fecha_pago": fila["FechaPago"],
             "fecha_actualizacion": fila["FechaActualizacion"],
         },
     }
