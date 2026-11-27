@@ -14,7 +14,7 @@ router = APIRouter(
 )
 
 #  Cambia esta versión cada vez que modifiques el archivo, para validar en Postman
-ROUTER_VERSION = "V7-CATALOGO-DINAMICO-CLIENTES"
+ROUTER_VERSION = "V8-SEG001-ASIGNACION-PROTEGIDA"
 
 # ----------------------------
 # Schemas
@@ -209,6 +209,19 @@ def listar_catalogo_clientes(
     return [dict(fila) for fila in filas]
 
 
+# SEG-001: seguridad localizada, sin modificar la autenticación global.
+def _validar_acceso_asignacion(current: dict, *, escritura: bool = False):
+    usuario = current.get("usuario")
+    if usuario is None:
+        raise HTTPException(status_code=401, detail="Sesión sin usuario válido.")
+    if (getattr(usuario, "HashEstado", None) or "").strip().upper() != "ACTIVO":
+        raise HTTPException(status_code=403, detail="Usuario inactivo.")
+    roles = set(current.get("roles_ids", []))
+    permitidos = {2} if escritura else {1, 2, 3, 5, 15}
+    if not roles.intersection(permitidos):
+        raise HTTPException(status_code=403, detail="Sin permiso para gestionar esta asignación." if escritura else "Sin permiso para consultar esta asignación.")
+
+
 # ----------------------------
 # GET
 # ----------------------------
@@ -217,7 +230,8 @@ def listar_catalogo_clientes(
     response_model=AsignacionOut,
     response_model_exclude_none=False,
 )
-def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db)):
+def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db), current: dict = Depends(get_current_user)):
+    _validar_acceso_asignacion(current)
     print(f"[asignacion-cargo-cliente] {ROUTER_VERSION} - GET: {id_registro_personal}")
 
     try:
@@ -284,7 +298,8 @@ def obtener_asignacion(id_registro_personal: int, db: Session = Depends(get_db))
     response_model=AsignacionOut,
     response_model_exclude_none=False,
 )
-def upsert_asignacion(payload: AsignacionUpsertIn, db: Session = Depends(get_db)):
+def upsert_asignacion(payload: AsignacionUpsertIn, db: Session = Depends(get_db), current: dict = Depends(get_current_user)):
+    _validar_acceso_asignacion(current, escritura=True)
     print(f" [asignacion-cargo-cliente] {ROUTER_VERSION} - POST UPSERT:", payload.IdRegistroPersonal)
 
     # 1) Guardar/actualizar
